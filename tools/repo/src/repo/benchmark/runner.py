@@ -184,6 +184,8 @@ def _run_matrix(directory, report, document, root, runner, request):
                 measured=outcomes["measured"],
                 correct=outcomes["correct_by_deadline"],
                 workflow_results=workflow_results,
+                bulk_reads=workflow_results.get("bulk"),
+                paired_gate=(workflow_results.get("paired") or {}).get("gate"),
                 streaming_p95={
                     metric: samples.get(metric, {}).get("quantiles", {}).get("p95")
                     for metric in model.PRIMARY_STREAMING_METRICS
@@ -195,6 +197,12 @@ def _run_matrix(directory, report, document, root, runner, request):
                 correct = workflow_results["history_correct"]
                 measured = workflow_results["history_measured"]
                 status += f", history {correct}/{measured} correct"
+            if "bulk" in workflow_results:
+                bulk = workflow_results["bulk"]
+                status += (
+                    f", bulk {bulk['successful_reads']}/{bulk['expected_reads']} reads"
+                    f" / {bulk['bytes_verified']}/{bulk['bytes_expected']} bytes"
+                )
             runner.out.info(status)
             if result.exit_code == EXIT_INTERRUPTED:
                 raise KeyboardInterrupt
@@ -376,14 +384,17 @@ def _load(path, errors, interrupted):
 
 def _placeholder(request, errors):
     """Facts that make an unsuccessful run explicit without inventing attempts."""
+    configuration = request.as_configuration()
+    scenario = model.scenario(configuration)
+    final_bytes = len(scenario["response"]["final_text"].encode())
     return {
         "schema_version": model.SCHEMA_VERSION,
-        "scenario": model.scenario(request.as_configuration()),
+        "scenario": scenario,
         "run": {
             "id": "unavailable",
             "started_at": datetime.now(UTC).isoformat(),
             "surface": model.OBSERVATION_SURFACE,
-            "configuration": request.as_configuration(),
+            "configuration": configuration,
         },
         "environment": {
             "artifacts": {"benchmark": "unavailable"},
@@ -409,9 +420,16 @@ def _placeholder(request, errors):
             "tails": [{"name": "p95", "state": "unavailable", "reason": "run_not_executed"}],
         },
         "streaming": model.streaming_summary(
-            [], 0, burst_window_ms=model.BURST_WINDOW_MS, display_delay=True
+            [], final_bytes, burst_window_ms=model.BURST_WINDOW_MS, display_delay=True
         ),
-        "workflow_results": model.workflow_summary([], request.workflow),
+        "workflow_results": model.workflow_summary(
+            [],
+            request.workflow,
+            final_bytes=final_bytes,
+            sizes=model.source_sizes(scenario),
+            paired=scenario["version"] >= 7 and request.workflow == "mixed-load",
+            burst_window_ms=model.BURST_WINDOW_MS,
+        ),
         "status": {
             "state": "invalid",
             "reasons": errors or ["run_not_executed"],

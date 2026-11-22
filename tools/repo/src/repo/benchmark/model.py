@@ -17,14 +17,36 @@ from pathlib import Path
 from statistics import median
 
 from ..errors import RepoError
+from . import analysis
 
 SCHEMA_VERSION = 1
 SCENARIO_ID = "streaming-reply"
-SCENARIO_VERSION = 6
+SCENARIO_VERSION = 7
 OBSERVATION_SURFACE = "cli-stdout"
 MAX_HOST_BROKER_EXTRA_RTT_MS = 1000
 NETWORK_PROBE_COUNT = 5
 BURST_WINDOW_MS = 50
+# AC-19 pairs one watch-only arm against one concurrent bulk-read arm at the
+# same cadence, deadline and network profile. Arm order is deterministic, so a
+# pair identity is meaningful without storing wall-clock order.
+ARMS = ("idle", "bulk")
+PAIR_PHASES = ("warmup", "measured")
+ATTACHMENT_BYTES = 1 << 20
+ATTACHMENT_SEED = 7
+ATTACHMENT_NAME = "benchmark-attachment.bin"
+ATTACHMENT_MEDIA_TYPE = "application/octet-stream"
+PAIR_STREAMING_METRICS = (
+    "max_display_delay_ms",
+    "longest_output_gap_ms",
+    "largest_output_share",
+    "final_output_share",
+)
+PAIR_STREAMING_LABELS = {
+    "max_display_delay_ms": ("maximum display delay", "ms"),
+    "longest_output_gap_ms": ("longest output gap", "ms"),
+    "largest_output_share": ("largest output share", "%"),
+    "final_output_share": ("final output share", "%"),
+}
 NETWORK_PROFILES = {
     "normal": (0, 0, 0.0),
     "high-rtt": (280, 0, 0.0),
@@ -127,17 +149,27 @@ def shaped_links(network):
     return ("host", "client") if network["link"] == "both" else (network["link"],)
 
 
-def workload_controls(workflow, cadence_ms):
+def workload_controls(workflow, cadence_ms, *, paired=False):
     if workflow == "recovery":
         return {"outage": {"start_ms": 8 * cadence_ms, "duration_ms": min(1000, 10 * cadence_ms)}}
     if workflow == "mixed-load":
-        return {
+        controls = {
             "history": {
                 "start_ms": [index * cadence_ms for index in (4, 7, 10, 13)],
                 "messages": 8,
                 "bytes_per_message": 8192,
             }
         }
+        if paired:
+            controls["attachment"] = {
+                "start_ms": [5 * cadence_ms],
+                "bytes": ATTACHMENT_BYTES,
+                "seed": ATTACHMENT_SEED,
+                "name": ATTACHMENT_NAME,
+                "media_type": ATTACHMENT_MEDIA_TYPE,
+            }
+            controls["pairing"] = {"arms": list(ARMS), "pattern": "alternating"}
+        return controls
     return {}
 
 
@@ -164,7 +196,7 @@ def scenario(configuration):
             "gap_ms": gap,
             "delivery": "immediate",
             "workflow": workflow,
-            **workload_controls(workflow, gap),
+            **workload_controls(workflow, gap, paired=True),
         },
         "response": {
             "start_ms": 0,
@@ -326,7 +358,7 @@ def _scenario(scenario):
         invalid("scenario is not an object")
     if scenario.get("id") != SCENARIO_ID:
         invalid("unknown scenario identity")
-    if scenario.get("version") not in (1, 2, 3, 4, 5, SCENARIO_VERSION):
+    if scenario.get("version") not in (1, 2, 3, 4, 5, 6, SCENARIO_VERSION):
         invalid("unknown scenario version")
     for key in ("seed", "deadline_ms", "observation_window_ms", "response", "workload"):
         if key not in scenario:
@@ -436,7 +468,15 @@ def _link_network(document):
         invalid("a complete run requires netem packet and drop counters")
 
 
-def workflow_summary(attempts, workflow):
+def workflow_summary(
+    attempts,
+    workflow,
+    *,
+    final_bytes=None,
+    sizes=None,
+    paired=False,
+    burst_window_ms=None,
+):
     measured = list(_measured(attempts))
     if workflow == "recovery":
         delays = [
@@ -455,26 +495,146 @@ def workflow_summary(attempts, workflow):
             "history_measured": len(reads),
             "history_read_ms": sample_entry(sorted(completed)),
         }
-        errors = Counter(read["error_code"] for read in reads if "error_code" in read)
+        errors = _error_histogram(reads)
         if errors:
-            result["history_errors"] = dict(sorted(errors.items()))
+            result["history_errors"] = errors
+        if paired:
+            attachments = [
+                read for attempt in measured for read in attempt.get("attachment_reads", [])
+            ]
+            attachment_completed = [
+                read["duration_ms"] for read in attachments if read["outcome"] == "completed"
+            ]
+            result.update(
+                {
+                    "attachment_correct": len(attachment_completed),
+                    "attachment_measured": len(attachments),
+                    "attachment_read_ms": sample_entry(sorted(attachment_completed)),
+                }
+            )
+            if attachment_errors := _error_histogram(attachments):
+                result["attachment_errors"] = attachment_errors
+            bulk = _bulk_summary(measured)
+            result["bulk"] = bulk
+            result["arms"] = _arm_streaming_summary(measured, final_bytes, sizes, burst_window_ms)
+            pairs = _paired_values(measured, final_bytes, sizes, burst_window_ms)
+            result["paired"] = analysis.paired_arm_comparison(pairs)
         return result
     return {}
 
 
+def _error_histogram(reads):
+    errors = Counter(read["error_code"] for read in reads if read.get("error_code"))
+    return dict(sorted(errors.items()))
+
+
+def _read_bucket(reads):
+    expected_bytes = sum(read.get("expected_bytes", 0) for read in reads)
+    completed = [read for read in reads if read["outcome"] == "completed"]
+    return {
+        "expected_reads": len(reads),
+        "successful_reads": len(completed),
+        "bytes_expected": expected_bytes,
+        "bytes_verified": sum(read["bytes"] for read in completed),
+        "errors": _error_histogram(reads),
+    }
+
+
+def _bulk_summary(attempts):
+    by_arm = {}
+    for arm in ARMS:
+        reads = [
+            read
+            for attempt in attempts
+            if attempt.get("arm") == arm
+            for read in (
+                *(attempt.get("history_reads") or []),
+                *(attempt.get("attachment_reads") or []),
+            )
+        ]
+        by_arm[arm] = _read_bucket(reads)
+    bulk = dict(by_arm["bulk"])
+    bulk["by_arm"] = by_arm
+    bulk["gate"] = analysis.bulk_read_gate(bulk)
+    return bulk
+
+
+def _arm_streaming_summary(attempts, final_bytes, sizes, burst_window_ms):
+    result = {}
+    for arm in ARMS:
+        selected = [attempt for attempt in attempts if attempt.get("arm") == arm]
+        completed = [attempt for attempt in selected if attempt["outcome"] == "completed"]
+        samples = [
+            streaming_values(attempt, final_bytes, sizes, burst_window_ms, display_delay=True)
+            for attempt in completed
+        ]
+        result[arm] = {
+            "measured": len(selected),
+            "correct": len(completed),
+            "samples": {
+                metric: sample_entry(sorted(row[metric] for row in samples))
+                for metric in PAIR_STREAMING_METRICS
+            },
+        }
+    return result
+
+
+def _paired_values(attempts, final_bytes, sizes, burst_window_ms):
+    groups = {}
+    for attempt in attempts:
+        groups.setdefault(attempt["pair_id"], {})[attempt["arm"]] = attempt
+    pairs = []
+    for pair_id in sorted(groups):
+        group = groups[pair_id]
+        idle, bulk = group.get("idle"), group.get("bulk")
+        entry = {
+            "pair_id": pair_id,
+            "idle_outcome": idle["outcome"] if idle else None,
+            "bulk_outcome": bulk["outcome"] if bulk else None,
+            "values": None,
+            "reason": "incomplete_pair",
+        }
+        if (
+            idle is not None
+            and bulk is not None
+            and idle["outcome"] == "completed"
+            and bulk["outcome"] == "completed"
+        ):
+            idle_values = streaming_values(
+                idle, final_bytes, sizes, burst_window_ms, display_delay=True
+            )
+            bulk_values = streaming_values(
+                bulk, final_bytes, sizes, burst_window_ms, display_delay=True
+            )
+            entry["values"] = {
+                "idle": {metric: idle_values[metric] for metric in PAIR_STREAMING_METRICS},
+                "bulk": {metric: bulk_values[metric] for metric in PAIR_STREAMING_METRICS},
+            }
+            entry["reason"] = None
+        pairs.append(entry)
+    return pairs
+
+
 def _workflow(document, attempts):
-    workload = document["scenario"]["workload"]
+    scenario = document["scenario"]
+    version = scenario["version"]
+    workload = scenario["workload"]
     configuration = document["run"]["configuration"]
     workflow = workload.get("workflow")
+    paired = version >= 7 and workflow == "mixed-load"
     if workflow not in WORKFLOWS or configuration.get("workflow") != workflow:
         invalid("scenario workflow disagrees with the run configuration")
     if any(
         workload.get(key) != expected
-        for key, expected in workload_controls(workflow, configuration["cadence_ms"]).items()
+        for key, expected in workload_controls(
+            workflow, configuration["cadence_ms"], paired=paired
+        ).items()
     ):
         invalid("scenario controls disagree with the declared workflow")
-    if workflow == "recovery" and document["scenario"]["network"]["link"] != "client":
+    if workflow == "recovery" and scenario["network"]["link"] != "client":
         invalid("recovery must control the client link")
+    if paired:
+        _pairing(attempts, complete=document["status"]["state"] == "complete")
     for attempt in attempts:
         if workflow == "recovery":
             recovery = attempt.get("recovery")
@@ -495,24 +655,112 @@ def _workflow(document, attempts):
             ):
                 invalid("the source must continue through the recovery blackout")
         if workflow == "mixed-load":
-            reads = attempt.get("history_reads")
-            if not isinstance(reads, list) or len(reads) != len(workload["history"]["start_ms"]):
-                invalid("mixed load requires an outcome for every scheduled read")
-            for read in reads:
-                if (
-                    not isinstance(read, dict)
-                    or not number(read.get("at_ms"))
-                    or not number(read.get("duration_ms"))
-                    or read.get("outcome")
-                    not in ("completed", "timeout", "incorrect_content", "product_error")
-                ):
-                    invalid("invalid history read observation")
-                if "error_code" in read and (
-                    read["outcome"] != "product_error" or not valid_error_code(read["error_code"])
-                ):
-                    invalid("invalid history read error code")
-    if document.get("workflow_results") != workflow_summary(attempts, workflow):
+            if paired:
+                _paired_reads(attempt, workload)
+            else:
+                _legacy_reads(attempt, workload)
+    final_bytes = len(scenario["response"]["final_text"].encode())
+    sizes = source_sizes(scenario) if version >= 4 else None
+    if document.get("workflow_results") != workflow_summary(
+        attempts,
+        workflow,
+        final_bytes=final_bytes,
+        sizes=sizes,
+        paired=paired,
+        burst_window_ms=BURST_WINDOW_MS,
+    ):
         invalid("workflow results disagree with attempt observations")
+
+
+def _pairing(attempts, *, complete):
+    seen_pairs = set()
+    for phase in PAIR_PHASES:
+        ordered = [attempt for attempt in attempts if attempt["phase"] == phase]
+        index = 0
+        while index < len(ordered):
+            attempt = ordered[index]
+            arm = "idle" if index % 2 == 0 else "bulk"
+            if attempt.get("arm") != arm:
+                invalid("mixed load attempts must alternate idle then bulk")
+            if index % 2 == 0:
+                if attempt["pair_id"] in seen_pairs:
+                    invalid("mixed load pair identity is duplicated")
+                seen_pairs.add(attempt["pair_id"])
+                if index + 1 >= len(ordered):
+                    if complete:
+                        invalid("mixed load requires a complete attempt pair")
+                    break
+                following = ordered[index + 1]
+                if following.get("arm") != "bulk" or following["pair_id"] != attempt["pair_id"]:
+                    invalid("mixed load requires one bulk attempt per idle pair")
+            elif attempt["pair_id"] != ordered[index - 1]["pair_id"]:
+                invalid("mixed load requires one pair identity per pair")
+            index += 1
+
+
+def _paired_reads(attempt, workload):
+    arm = attempt["arm"]
+    history = attempt.get("history_reads")
+    attachments = attempt.get("attachment_reads")
+    if arm == "idle":
+        if history or attachments:
+            invalid("the idle arm must not perform bulk reads")
+        return
+    if not isinstance(history, list) or len(history) != len(workload["history"]["start_ms"]):
+        invalid("mixed load requires an outcome for every scheduled history read")
+    if not isinstance(attachments, list) or len(attachments) != len(
+        workload["attachment"]["start_ms"]
+    ):
+        invalid("mixed load requires an outcome for every scheduled attachment read")
+    for read in history:
+        _paired_read(read, "history")
+    for read in attachments:
+        _paired_read(read, "attachment")
+        if read["outcome"] == "completed" and read["bytes"] != workload["attachment"]["bytes"]:
+            invalid("a completed attachment read must verify the declared bytes")
+
+
+def _paired_read(read, kind):
+    if (
+        not isinstance(read, dict)
+        or not all(
+            number(read.get(key))
+            for key in ("scheduled_at_ms", "started_at_ms", "at_ms", "duration_ms")
+        )
+        or not count(read.get("bytes"))
+        or not count(read.get("expected_bytes"))
+        or read.get("outcome") not in ("completed", "timeout", "incorrect_content", "product_error")
+    ):
+        invalid("invalid " + kind + " read observation")
+    if read["started_at_ms"] < read["scheduled_at_ms"]:
+        invalid(kind + " read started before its scheduled time")
+    if read["at_ms"] != read["started_at_ms"]:
+        invalid(kind + " read time disagrees with its started time")
+    if read["outcome"] == "completed" and read["bytes"] != read["expected_bytes"]:
+        invalid("a completed " + kind + " read must verify the expected bytes")
+    if "error_code" in read and (
+        read["outcome"] != "product_error" or not valid_error_code(read["error_code"])
+    ):
+        invalid("invalid " + kind + " read error code")
+
+
+def _legacy_reads(attempt, workload):
+    reads = attempt.get("history_reads")
+    if not isinstance(reads, list) or len(reads) != len(workload["history"]["start_ms"]):
+        invalid("mixed load requires an outcome for every scheduled history read")
+    for read in reads:
+        if (
+            not isinstance(read, dict)
+            or not number(read.get("at_ms"))
+            or not number(read.get("duration_ms"))
+            or read.get("outcome")
+            not in ("completed", "timeout", "incorrect_content", "product_error")
+        ):
+            invalid("invalid history read observation")
+        if "error_code" in read and (
+            read["outcome"] != "product_error" or not valid_error_code(read["error_code"])
+        ):
+            invalid("invalid history read error code")
 
 
 def _streaming(document, attempts):
@@ -688,6 +936,10 @@ def _attempts(attempts, *, complete):
         for key in ("session_id", "host_id"):
             if key in attempt and not isinstance(attempt[key], str):
                 invalid("attempt " + key + " must be text")
+        if "pair_id" in attempt and not isinstance(attempt["pair_id"], str):
+            invalid("attempt pair_id must be text")
+        if "arm" in attempt and attempt["arm"] not in ARMS:
+            invalid("attempt arm must be idle or bulk")
         _attempt(attempt)
     return attempts
 
