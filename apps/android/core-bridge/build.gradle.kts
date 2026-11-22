@@ -12,6 +12,37 @@ val crateDir = repoRoot.resolve("apps/mobile-bindings")
 val androidTarget = "aarch64-linux-android"
 val ndkVersion = "28.2.13676358"
 
+// Android Studio launched from the Dock does not inherit the shell PATH, and the
+// Gradle daemon it starts inherits that limited PATH. Resolve cargo explicitly so
+// an IDE build uses the same toolchain as a terminal build.
+val cargoExecutable: String = run {
+    val home = System.getProperty("user.home")
+    val candidates = listOfNotNull(
+        providers.environmentVariable("CARGO").orNull,
+        providers.environmentVariable("CARGO_HOME").orNull?.let { "$it/bin/cargo" },
+        "$home/.cargo/bin/cargo",
+        "/opt/homebrew/bin/cargo",
+        "/usr/local/bin/cargo",
+    )
+    candidates.firstOrNull { File(it).canExecute() } ?: "cargo"
+}
+
+// That limited PATH also hides protoc and other build tools, so cargo
+// subprocesses get the usual developer tool directories prepended.
+val toolSearchPath: String = run {
+    val home = System.getProperty("user.home")
+    val extra = listOfNotNull(
+        providers.environmentVariable("CARGO_HOME").orNull?.let { "$it/bin" },
+        "$home/.cargo/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ).filter { File(it).isDirectory }
+    (extra + (System.getenv("PATH") ?: "").split(File.pathSeparator))
+        .filter { it.isNotBlank() }
+        .distinct()
+        .joinToString(File.pathSeparator)
+}
+
 // The Core package version is the workspace version, matching build.rs.
 val workspaceVersion: String = run {
     val manifest = repoRoot.resolve("Cargo.toml").readText()
@@ -97,10 +128,11 @@ val cargoBuildHost = tasks.register<Exec>("cargoBuildHost") {
     description = "Build the host whalerein-mobile library used for UniFFI metadata"
     workingDir = repoRoot
     commandLine(
-        "cargo", "build", "--locked", "-p", "whalerein-mobile", "--lib",
+        cargoExecutable, "build", "--locked", "-p", "whalerein-mobile", "--lib",
         "--no-default-features", "--features", "cli",
         "--target-dir", rustTargetDir.get().asFile.absolutePath,
     )
+    environment("PATH", toolSearchPath)
     environment("WHALEREIN_MOBILE_SOURCE", mobileSource)
     environment("CARGO_NET_OFFLINE", "true")
     inputs.files(rustInputs)
@@ -114,7 +146,7 @@ val generateUniffiKotlin = tasks.register<Exec>("generateUniffiKotlin") {
     dependsOn(cargoBuildHost)
     workingDir = repoRoot
     commandLine(
-        "cargo", "run", "--locked", "-q", "-p", "whalerein-mobile",
+        cargoExecutable, "run", "--locked", "-q", "-p", "whalerein-mobile",
         "--no-default-features", "--features", "cli",
         "--target-dir", rustTargetDir.get().asFile.absolutePath,
         "--bin", "uniffi-bindgen", "--", "generate",
@@ -123,6 +155,7 @@ val generateUniffiKotlin = tasks.register<Exec>("generateUniffiKotlin") {
         "--out-dir", uniffiDir.get().asFile.absolutePath,
         "--no-format",
     )
+    environment("PATH", toolSearchPath)
     environment("WHALEREIN_MOBILE_SOURCE", mobileSource)
     environment("CARGO_NET_OFFLINE", "true")
     inputs.files(rustInputs)
@@ -142,7 +175,7 @@ fun registerCargoBuild(
     workingDir = repoRoot
     commandLine(
         buildList {
-            add("cargo")
+            add(cargoExecutable)
             add("build")
             add("--locked")
             add("-p")
@@ -156,6 +189,7 @@ fun registerCargoBuild(
             add(rustTargetDir.get().asFile.absolutePath)
         }
     )
+    environment("PATH", toolSearchPath)
     environment("WHALEREIN_MOBILE_SOURCE", mobileSource)
     environment("CARGO_NET_OFFLINE", "true")
     environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", androidLinker.absolutePath)
