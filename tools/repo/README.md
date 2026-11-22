@@ -25,7 +25,7 @@ without executing a task.
 | `report RUN_DIRECTORY` | Render saved report.json as report.html in the run directory. |
 | `recover RUN_DIRECTORY` | Clean up resources whose ownership is recorded in an abandoned run. |
 | `proto` | Generate committed Go/JS bindings. Use `check proto` to verify consistency. |
-| `bench` | Run the opt-in streaming-reply product benchmark in an isolated container. |
+| `bench` | Measure the plugin–Access–client path under controlled network conditions. |
 | `bench-compare -b DIR -c DIR` | Compare saved benchmark runs under the predeclared protocol. |
 
 Targets are exact IDs scoped to the action. Bare `check` selects local static
@@ -49,18 +49,23 @@ the image. The server stack separately requires Compose.
 GitHub CI compares the PR base with the tested merge revision, or a main push's
 previous revision with its new revision. Deleted/renamed paths participate in
 selection. Documentation-only changes skip product jobs; unknown inputs select
-all projects. Missing history fails selection rather than silently skipping.
+all affected projects except the Android-only state project. Missing history
+fails selection rather than silently skipping.
 
 `projects.toml` remains the project inventory. Its `depends_on` relationships
 expand affected consumers: Core changes include CLI and noise-peer; Host changes
 include DSH. Rust/Node root manifests and lockfiles select their ecosystem;
 protocol, fixtures, shared tooling, workflow, deployment and integration changes
-select all projects. Selection changes do not change local `./repo test` defaults.
+select all projects except the Android-only project. Android state source and
+shared Android Gradle inputs select only `android-state`; app and bridge changes
+belong to the explicit Android workflow. Selection changes do not change local `./repo test` defaults.
 
-The push workflow runs independent Rust, Go, Node and Python quick jobs in
-parallel, without a preceding selection job. Each job selects affected projects
-before installing toolchains. Rust only checks formatting; Go, Node and Python
-run checks and unit tests without coverage or a separate build. These are partial
+The push workflow runs independent Rust, Go, Node, Kotlin and Python quick jobs
+in parallel, without a preceding selection job. Each job selects affected
+projects before installing toolchains. Rust only checks formatting; Go, Node and
+Python run checks and unit tests without coverage or a separate build; Kotlin
+runs the JDK-only `android-state` Gradle checks and tests with JDK 21 and no
+Android SDK, NDK or device. These are partial
 iteration checks, not evidence of Rust compilation, platform behavior or coverage.
 Three minutes is the quick-job performance target, including setup and report
 upload but excluding runner queueing. A final timing step emits a warning after
@@ -72,8 +77,11 @@ still fail the checks. Superseded push runs are cancelled.
 The separate `full-ci.yml` runs on the `run-full-ci` label event, manual dispatch,
 main pushes, merge queue and nightly schedule. Leaving the label attached does
 not rerun heavy jobs on later pushes. Full verification runs checks, supported
-builds and unit coverage, plus deployment acceptance when `access` is selected
-and protocol contracts when `proto` is selected. Protocol generation is checked
+builds and unit coverage, plus deployment acceptance when `access` is selected,
+protocol contracts when `proto` is selected, and Android device suites when
+Android-facing paths changed. A manual dispatch can additionally request the
+physical-device Macrobenchmark. Android device work is never part of the
+ordinary quick `CI gate`. Protocol generation is checked
 once in the contract job rather than again in the Node job. `Full CI gate` requires every selected job; it is distinct
 from the required quick `CI gate`.
 
@@ -173,156 +181,93 @@ codes are retained in results; the CLI reports:
 There is no global dry-run or native argument passthrough. Use native tools for
 specialized options that the repository interface does not expose.
 
-## Product benchmark
+## Link performance benchmark
 
-`./repo bench` measures one client-observable workflow: a user sends a message
-while the conversation is open, and the benchmark records how long the first
-visible reply text and the correct final reply take. It uses the Linux
-integration builder and the same artifacts for the real CLI, Access, Host and
-plugin against FakeDSH. Run it explicitly with `./repo bench`.
+`./repo bench` measures delivery through the real Host plugin, broker, Access
+and CLI in an isolated Linux container. Each Watch attaches before FakeDSH
+emits a fixed 32-increment reply at an independent cadence. The first actual
+source emission starts the clock. The fixture checks for zero native sends.
 
-```bash
+```sh
 ./repo bench
-./repo bench --attempts 50 --warmup 5 --output .data/benchmarks/baseline
-./repo bench --attempts 20 --delay 50 --output .data/benchmarks/delayed-50
-./repo bench-compare -b .data/benchmarks/baseline -c .data/benchmarks/delayed-50
+./repo bench --scenario recovery
+./repo bench --scenario mixed-load
+./repo bench --network jitter --link client
+./repo bench-compare --vary network -b suite/watch-normal-host -c suite/watch-high-rtt-host
 ```
 
-| Option | Meaning |
-|---|---|
-| `--attempts N` | Measured attempts after warmup (default 30). |
-| `--warmup N` | Setup-quality attempts excluded from every result (default 3). |
-| `--delay MS` | Injected delay on the scripted reply, for calibration (default 0). |
-| `--cadence MS` | Spacing between scripted visible updates (default 100). Values at or below the product's 20 ms coalescing window make that window observable. |
-| `--deadline MS` | Per-attempt deadline measured from dispatch (default 5000). |
-| `--observation-window MS` | Window after the final reply used to detect duplicates (default 1000). |
-| `--seed N` | Recorded scenario seed (default 0). |
-| `--concurrency N` | Only the sequential value `1` is supported. |
-| `--benchmark-timeout SECONDS` | Container execution deadline (default 900). |
-| `--output DIR` | Report directory; one that already holds `benchmark.json` is rejected. |
+### Default suite
 
-### Measurement surface
+| Condition | Workload |
+| --- | --- |
+| Normal | One Watch with the default text cadence and no extra network impairment |
+| Sustained weak network | The same Watch with added RTT, jitter, and random loss as three separate cases on the Host link |
+| Brief outage | The same Watch during a client-link blackout. The fixture forces the existing Watch TCP connection down and restores the link after the scheduled interval |
+| Mixed load | The same Watch alongside four online history reads scheduled independently at fixed offsets. Each read retrieves eight 8 KiB messages through a separate CLI Device |
 
-The observation surface is **CLI stdout**, recorded by one monotonic clock in
-the driver process. Each attempt:
+The default suite runs six cases from one frozen source snapshot and build.
+Each case owns its container and `benchmark.json`. The root `suite.json` indexes
+case status, correctness, P95 streaming metrics and workflow observations.
+Failed cases stay in the report while subsequent cases run. An interruption
+leaves unstarted cases pending.
 
-1. creates a fresh session and loads it with `whalerein session show`,
-2. starts `whalerein --json session watch` and waits for its initial session state,
-3. arms the fixture's scripted reply and invokes `whalerein session send --detach`,
-4. reads watch output and records milestones.
+Set `--scenario watch`, `--scenario recovery`, or `--scenario mixed-load` for
+one workload. Supplying `--network` or `--link` also selects a single case.
+The recovery workload controls the client link so it can exercise Watch
+reconnect and catch-up. Its default blackout begins at 800 ms and lasts 1 s.
+The start follows the source cadence. The duration is capped at 1 s and
+shortens for fast cadences so source text continues during recovery.
 
-Each benchmark device starts from a selected Standalone TOML and pairs with an
-invitation passed on standard input.
+| Profile | Added RTT for each selected link | Jitter per direction | Random loss per direction |
+| --- | ---: | ---: | ---: |
+| `normal` | 0 ms | 0 ms | 0% |
+| `high-rtt` | 280 ms | 0 ms | 0% |
+| `jitter` | 280 ms | 40 ms, normal distribution | 0% |
+| `loss` | 280 ms | 0 ms | 1% |
 
-Dispatch is taken immediately before the send process starts, so first-text and
-final latency include send start-up. The fixture drives its reply schedule from
-the *acceptance* of that send on fixed relative times; nothing reads CLI output
-to decide when to emit, so the observer cannot advance or delay the schedule.
+`--link host` shapes Host MQTT. `--link client` shapes the client's MQTT and
+HTTP connections. `--link both` shapes both endpoints. The fixture probes both
+endpoint listeners and a reference listener before measurement.
 
-Two paired devices are used per run: the observer holds the live watch and the
-sender performs the measured send. A single device cannot do both, because the
-sending CLI displaces the watching CLI's live delivery.
+### Results
 
-The first-text milestone requires non-empty reply text from the current attempt.
-Lifecycle markers, empty previews, and replies carrying another attempt's
-identity never satisfy it. Attempt identity is unique per attempt, which is what
-distinguishes a reply from a previous attempt's streams.
+- **Correct by deadline** counts attempts that produce the exact final reply
+  and settle once in the observation window. Failures remain in the denominator.
+- **Maximum display delay** measures the slowest source increment in an attempt.
+  A milestone completes when the corresponding correct prefix first appears in
+  the public Watch output. An increment first shown in the final reply keeps
+  its original source timestamp.
+- **Largest 50 ms output share** counts the most visible answer bytes written
+  in any 50 ms window as a fraction of final reply bytes. It includes reprints.
 
-### Cadence and the coalescing window
+The observer timestamps public CLI records on the source's monotonic clock.
+Recovery reports the observed blackout and time from restoration until the
+correct prefix catches up with text emitted before restoration. Mixed load
+reports history correctness and time to the exact, usable online page
+separately from Watch. A failed history read makes the case exit nonzero.
+The report keeps the CLI's structured error code when available.
+The diagnostic section reports first-text latency and the distribution of
+source-to-visible delays across individual text increments from correctly
+completed measured attempts. The segment percentiles describe those increments.
+Formal comparisons still use per-attempt maximum display delay and burst
+share. Reports retain final reply and output-gap timelines for diagnosis.
 
-Core coalesces adjacent deltas for up to 20 ms or an 8 KiB target before they
-reach the client. A 100 ms cadence sits well above that window, so the measured
-update gaps describe delivery jitter; a cadence at or below it turns the
-coalescing window itself into the measurement. Use a short cadence to look for
-batch-shaped gaps (multiples of the window) rather than smooth jitter:
+Defaults are 30 measured attempts and three warmups per case, a 100 ms source
+cadence, a 10 s deadline and a 1 s duplicate observation window. Use a small
+attempt count to check execution before running the full suite.
 
-```bash
-./repo bench --cadence 20 --output .data/benchmarks/cadence-20
-./repo bench --cadence 10 --output .data/benchmarks/cadence-10
-```
+### Comparisons
 
-The recorded `scenario.workload.gap_ms` and `run.configuration.cadence_ms` must
-agree; a report whose cadence cannot settle before its deadline is rejected as
-a usage error before any container starts.
+Use identical workload, fixture, network and resource settings to compare
+builds. `--vary network` locks the build, workload and link while the profile
+changes. Repeat the same profile and build for A/A. Pair independently run
+reports in the supplied order.
 
-### Outcomes
-
-Every measured attempt records exactly one outcome:
-
-| Outcome | Meaning |
-|---|---|
-| `completed` | Correct final content observed within the deadline. |
-| `product_error` | The send command failed. |
-| `timeout_before_text` | No reply text before the deadline. |
-| `timeout_after_text` | Text appeared, but no correct final reply by the deadline. Partial timing is kept. |
-| `incorrect_content` | A final reply arrived with the wrong content. |
-| `duplicate_final` | A second final reply arrived inside the observation window. |
-| `late_reply` | A final reply was observed only after the deadline; it is never a completion. |
-
-The success share is `completed` over all measured attempts. Warmup attempts are
-reported separately and excluded from every count and sample.
-
-### Artifacts
-
-`benchmark.json` is written atomically and validated before publication. It
-carries the schema version, scenario identity and parameters, observation
-surface, build and environment metadata, per-attempt timings and outcomes,
-outcome counts, latency samples, and the run status with cleanup verification.
-
-Timings are recorded from dispatch, so `first_text_ms` and `final_ms` include CLI
-process start-up. `send_exit_ms` is when the send process exits after collecting
-its result, not a start-up or reply time. The start-up share of an attempt can be
-read back from the report's own constants: because the scripted final reply is
-emitted `scenario.response.final_ms` after acceptance, `final_ms` minus that
-constant is the dispatch-to-acceptance interval. For the default scenario that is
-roughly 290 ms, against roughly 5 ms from acceptance to first visible text, so the
-headline first-text number is dominated by process start-up rather than by
-delivery.
-
-Latency samples cover only correctly completed attempts and report nearest-rank
-median, p95, and p99 with the actual sample count. A quantile that the sample
-count cannot support is labelled unavailable with its reason instead of being
-invented. Raw credentials, pairing material, and conversation contents are never
-exported; the report holds sanitized timings and outcome labels.
-
-A run is `complete` only when setup, execution, and cleanup all succeeded. On
-interruption, failed setup, an invalid export, or unverified cleanup the runner
-exits non-zero, keeps the observations it already holds, labels the evidence
-`incomplete` or `invalid` with the reason, and removes only the container it
-started.
-
-Exit status for `bench`: `0` when the run completed and every measured attempt
-succeeded; `1` for failed attempts, invalid execution, or an incomplete run;
-`2` for usage errors; `3` for a missing prerequisite; `130` for interruption.
-
-### Comparison protocol
-
-Comparisons use the declaration in `repo/benchmark/analysis.py`: primary metrics
-`first_text_ms` and `final_ms`, a ±25 ms tolerance, a floor of 20 attempts per
-run and 5 matched run pairs, and a two-sided 95% t interval over the paired
-run-level differences. Declare any change to these numbers before measuring
-candidates.
-
-`./repo bench-compare` pairs runs in the order given, so alternate or randomize
-the order yourself and restore each run's declared initial state. It reports the
-estimate and interval per metric and classifies it as `improvement`,
-`regression`, `within_tolerance`, or `inconclusive`. Too few pairs, any run
-below the declared minimums, or an interval crossing a tolerance boundary is
-`inconclusive`; a latency improvement is only accepted when the correctness
-floor also holds.
-
-Run an A/A pilot (the same build in both arms) before trusting any tolerance.
-On a shared 4 vCPU container host, five matched pairs of the same build showed
-paired differences from about -45 ms to -130 ms, so the default ±25 ms tolerance
-is tighter than that host's run-to-run noise. A five-pair comparison there
-correctly refuses a verdict; raise the pair count or use a quieter, dedicated
-host before treating a 25 ms tolerance as resolvable. The benchmark reports this
-honestly as `inconclusive` rather than as a change.
-
-Injected-delay calibration is monotone by construction: adding a known delay to
-the scripted reply shifts both first-text and final latency by that amount plus
-common send start-up. Use it to confirm the measurement path on a host before
-comparing releases.
+V6 comparisons report paired per-run P95 differences for display delay and
+burst share alongside correctness. Intervals require five matched pairs,
+20 successful samples for each P95, and at least 95% correctness per run,
+including background reads in mixed load. Legacy reports retain their original
+metrics and can be compared within the same scenario version.
 
 ## Test selection
 
@@ -331,6 +276,7 @@ validation are required. The command accepts:
 
 ```bash
 ./repo test core
+./repo test --project android-state
 ./repo test core --only reconnect
 ./repo test core --list
 ./repo test repo --coverage
@@ -348,11 +294,26 @@ targets. The iOS targets require a native macOS host. Use
 `ios-unit`, `ios-ui`, and `ios-integration` for whole plans, or `ios-ui-smoke`
 for the CI smoke selection. Bare test selects registered unit targets only.
 
+The Android JDK-only project is `android-state` (Kotlin/JVM, Gradle included
+build). It is a normal unit target and supports `check`, `test`, `--only` and
+`--list`. Focused runs use the state build's `-PcaseFilter` JUnit condition, and
+listing uses `-PcaseList=true`; neither executes unselected bodies. Filtered
+runs count only observed non-skipped cases, so an all-skipped result is an
+unmatched selector. Its `--coverage` runs JaCoCo verification and reports
+per-package line ratios against the 90% gate; ordinary quick CI does not request
+coverage. The explicit device targets are `android-ui`, `android-integration`
+and `android-performance`; they require `adb`, the Android SDK and a compatible
+target, while `android-performance` requires a physical device. A missing
+prerequisite produces unavailable evidence with exit status 3. Instrumentation
+case selection filters parsed case IDs, and an unmatched `--only` is invalid
+usage. See [apps/android/README.md](../../apps/android/README.md).
+
 | Option | Targets | Additional constraints |
 |---|---|---|
-| `--only TEXT` | Leaf targets | Literal, case-sensitive case ID substring. An unmatched filter is invalid usage. |
-| `--coverage` | Unit targets | No `--only` or `--list`. |
-| `--list` | Unit, Linux integration, and iOS leaves | No coverage; Node static listing is unsupported. |
+| `--project ID` | `test` only | Unit project ID; equivalent to the TARGET positional argument. Do not pass both. |
+| `--only TEXT` | Leaf targets | Literal, case-sensitive case ID substring. An unmatched filter is invalid usage. Android device suites filter parsed instrumentation case IDs. |
+| `--coverage` | Unit targets | No `--only` or `--list`. Kotlin/JVM `android-state` uses JaCoCo per-package lines; the Android device suites reject the option. |
+| `--list` | Unit, Linux integration, iOS leaves, and Android device leaves | No coverage; Node static listing is unsupported. Kotlin listing runs Gradle list mode; Android device listing runs instrumentation in log mode and requires a device. |
 | `--parallel N` | Linux integration targets | 1–8 independent hash shards, default 1; incompatible with `--list`. |
 | `--integration-timeout SECONDS` | Linux integration targets | Positive run deadline covering preparation through execution, defaults to 7200 seconds. |
 | `--simulator UDID` | iOS targets | Exact Simulator device UDID. |
@@ -432,10 +393,12 @@ per package; Rust, Node and Python report lines. Generated protocol bindings are
 excluded from coverage, but their tests still run. Missing tools, measurements
 and below-threshold results fail the gate; passing cases alone do not satisfy it.
 
-Python, Go and Node collect coverage with their case results in one execution.
-For Go projects, use `go tool cover -func=<profile>` or `go tool cover
+Python, Go, Node and Kotlin/JVM collect coverage with their case results in one
+execution. For Go projects, use `go tool cover -func=<profile>` or `go tool cover
 -html=<profile>` with the `coverage-<project>.coverprofile` in the report directory
-to inspect the measured code blocks.
+to inspect the measured code blocks. Kotlin reports each JaCoCo package from
+`apps/android/state/build/reports/jacoco/test/jacocoTestReport.xml`; the state
+build also enforces its 90% per-package line rule.
 Node keeps manifest coverage include/threshold flags. Rust uses a separate
 serial cargo-llvm-cov execution in a temporary build directory so cached
 binaries and profile counts do not enter the measurement. The report labels
@@ -491,7 +454,7 @@ scripts come from native manifests; new projects require explicit registration.
 | `sources.py` | Frozen source inputs and their identities. |
 | `integration_targets.py` | Linux integration scope, collection paths and artifact requirements. |
 | `test_cost.py` | Advisory selection notices and comparable local wall-time history. |
-| `runners/` | Ecosystem-specific commands, discovery and coverage. |
+| `runners/` | Ecosystem-specific commands, discovery and coverage. `runners/kotlin.py` owns the JDK-only Gradle state runner; `runners/android.py` owns explicit device suites. |
 | `process.py` | Child processes, deadlines, process-group cancellation and capture. |
 | `reports/model.py` | Versioned facts, validation and atomic persistence. |
 | `reports/html.py` | Offline HTML presentation. |

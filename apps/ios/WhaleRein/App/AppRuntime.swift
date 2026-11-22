@@ -264,7 +264,7 @@ final class AppRuntime {
         draftStore: any DraftStore,
         initiallyPaired: Bool,
         recoverableFallback: Bool = false,
-        diagnosticSink: MobileDiagnosticSink? = nil
+        diagnosticSink: (any CoreDiagnosticSink)? = nil
     ) throws -> any SessionService {
         switch options.serviceMode {
         case .fixtures:

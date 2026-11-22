@@ -63,7 +63,7 @@ enum AppComposition {
         for instance: AppInstance,
         options: LaunchOptions,
         appVersion: String,
-        diagnosticSink: MobileDiagnosticSink? = nil
+        diagnosticSink: (any CoreDiagnosticSink)? = nil
     ) throws -> any SessionService {
         let secretStore: any SecretStore
         if usesFileSecrets(for: instance) {
@@ -102,7 +102,7 @@ enum AppComposition {
         for instance: AppInstance,
         options: LaunchOptions,
         appVersion: String,
-        diagnosticSink: MobileDiagnosticSink? = nil
+        diagnosticSink: (any CoreDiagnosticSink)? = nil
     ) -> RecoverableSessionService {
         RecoverableSessionService(instanceId: instance.id) {
             try makeLiveService(

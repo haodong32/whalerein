@@ -1,8 +1,9 @@
 # WhaleRein mobile bindings
 
-UniFFI 0.29 binding between WhaleRein Core and the iOS app. The crate is
+UniFFI 0.29 binding between WhaleRein Core and the native apps. The crate is
 `whalerein-mobile` (library `whalerein_mobile`); Swift imports the module
-`WhaleReinMobile`.
+`WhaleReinMobile` and Kotlin imports
+`com.whalerein.android.corebridge.WhaleReinMobile`.
 
 The crate projects Core's transport-neutral state into flat, typed values. It
 does not implement protocol, pairing, cache, draft or command logic: those stay
@@ -24,6 +25,7 @@ apps/mobile-bindings/
   src/bin/revision.rs         prints the embedded revision
   swift/WhaleReinMobileError.swift   stable `code`/`message` accessors
   scripts/build-xcframework.sh       XCFramework + Swift binding build
+  uniffi.toml                        Swift and Kotlin package/module names
   tests/mobile_core.rs               fixture-backed behavior tests
 ```
 
@@ -75,6 +77,44 @@ git:<12-char HEAD>[-dirty] core:<Core package version>
 The same string is written to `WhaleReinMobile.revision` and `revision.txt`.
 `DiagnosticsReportView.coreVersion` is the Core package version, independent of
 the git marker.
+
+## Android build
+
+`:core-bridge` owns the Gradle tasks. The Rust target and the Kotlin bindgen
+share one source marker and one lockfile:
+
+```bash
+cd apps/android
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 ./gradlew :core-bridge:assembleDebug
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 ./gradlew :core-bridge:connectedDebugAndroidTest
+```
+
+Tasks: `cargoBuildHost`, `generateUniffiKotlin`, `cargoBuildAndroidDebug|Release`,
+`packageNativeDebug|Release`. Inputs are the Cargo manifests/lockfile, Rust and
+protobuf sources, the toolchain/target, the UniFFI config and the source marker;
+products stay under `build/`. The packaged library is
+`libwhalerein_mobile.so` for `arm64-v8a`, linked with 16 KB ELF page alignment.
+Gradle passes `WHALEREIN_MOBILE_SOURCE`, so `CoreProvenance`/`BuildConfig` and
+`coreRevision()` report the same value.
+
+Android specifics:
+
+- `AndroidSecretStore` implements the UniFFI `SecretStore` with one
+  AES-256-GCM Keystore key per profile and one atomically replaced encrypted
+  document under `secrets/` (backup-excluded). Absent, temporary failure,
+  invalidated key and corrupt ciphertext are distinct outcomes.
+- `AndroidTrustRoots` materializes the platform CA store for Core's native-root
+  MQTT consumer; HTTPS keeps WebPKI public roots plus the instance-scoped
+  private PEM CA. `TlsPolicy` rejects cleartext Standalone targets.
+- `DiagnosticContext` reserves the Core trace before opening and forwards
+  redacted events through a bounded background dispatcher. `StateDiagnosticSinkAdapter`
+  maps them onto the `:state` sink.
+- `AndroidCore.open(context, appConfigPath, instance, journalSink)` owns one
+  active handle and exposes `accessPorts`, `conversationPorts`, `supportPorts`,
+  `attachmentPorts`, `provenance` and `close()`.
+
+Android local redirect: `https://app.whalerein.test/client/android/callback`
+(Cloud routes `/api/v1/client/android/attempts|exchange`).
 
 ## Swift API surface
 
@@ -259,8 +299,17 @@ Semantics:
   `completed`, `failed`, `reached`, `unknown`). A missing summary stays empty;
   the binding never invents notice text.
 - `preview.kind` is `text` or `reasoning`; callers must not append a reasoning
-  preview to answer text. `toolActivity` events report one material change to a
-  canonical activity; `message` events remain the committed projection.
+  preview to answer text. `preview.attempt` carries the full
+  (`liveEpoch`, `attemptId`) identity and `preview.blockId` the block identity.
+  `toolActivity` events report one material change to a canonical activity;
+  `message` events carry an optional committed `origin` Attempt and the
+  `previewPrefix` bytes they replaced.
+- `sendWithOperationId` reuses Core's durable operation record with a caller
+  allocated identity (`newOperationId()`), so submission and recovery use the
+  same persistence. `send` keeps its random-identity behavior.
+- A transport failure after a possible Android/iOS exchange retains the pending
+  attempt; `cloudAuthRecover` completes it through the original credential and
+  scoped `/me` without replaying the authorization code.
 - `MessageReplyView` mirrors Core `SendReply`: `pending`, `committed` with a
   scoped `MessageReferenceView`, `inputRequired` with evidenced lowercase
   `kinds` (`approval`, `question`, `other`), or `uncertain`. A committed reply

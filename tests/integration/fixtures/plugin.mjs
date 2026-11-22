@@ -26,7 +26,7 @@ const config = {
   state_dir: process.env.WHALEREIN_STATE_DIR,
   allow_insecure_mqtt: process.env.WHALEREIN_ALLOW_INSECURE_MQTT !== '0',
   ca_file: process.env.WHALEREIN_CA_FILE || '',
-  event_batch_ms: 1,
+  ...(process.env.WHALEREIN_BENCHMARK_CONFIG === undefined ? { event_batch_ms: 1 } : {}),
   approval_mode: approvalMode,
   ...(Number.isSafeInteger(approvalTtlMs) && approvalTtlMs > 0 ? { approval_ttl_ms: approvalTtlMs } : {}),
   pending_queue_enabled: process.env.WHALEREIN_PENDING_QUEUE_ENABLED !== 'false',

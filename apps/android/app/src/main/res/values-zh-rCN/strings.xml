@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WhaleRein</string>
+    <string name="app_retry">重试</string>
+    <string name="app_diagnostics">诊断</string>
+    <string name="app_startup_loading">正在打开 WhaleRein…</string>
+    <string name="app_startup_failed">WhaleRein 无法启动</string>
+    <string name="app_startup_unavailable_body">无法恢复启动信息。请重试，或查看诊断了解详情。</string>
+    <string name="app_core_unavailable_body">此版本的原生 Core 不可用，诊断信息仍可查看。</string>
+    <string name="app_import_ca_file">导入 CA 文件</string>
+</resources>

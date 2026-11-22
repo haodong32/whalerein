@@ -9,7 +9,7 @@
 import Foundation
 import WhaleReinMobile
 
-final class CoreDiagnosticBridge: MobileDiagnosticSink, @unchecked Sendable {
+final class CoreDiagnosticBridge: CoreDiagnosticSink, @unchecked Sendable {
     private let log: AppLog
     private let clock: () -> Date
     private let lock = NSLock()

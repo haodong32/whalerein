@@ -30,8 +30,7 @@ final class CoreDiagnosticBridgeTests: XCTestCase {
             traceId: "trace-abc",
             level: level,
             event: name,
-            fields: fields,
-            sequence: 0
+            fields: fields
         )
     }
 

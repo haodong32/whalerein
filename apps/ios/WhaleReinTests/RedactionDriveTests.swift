@@ -68,7 +68,6 @@ final class RedactionDriveTests: XCTestCase {
                 "code": "timeout",
                 "message": marker
             ],
-            sequence: 0
         ))
         let record = try XCTUnwrap(try lines().first)
         XCTAssertEqual(record["source"] as? String, "core")

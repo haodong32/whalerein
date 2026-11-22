@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules">
+        <meta-data
+            android:name="com.whalerein.android.CORE_REVISION"
+            android:value="${whalereinCoreRevision}" />
+        <meta-data
+            android:name="com.whalerein.android.CORE_VERSION"
+            android:value="${whalereinCoreVersion}" />
+        <meta-data
+            android:name="com.whalerein.android.APP_VERSION"
+            android:value="${whalereinAppVersion}" />
+    </application>
+</manifest>

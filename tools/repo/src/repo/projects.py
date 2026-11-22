@@ -16,6 +16,7 @@ MANIFESTS = {
     "go": "go.mod",
     "node": "package.json",
     "python": "pyproject.toml",
+    "kotlin": "build.gradle.kts",
 }
 
 
@@ -38,6 +39,10 @@ class Project:
 
     @property
     def capabilities(self) -> list[str]:
+        if self.kind == "kotlin":
+            # The standalone state build compiles Kotlin and runs JUnit. It has
+            # no formatter or packaging step, and coverage is not measured.
+            return ["check", "test"]
         if self.kind == "node":
             scripts = json.loads(self.manifest.read_text()).get("scripts", {})
             return [
@@ -87,6 +92,9 @@ def load_projects(root: Path) -> list[Project]:
                 )
             elif kind == "node":
                 name = json.loads(content)["name"]
+            elif kind == "kotlin":
+                # A Gradle build has no package name in its build script.
+                name = identity
             else:
                 name = tomllib.loads(content)["package" if kind == "rust" else "project"]["name"]
             role = entry.get("role", "product")

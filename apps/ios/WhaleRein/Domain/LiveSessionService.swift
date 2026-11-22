@@ -59,7 +59,7 @@ final class LiveSessionService: SessionService {
         secretStore: any SecretStore,
         appVersion: String,
         instanceId: String,
-        diagnosticSink: MobileDiagnosticSink? = nil
+        diagnosticSink: (any CoreDiagnosticSink)? = nil
     ) throws {
         do {
             if let diagnosticSink {
@@ -164,7 +164,7 @@ final class LiveSessionService: SessionService {
         guard generation == watchGeneration, let scope = activeWatch else { return }
 
         switch event {
-        case .state(_, let running, _, let approvals):
+        case .state(_, _, let running, _, let approvals):
             // Core only emits an authoritative SessionState after a
             // successful watch/snapshot handoff, so this implies connectivity
             // even when the short-lived `connected` poll transition is missed.
@@ -191,7 +191,7 @@ final class LiveSessionService: SessionService {
         case .historyReset:
             broadcast(.reset(messages: cachedHistory, approvals: latestApprovals), scope: scope)
 
-        case .message(let message):
+        case .message(let message, _, _):
             let mapped = Self.map(message: message)
             if let cached = cachedHistoryById[mapped.messageId] {
                 if cached == mapped {
@@ -207,13 +207,13 @@ final class LiveSessionService: SessionService {
             }
             broadcast(.message(mapped), scope: scope)
 
-        case .preview(let attemptId, let kind, let text, let replace, let incomplete):
+        case .preview(let attempt, _, let kind, let text, let replace, let incomplete):
             // Answer and reasoning previews keep distinct typed identities.
             switch kind {
             case "reasoning":
                 broadcast(
                     .reasoningPreview(
-                        attemptId: attemptId,
+                        attemptId: attempt.attemptId,
                         text: text,
                         replace: replace,
                         incomplete: incomplete
@@ -222,7 +222,7 @@ final class LiveSessionService: SessionService {
                 )
             case "text":
                 broadcast(
-                    .preview(attemptId: attemptId, text: text, replace: replace, incomplete: incomplete),
+                    .preview(attemptId: attempt.attemptId, text: text, replace: replace, incomplete: incomplete),
                     scope: scope
                 )
             default:
@@ -235,9 +235,9 @@ final class LiveSessionService: SessionService {
                 scope: scope
             )
 
-        case .attemptEnded(let attemptId, let outcome):
+        case .attemptEnded(let attempt, let outcome):
             broadcast(
-                .attemptEnded(attemptId: attemptId, outcome: Self.map(outcome: outcome)),
+                .attemptEnded(attemptId: attempt.attemptId, outcome: Self.map(outcome: outcome)),
                 scope: scope
             )
 

@@ -16,15 +16,14 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::task::AbortHandle;
 use whalerein_core::api::{
-    Cancellation, ClientConfig, ClientService, Core, DiagnosticSink as CoreDiagnosticSink,
-    Environment, ObservationInterests, PairingDecision, PairingPrompt, QuestionAnswer,
-    SessionEventPayload, SessionKey,
+    Cancellation, ClientConfig, ClientService, Core, Environment, ObservationInterests,
+    PairingDecision, PairingPrompt, QuestionAnswer, SessionEventPayload, SessionKey,
 };
 use whalerein_core::attachments::{DownloadProgress, DownloadRequest};
 use whalerein_core::history::{HistoryContinuation, HistoryPageRequest};
 use whalerein_core::CoreError;
 
-use crate::diagnostics::{DiagnosticSinkAdapter, MobileDiagnosticSink};
+use crate::diagnostics::{CoreDiagnosticSink, DiagnosticContext, DiagnosticDispatcher};
 use crate::error::{MobileError, CODE_CANCELLED};
 use crate::queue::{
     action_is_advertised, PendingQueueItemView, PendingQueueView, QueueAction, QueueMutationView,
@@ -38,8 +37,8 @@ use crate::types::{
     CloudAuthAttemptView, CloudConnectResultView, CloudDirectoryHostView, CommandView,
     ConversationEvent, DeliveryChoice, DiagnosticsReportView, HistoryPageView, HostSummary,
     MessageReferenceView, MessageView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
-    QuestionCancelReceiptView, QuestionPageView, RetainedOperationView, SessionCapabilitiesView,
-    SessionSummaryView,
+    QuestionCancelReceiptView, QuestionPageView, RetainedOperationView, SendOperationView,
+    SessionCapabilitiesView, SessionSummaryView,
 };
 use crate::wait::{WaitAttempts, WaitResultView, MAX_WAIT_TIMEOUT_MS};
 
@@ -120,6 +119,46 @@ pub fn write_client_config(
 #[uniffi::export]
 pub fn core_revision() -> String {
     env!("WHALERIN_MOBILE_REVISION").to_owned()
+}
+
+/// Allocate a non-secret send operation identity before submission.
+#[uniffi::export]
+pub fn new_operation_id() -> String {
+    Core::new_command_id()
+}
+
+/// The pinned Android App Link callback for the local native client.
+#[uniffi::export]
+pub fn android_redirect_uri() -> String {
+    whalerein_core::api::ANDROID_REDIRECT_URI.to_owned()
+}
+
+/// Install an explicit PEM bundle as the process native-root source.
+///
+/// Core's MQTT path loads native roots through `rustls-native-certs`, which on
+/// Android cannot discover the platform store by itself. The app extracts the
+/// system CA certificates into a private PEM file and calls this before opening
+/// Core. HTTPS keeps WebPKI public roots plus the instance-scoped private CA,
+/// so this path is limited to the native-root consumer.
+///
+/// On non-Android hosts the call validates the path but leaves process trust
+/// unchanged, because the host store is already discoverable.
+#[uniffi::export]
+pub fn install_native_trust_roots(pem_path: String) -> Result<(), MobileError> {
+    if pem_path.is_empty() || pem_path.len() > MAX_PATH_BYTES {
+        return Err(MobileError::invalid_input());
+    }
+    let path = Path::new(&pem_path);
+    if !path.is_file() {
+        return Err(MobileError::invalid_input());
+    }
+    #[cfg(target_os = "android")]
+    {
+        // Safe here: this runs during app initialization, before Core opens any
+        // transport. rustls-native-certs reads the variable per connection.
+        std::env::set_var("SSL_CERT_FILE", path);
+    }
+    Ok(())
 }
 
 /// The Host-qualified observation that produced one queued event.
@@ -546,28 +585,12 @@ impl Drop for WatchStopSignal {
     }
 }
 
-/// Swift-facing Core facade. See `README.md` for the exported surface.
-#[derive(uniffi::Object)]
-pub struct MobileCore {
-    core: Core,
-    runtime: RuntimeHost,
-    events: Arc<EventQueue>,
-    app_version: String,
-    pairing: Arc<Mutex<PairingState>>,
-    pairing_generation: Arc<AtomicU64>,
-    watch: Arc<Mutex<WatchState>>,
-    watch_generation: Arc<AtomicU64>,
-    wait_attempts: WaitAttempts,
-    attachment_transfers: Arc<AttachmentTransfers>,
-}
-
-/// Shared open path: validation, runtime host, Core open with or without a
-/// diagnostic sink.
-fn open_core(
+fn open_mobile_core(
     config_path: String,
     secret_store: Arc<dyn SecretStore>,
     app_version: String,
-    sink: Option<Arc<dyn CoreDiagnosticSink>>,
+    diagnostics: Option<whalerein_core::api::DiagnosticContext>,
+    dispatcher: Option<Arc<DiagnosticDispatcher>>,
 ) -> Result<Arc<MobileCore>, MobileError> {
     if config_path.is_empty() || config_path.len() > MAX_PATH_BYTES {
         return Err(MobileError::invalid_input());
@@ -578,8 +601,8 @@ fn open_core(
     let runtime = RuntimeHost::start()?;
     let secrets = Arc::new(SecretStoreAdapter::new(secret_store));
     let path = Path::new(&config_path);
-    let core = match sink {
-        Some(sink) => Core::open_with_diagnostic_sink(path, secrets, sink),
+    let core = match diagnostics {
+        Some(context) => Core::open_with_diagnostics(path, secrets, context),
         None => Core::open(path, secrets),
     }
     .map_err(MobileError::from)?;
@@ -594,38 +617,73 @@ fn open_core(
         watch_generation: Arc::new(AtomicU64::new(0)),
         wait_attempts: WaitAttempts::default(),
         attachment_transfers: Arc::new(AttachmentTransfers::default()),
+        _diagnostics: dispatcher,
     }))
+}
+
+/// Swift-facing Core facade. See `README.md` for the exported surface.
+#[derive(uniffi::Object)]
+pub struct MobileCore {
+    core: Core,
+    runtime: RuntimeHost,
+    events: Arc<EventQueue>,
+    app_version: String,
+    pairing: Arc<Mutex<PairingState>>,
+    pairing_generation: Arc<AtomicU64>,
+    watch: Arc<Mutex<WatchState>>,
+    watch_generation: Arc<AtomicU64>,
+    wait_attempts: WaitAttempts,
+    attachment_transfers: Arc<AttachmentTransfers>,
+    /// Keeps the diagnostic dispatcher alive for the lifetime of the handle.
+    _diagnostics: Option<Arc<DiagnosticDispatcher>>,
 }
 
 #[uniffi::export]
 impl MobileCore {
     /// Create a Core instance backed by `secretStore`.
     ///
-    /// `config_path` is selected by the app inside its persistent sandbox.
+    /// `configPath` is selected by the app inside its persistent sandbox.
     #[uniffi::constructor]
     pub fn new(
         config_path: String,
         secret_store: Arc<dyn SecretStore>,
         app_version: String,
     ) -> Result<Arc<Self>, MobileError> {
-        open_core(config_path, secret_store, app_version, None)
+        open_mobile_core(config_path, secret_store, app_version, None, None)
     }
 
-    /// Create a Core instance that forwards Core's existing redacted
-    /// diagnostic stream to `sink`, starting before configuration is loaded.
-    ///
-    /// Core calls the sink synchronously on the producing thread. Swift must
-    /// hand slow work to its own queue; a panicking sink is isolated and never
-    /// changes a Core result.
+    /// Create a Core instance that forwards Core's redacted diagnostics to
+    /// `sink` from the moment Core opens. The receiver is invoked on the
+    /// binding's bounded delivery thread, never on the caller's thread.
     #[uniffi::constructor]
     pub fn new_with_diagnostic_sink(
         config_path: String,
         secret_store: Arc<dyn SecretStore>,
         app_version: String,
-        sink: Arc<dyn MobileDiagnosticSink>,
+        sink: Arc<dyn CoreDiagnosticSink>,
     ) -> Result<Arc<Self>, MobileError> {
-        let sink = Arc::new(DiagnosticSinkAdapter::new(sink)) as Arc<dyn CoreDiagnosticSink>;
-        open_core(config_path, secret_store, app_version, Some(sink))
+        let context = DiagnosticContext::new(sink);
+        Self::new_with_diagnostic_context(config_path, secret_store, app_version, context)
+    }
+
+    /// Open Core with a diagnostic context reserved before configuration is
+    /// loaded, so startup failures stay observable and the supplied trace ID
+    /// can be used for correlation.
+    #[uniffi::constructor]
+    pub fn new_with_diagnostic_context(
+        config_path: String,
+        secret_store: Arc<dyn SecretStore>,
+        app_version: String,
+        context: Arc<DiagnosticContext>,
+    ) -> Result<Arc<Self>, MobileError> {
+        let core_context = context.take_core().ok_or_else(MobileError::conflict)?;
+        open_mobile_core(
+            config_path,
+            secret_store,
+            app_version,
+            Some(core_context),
+            Some(context.dispatcher()),
+        )
     }
 
     /// Create a Core instance with a process-local secret store.
@@ -638,14 +696,6 @@ impl MobileCore {
         app_version: String,
     ) -> Result<Arc<Self>, MobileError> {
         Self::new(config_path, MemorySecretStore::new(), app_version)
-    }
-
-    /// Clear Core's bounded diagnostic journal for this instance.
-    ///
-    /// The app calls this when the device state is destroyed; the journal is
-    /// diagnostic state, not user content. Core owns the retention policy.
-    pub fn clear_diagnostics(&self) -> Result<(), MobileError> {
-        self.core.clear_diagnostics().map_err(MobileError::from)
     }
 
     /// Build-time provenance: `<git-sha>[-dirty] core:<version>`.
@@ -1243,6 +1293,41 @@ impl MobileCore {
             .receipt
             .ok_or_else(|| MobileError::from(CoreError::UnknownResult))?;
         Ok(self.publish_command(handle))
+    }
+
+    /// Send with a stable operation identity chosen before submission.
+    ///
+    /// Core's existing durable operation record is reused, so recovery and
+    /// duplicate submission use exactly the same persistence as `send`. An
+    /// unknown receipt is reported as `receipt: None` rather than fabricated.
+    pub fn send_with_operation_id(
+        &self,
+        host_id: String,
+        session_id: String,
+        text: String,
+        delivery: DeliveryChoice,
+        operation_id: String,
+    ) -> Result<SendOperationView, MobileError> {
+        validate_operation_id(&operation_id)?;
+        validate_id(&host_id)?;
+        validate_id(&session_id)?;
+        validate_text(&text)?;
+        let key = SessionKey {
+            host_id,
+            session_id,
+        };
+        let operation = self.run(
+            COMMAND_TIMEOUT,
+            self.core
+                .submit_message_operation(&operation_id, &key, &text, delivery.to_core()),
+        )?;
+        Ok(SendOperationView {
+            operation_id,
+            host_id: operation.target.host_id,
+            session_id: operation.target.session_id,
+            receipt: operation.receipt.map(Into::into),
+            reply: None,
+        })
     }
 
     /// Recover a previously started send, with its original Host and Session.
@@ -2054,6 +2139,14 @@ impl MobileCore {
         })
     }
 
+    /// Clear Core's bounded diagnostic journal for this instance.
+    ///
+    /// The app calls this when the device state is destroyed; the journal is
+    /// diagnostic state, not user content. Core owns the retention policy.
+    pub fn clear_diagnostics(&self) -> Result<(), MobileError> {
+        self.core.clear_diagnostics().map_err(MobileError::from)
+    }
+
     /// Write a redacted diagnostic bundle to `path` after user confirmation.
     pub fn export_diagnostics(&self, path: String) -> Result<DiagnosticsReportView, MobileError> {
         if path.is_empty() || path.len() > MAX_PATH_BYTES {
@@ -2106,6 +2199,23 @@ impl MobileCore {
             url: attempt.url,
             attempt_id: attempt.attempt_id,
         })
+    }
+
+    /// Begin the Android authorization-code flow. The Cloud routes are the
+    /// Android-scoped ones and the callback is the registered HTTPS App Link.
+    pub fn cloud_auth_start_android(&self) -> Result<CloudAuthAttemptView, MobileError> {
+        let attempt = self.run(QUERY_TIMEOUT, self.core.cloud_auth_start_android())?;
+        Ok(CloudAuthAttemptView {
+            url: attempt.url,
+            attempt_id: attempt.attempt_id,
+        })
+    }
+
+    /// Recover a lost exchange response with the pending attempt credential and
+    /// the scoped `/me`. This never replays the authorization code.
+    pub fn cloud_auth_recover(&self) -> Result<CloudAccountView, MobileError> {
+        let account = self.run(QUERY_TIMEOUT, self.core.cloud_auth_recover())?;
+        Ok(CloudAccountView::from(account))
     }
 
     /// Complete the exact pending attempt from the callback URL. Only this
@@ -2313,6 +2423,13 @@ fn retained_send_view(operation: &whalerein_core::api::SendOperation) -> Retaine
     }
 }
 
+fn validate_operation_id(value: &str) -> Result<(), MobileError> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(MobileError::invalid_input());
+    }
+    Ok(())
+}
+
 fn validate_id(value: &str) -> Result<(), MobileError> {
     if value.is_empty()
         || value.len() > MAX_ID_BYTES
@@ -2445,6 +2562,8 @@ mod tests {
 
     fn message(id: &str, text: &str) -> ConversationEvent {
         ConversationEvent::Message {
+            origin: None,
+            preview_prefix: None,
             message: MessageView {
                 message_id: id.into(),
                 role: "assistant".into(),
@@ -2464,7 +2583,11 @@ mod tests {
 
     fn preview(text: &str) -> ConversationEvent {
         ConversationEvent::Preview {
-            attempt_id: "attempt-old".into(),
+            attempt: crate::types::AttemptRefView {
+                live_epoch: "epoch".into(),
+                attempt_id: "attempt-old".into(),
+            },
+            block_id: "block-old".into(),
             kind: "text".into(),
             text: text.into(),
             replace: false,
@@ -2514,7 +2637,7 @@ mod tests {
             ConversationEvent::CommandStatus { command } if command.command_id == "command-1"
         )));
         assert!(events.iter().any(
-            |event| matches!(event, ConversationEvent::Message { message } if message.message_id == "new-message")
+            |event| matches!(event, ConversationEvent::Message { message, .. } if message.message_id == "new-message")
         ));
         assert!(events.iter().any(|event| matches!(
             event,
@@ -2523,7 +2646,7 @@ mod tests {
         assert!(
             !events.iter().any(|event| matches!(
                 event,
-                ConversationEvent::Message { message } if message.message_id == "old-message"
+                ConversationEvent::Message { message, .. } if message.message_id == "old-message"
             )),
             "queued old-watch message leaked into the new watch: {events:?}"
         );
@@ -2616,7 +2739,7 @@ mod tests {
             events
                 .iter()
                 .filter_map(|event| match event {
-                    ConversationEvent::Message { message } => Some(message.message_id.as_str()),
+                    ConversationEvent::Message { message, .. } => Some(message.message_id.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>(),

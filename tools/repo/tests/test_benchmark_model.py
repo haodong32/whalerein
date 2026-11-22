@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import runpy
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from repo.benchmark import analysis, model, summary
+from repo.benchmark import analysis, model, runner, summary
 from repo.errors import RepoError
 
 
@@ -42,7 +45,7 @@ def document(attempts=None, **changes):
         "schema_version": model.SCHEMA_VERSION,
         "scenario": {
             "id": model.SCENARIO_ID,
-            "version": model.SCENARIO_VERSION,
+            "version": 1,
             "seed": "0",
             "deadline_ms": 5000,
             "observation_window_ms": 1000,
@@ -97,6 +100,332 @@ def document(attempts=None, **changes):
     }
     document.update(changes)
     return document
+
+
+def streaming_document(count=1, extra_rtt=0, *, with_previews=True, version=model.SCENARIO_VERSION):
+    profile = "high-rtt" if extra_rtt else "normal"
+    configuration = runner.BenchRequest(
+        attempts=count, warmup=0, cadence_ms=10, network_profile=profile
+    ).as_configuration()
+    workload = model.scenario(configuration)
+    workload["version"] = version
+    if version < 6:
+        configuration.pop("workflow")
+        workload["workload"].pop("workflow")
+    if version < 4:
+        workload["workload"]["delivery"] = "accepted"
+    if version < 5:
+        configuration.pop("network")
+        workload.pop("network")
+        configuration["host_broker_extra_rtt_ms"] = extra_rtt
+        workload["host_broker_extra_rtt_ms"] = extra_rtt
+    sizes = model.source_sizes(workload) if version >= 4 else None
+    final_bytes = len(workload["response"]["final_text"].encode())
+    previews = (
+        [
+            {"at_ms": 100, "bytes": final_bytes // 10, "final": False},
+            {"at_ms": 180, "bytes": final_bytes // 10, "final": False},
+        ]
+        if with_previews
+        else []
+    )
+    outputs = [
+        *previews,
+        {
+            "at_ms": 600,
+            "bytes": final_bytes - sum(event["bytes"] for event in previews),
+            "final": True,
+        },
+    ]
+    if sizes is not None:
+        prefix = 0
+        for event in outputs:
+            prefix += event["bytes"]
+            event["prefix_bytes"] = prefix
+    attempts = [
+        attempt(
+            str(index),
+            first_text_ms=100 if with_previews else 600 if sizes is not None else None,
+            final_ms=600,
+            update_count=len(previews),
+            update_gaps_ms=[80] if with_previews else [],
+            source_times_ms=[
+                (0 if sizes is not None else 50) + index * 10 for index in range(len(model.UPDATES))
+            ],
+            outputs=outputs,
+        )
+        for index in range(count)
+    ]
+    facts = document(attempts, scenario=workload)
+    facts["run"]["configuration"] = configuration
+    probe = {
+        "reference_ms": [0.25] * model.NETWORK_PROBE_COUNT,
+        "host_broker_ms": [extra_rtt + 0.25] * model.NETWORK_PROBE_COUNT,
+    }
+    burst_window = model.BURST_WINDOW_MS if version >= 5 else None
+    if burst_window is not None:
+        probe["host_ms"] = probe.pop("host_broker_ms")
+        probe["client_ms"] = probe["reference_ms"]
+        facts["environment"]["network_counters"] = {"packets": 42, "dropped": 0}
+        facts["environment"]["artifacts"]["harness"] = "sha256:" + "b" * 64
+    facts["environment"]["network_probe"] = probe
+    facts["streaming"] = model.streaming_summary(
+        attempts, final_bytes, sizes, burst_window, display_delay=version >= 6
+    )
+    if version >= 6:
+        facts["workflow_results"] = {}
+    return facts
+
+
+@pytest.mark.parametrize(
+    ("with_previews", "expected_gap", "expected_share"),
+    [(True, 420, 0.8), (False, 600, 1.0)],
+)
+def test_streaming_includes_pending_text_until_the_final_output(
+    with_previews,
+    expected_gap,
+    expected_share,
+):
+    facts = model.validate(streaming_document(with_previews=with_previews))
+    streaming = facts["streaming"]
+    assert streaming["zero_preview"] == (0 if with_previews else 1)
+    samples = streaming["samples"]
+    assert samples["longest_output_gap_ms"]["quantiles"]["median"] == expected_gap
+    assert samples["largest_output_share"]["quantiles"]["median"] == expected_share
+    assert samples["final_output_share"]["quantiles"]["median"] == expected_share
+    assert f"median={expected_share * 100:.1f}%" in summary.render(facts)
+
+
+def test_streaming_can_have_its_largest_output_before_the_final():
+    final_bytes = 100
+    record = {
+        "source_times_ms": [10],
+        "outputs": [
+            {"at_ms": 70, "bytes": 80, "final": False},
+            {"at_ms": 90, "bytes": 20, "final": True},
+        ],
+    }
+    assert model.streaming_values(record, final_bytes) == {
+        "longest_output_gap_ms": 60,
+        "largest_output_share": 0.8,
+        "final_output_share": 0.2,
+    }
+
+
+def test_streaming_counts_the_settlement_gap_with_a_zero_byte_final():
+    record = {
+        "source_times_ms": [10],
+        "outputs": [
+            {"at_ms": 30, "bytes": 100, "final": False},
+            {"at_ms": 300, "bytes": 0, "final": True},
+        ],
+    }
+    assert model.streaming_values(record, 100) == {
+        "longest_output_gap_ms": 270,
+        "largest_output_share": 1,
+        "final_output_share": 0,
+    }
+
+
+def test_pending_gap_excludes_source_idle_and_visible_text_free_final():
+    record = {
+        "source_times_ms": [0, 100],
+        "outputs": [
+            {"at_ms": 20, "bytes": 10, "prefix_bytes": 10, "final": False},
+            {"at_ms": 125, "bytes": 10, "prefix_bytes": 20, "final": False},
+            {"at_ms": 400, "bytes": 0, "prefix_bytes": 20, "final": True},
+        ],
+    }
+    assert model.streaming_values(record, 20, [10, 10]) == {
+        "longest_output_gap_ms": 25,
+        "largest_output_share": 0.5,
+        "final_output_share": 0,
+    }
+
+
+def test_pending_wait_continues_while_a_preview_only_repeats_shown_bytes():
+    outputs = [
+        {"at_ms": 20, "prefix_bytes": 10},
+        {"at_ms": 50, "prefix_bytes": 10},
+        {"at_ms": 100, "prefix_bytes": 20},
+    ]
+    assert model.longest_pending_gap(outputs, [0, 10], [10, 10]) == 80
+
+
+def test_legacy_netem_report_keeps_its_original_gap_definition():
+    facts = streaming_document(version=3, with_previews=False)
+    samples = model.validate(facts)["streaming"]["samples"]
+    assert samples["longest_output_gap_ms"]["quantiles"]["median"] == 550
+
+
+def test_streaming_observer_counts_cli_text_kind_and_only_the_final_suffix(monkeypatch):
+    integration = Path(__file__).resolve().parents[3] / "tests" / "integration"
+    monkeypatch.syspath_prepend(str(integration))
+    observer = runpy.run_path(str(integration / "benchmark" / "main.py"))["Observer"]
+    monkeypatch.setitem(observer.observe.__globals__, "FINAL_BYTES", "éx".encode())
+    state = SimpleNamespace(stream="attempt", finals=0, outputs=[], preview=b"")
+    observer.observe(
+        state, {"type": "preview", "attempt_id": "attempt", "kind": "TEXT", "text": "é"}, 20
+    )
+    observer.observe(
+        state,
+        {
+            "type": "message",
+            "role": "ASSISTANT",
+            "origin": {"attempt_id": "attempt"},
+            "blocks": [{"type": "text", "text": "éx"}],
+            "preview_prefix": {"text_bytes": 2},
+        },
+        30,
+    )
+    assert state.outputs == [
+        {"at_ns": 20, "bytes": 2, "prefix_bytes": 2, "final": False},
+        {"at_ns": 30, "bytes": 1, "prefix_bytes": 3, "final": True},
+    ]
+
+
+def test_streaming_rejects_false_summaries_and_invalid_source_times():
+    facts = streaming_document()
+    facts["streaming"]["zero_preview"] = 1
+    with pytest.raises(RepoError, match="streaming summary disagrees"):
+        model.validate(facts)
+    facts = streaming_document()
+    facts["attempts"][0]["source_times_ms"][0] = 999
+    with pytest.raises(RepoError, match="ordered source emission times"):
+        model.validate(facts)
+
+
+def test_display_delay_detects_backlog_even_when_output_keeps_arriving():
+    outputs = [
+        {"at_ms": time, "prefix_bytes": offset}
+        for time, offset in ((30, 10), (80, 20), (130, 30), (180, 40))
+    ]
+    assert model.longest_pending_gap(outputs, [0, 10, 20, 30], [10] * 4) == 50
+    assert model.max_display_delay(outputs, [0, 10, 20, 30], [10] * 4) == 150
+
+
+def test_display_diagnostics_use_each_increment_while_excluding_warmups_and_failures():
+    facts = streaming_document(with_previews=False)
+    sizes = model.source_sizes(facts["scenario"])
+    attempts = [
+        *facts["attempts"],
+        attempt("warm", phase="warmup"),
+        attempt("failed", outcome="timeout_before_text"),
+    ]
+    diagnostics = model.diagnostic_summary(attempts, sizes)
+    sample = diagnostics["segment_display_delay_ms"]
+    assert sample["count"] == len(model.UPDATES)
+    assert sample["quantiles"] == {"median": 440, "p95": 590}
+    facts["diagnostics"] = diagnostics
+    text = summary.render(model.validate(facts))
+    assert "Diagnostics\nfirst text: n=1 median=600.0ms" in text
+    assert "per-segment display delay: n=32 median=440.0ms p95=590.0ms" in text
+
+    sample["quantiles"]["p95"] = 589
+    with pytest.raises(RepoError, match="diagnostic summary disagrees"):
+        model.validate(facts)
+
+
+def test_mixed_load_preserves_read_failures_separately_from_watch():
+    facts = streaming_document()
+    configuration = facts["run"]["configuration"]
+    configuration["workflow"] = "mixed-load"
+    facts["scenario"] = model.scenario(configuration)
+    facts["attempts"][0]["history_reads"] = [
+        {"at_ms": at, "duration_ms": 80, "outcome": outcome}
+        for at, outcome in (
+            (40, "completed"),
+            (70, "timeout"),
+            (100, "completed"),
+            (130, "product_error"),
+        )
+    ]
+    facts["attempts"][0]["history_reads"][-1]["error_code"] = "rate_limited"
+    facts["workflow_results"] = model.workflow_summary(facts["attempts"], "mixed-load")
+    measured = model.validate(facts)
+    assert measured["outcomes"]["correct_by_deadline"] == 1
+    assert measured["workflow_results"]["history_correct"] == 2
+    assert measured["workflow_results"]["history_measured"] == 4
+    assert measured["workflow_results"]["history_errors"] == {"rate_limited": 1}
+    facts["attempts"][0]["history_reads"].pop()
+    with pytest.raises(RepoError, match="every scheduled read"):
+        model.validate(facts)
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"), [("rate_limited", "rate_limited"), ("invalid/code", None)]
+)
+def test_history_read_retains_only_a_safe_public_code(monkeypatch, code, expected):
+    integration = Path(__file__).resolve().parents[3] / "tests" / "integration"
+    monkeypatch.syspath_prepend(str(integration))
+    workflow = runpy.run_path(str(integration / "benchmark" / "workflow.py"))
+    response = {
+        "schema": "whalerein/client/v1",
+        "command": "session.history",
+        "error": {"code": code, "message": "A detailed failure message"},
+    }
+    monkeypatch.setattr(
+        workflow["subprocess"],
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=json.dumps(response)),
+    )
+    reader = SimpleNamespace(args=lambda *args: args, env={}, envelope=json.loads)
+    observation = workflow["HistoryLoad"](reader, "host", "session", ["expected"]).read(0, 1000)
+    assert observation["outcome"] == "product_error"
+    assert observation.get("error_code") == expected
+    assert "message" not in observation
+
+
+def test_recovery_requires_source_activity_during_the_blackout():
+    facts = streaming_document()
+    configuration = facts["run"]["configuration"]
+    configuration.update(workflow="recovery", network=model.network_settings("normal", "client"))
+    facts["scenario"] = model.scenario(configuration)
+    timing = {"started_ms": 80, "restored_ms": 180, "catch_up_ms": 420}
+    facts["attempts"][0]["recovery"] = timing
+    facts["workflow_results"] = model.workflow_summary(facts["attempts"], "recovery")
+    assert model.validate(facts)["workflow_results"]["catch_up_ms"]["quantiles"]["median"] == 420
+    timing.update(started_ms=350, restored_ms=450)
+    with pytest.raises(RepoError, match="source must continue"):
+        model.validate(facts)
+
+
+def test_burst_counts_records_arriving_within_the_same_window():
+    outputs = [
+        {"at_ms": 5, "bytes": 4},
+        {"at_ms": 30, "bytes": 6},
+        {"at_ms": 55, "bytes": 2},
+        {"at_ms": 150, "bytes": 0},
+    ]
+    assert model.largest_burst(outputs, 50) == 10
+
+
+def test_network_probe_detects_shaping_on_the_wrong_link():
+    facts = streaming_document(extra_rtt=280)
+    probe = facts["environment"]["network_probe"]
+    probe["host_ms"], probe["client_ms"] = probe["client_ms"], probe["host_ms"]
+    with pytest.raises(RepoError, match="observed RTT"):
+        model.validate(facts)
+
+
+def test_network_probe_checks_the_requested_delay_and_rejects_unshaped_measurement():
+    facts = streaming_document(extra_rtt=280)
+    assert model.validate(facts) == facts
+    assert "host 280.0 ms, client 0.0 ms" in summary.render(facts)
+    facts["environment"]["network_probe"]["host_ms"] = [1.0] * model.NETWORK_PROBE_COUNT
+    with pytest.raises(RepoError, match="observed RTT"):
+        model.validate(facts)
+    facts["environment"].pop("network_probe")
+    with pytest.raises(RepoError, match="requires network samples"):
+        model.validate(facts)
+
+
+def test_legacy_ack_floor_reports_remain_readable_under_their_own_scenario():
+    facts = streaming_document(version=2)
+    facts["scenario"]["event_ack_floor_ms"] = 280
+    facts["run"]["configuration"]["event_ack_floor_ms"] = 280
+    facts["environment"].pop("network_probe")
+    assert "Host event completion floor: 280 ms" in summary.render(model.validate(facts))
 
 
 def times(items, key):
@@ -364,7 +693,20 @@ def test_benchmark_cli_reports_result_and_compares_saved_evidence(monkeypatch, c
 
     monkeypatch.setattr(cli.benchmark, "run", measure)
     assert (
-        cli.main(["bench", "--attempts", "1", "--warmup", "0", "--output", str(baseline), "--json"])
+        cli.main(
+            [
+                "bench",
+                "--network",
+                "normal",
+                "--attempts",
+                "1",
+                "--warmup",
+                "0",
+                "--output",
+                str(baseline),
+                "--json",
+            ]
+        )
         == 0
     )
     measured = json.loads(capsys.readouterr().out)

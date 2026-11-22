@@ -93,7 +93,7 @@ def test_second_session_watch_conflicts_while_send_succeeds(paired_client, sessi
 def test_watch_streams_while_same_device_send_follows_reply(scenario, paired_client, session_id):
     """An attached watch receives two live deltas before an ordinary send can finish."""
     fixture = scenario.dsh.process
-    fixture.control("bench_schedule", session_id=session_id, fault="silent")
+    fixture.control("suppress_message_echo", session_id=session_id)
     watcher = paired_client.watch("session", "watch", session_id, "--timeout", "40")
     try:
         _attached(watcher)

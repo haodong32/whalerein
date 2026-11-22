@@ -40,6 +40,21 @@ def execute(tmp_path, workflow, step, **env):
     return result.returncode, dict(line.split("=", 1) for line in output.read_text().splitlines())
 
 
+GATE = {
+    "CHANGES_RESULT": "success",
+    "TEST_RESULT": "success",
+    "NATIVE_RESULT": "skipped",
+    "NATIVE_MATRIX": '{"include": []}',
+    "CONTRACT_RESULT": "skipped",
+    "DEPLOYMENT_RESULT": "skipped",
+    "ANDROID_RESULT": "skipped",
+    "ANDROID_MATRIX": '{"include":[]}',
+    "ANDROID_PERFORMANCE_RESULT": "skipped",
+    "ANDROID_PERFORMANCE": "false",
+    "MATRIX": '{"include": [{"projects": ["dsh"]}]}',
+}
+
+
 @pytest.mark.parametrize("action,label", [("synchronize", "run-full-ci"), ("labeled", "other")])
 def test_ordinary_pr_never_checks_out_or_builds_ios(tmp_path, action, label):
     code, outputs = execute(
@@ -160,19 +175,21 @@ def test_ios_architecture_gate_blocks_the_gate(tmp_path, result):
     assert (code == 0) == (result == "success")
 
 
-@pytest.mark.parametrize("proto", [True, False])
-@pytest.mark.parametrize("contract", ["success", "skipped", "failure"])
-def test_full_gate_only_accepts_expected_contract_result(tmp_path, proto, contract):
-    code, _ = execute(
+def gate(tmp_path, **overrides):
+    return execute(
         tmp_path,
         "full-ci.yml",
         "Check required results",
-        CHANGES_RESULT="success",
-        TEST_RESULT="success",
-        NATIVE_RESULT="skipped",
-        NATIVE_MATRIX='{"include": []}',
+        **{**GATE, **overrides},
+    )
+
+
+@pytest.mark.parametrize("proto", [True, False])
+@pytest.mark.parametrize("contract", ["success", "skipped", "failure"])
+def test_full_gate_only_accepts_expected_contract_result(tmp_path, proto, contract):
+    code, _ = gate(
+        tmp_path,
         CONTRACT_RESULT=contract,
-        DEPLOYMENT_RESULT="skipped",
         MATRIX='{"include": [{"projects": ["%s"]}]}' % ("proto" if proto else "dsh"),
     )
     assert (code == 0) == (contract == ("success" if proto else "skipped"))
@@ -181,19 +198,113 @@ def test_full_gate_only_accepts_expected_contract_result(tmp_path, proto, contra
 @pytest.mark.parametrize("access", [True, False])
 @pytest.mark.parametrize("deployment", ["success", "skipped", "failure", "cancelled"])
 def test_full_gate_requires_deployment_only_for_access_consumers(tmp_path, access, deployment):
-    code, _ = execute(
+    code, _ = gate(
         tmp_path,
-        "full-ci.yml",
-        "Check required results",
-        CHANGES_RESULT="success",
-        TEST_RESULT="success",
-        NATIVE_RESULT="skipped",
-        NATIVE_MATRIX='{"include": []}',
-        CONTRACT_RESULT="skipped",
         DEPLOYMENT_RESULT=deployment,
         MATRIX='{"include": [{"projects": ["%s"]}]}' % ("access" if access else "dsh"),
     )
     assert (code == 0) == (deployment == ("success" if access else "skipped"))
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
+def test_full_gate_requires_selected_android_suites(tmp_path, result):
+    code, _ = gate(
+        tmp_path,
+        ANDROID_RESULT=result,
+        ANDROID_MATRIX='{"include":[{"target":"android-ui"}]}',
+    )
+    assert (code == 0) == (result == "success")
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
+def test_full_gate_requires_requested_performance_run(tmp_path, result):
+    code, _ = gate(
+        tmp_path,
+        ANDROID_PERFORMANCE="true",
+        ANDROID_PERFORMANCE_RESULT=result,
+    )
+    assert (code == 0) == (result == "success")
+
+
+@pytest.mark.parametrize(
+    ("action", "label", "expected"),
+    [
+        ("synchronize", "run-full-ci", False),
+        ("labeled", "other", False),
+        ("opened", "run-full-ci", False),
+    ],
+)
+def test_android_heavy_work_never_runs_on_ordinary_pr_events(tmp_path, action, label, expected):
+    code, outputs = execute(
+        tmp_path,
+        "full-ci.yml",
+        "Select Android work",
+        EVENT="pull_request",
+        ACTION=action,
+        LABEL=label,
+    )
+    assert code == 0
+    assert outputs["matrix"] == '{"include":[]}'
+    assert outputs["performance"] == "false"
+    assert expected is False
+
+
+def test_android_heavy_work_selects_exact_revision_on_label_event(tmp_path):
+    git = tmp_path / "git"
+    git.write_text("#!/bin/sh\nprintf 'apps/android/app/build.gradle.kts\\n'\n")
+    git.chmod(0o755)
+    code, outputs = execute(
+        tmp_path,
+        "full-ci.yml",
+        "Select Android work",
+        EVENT="pull_request",
+        ACTION="labeled",
+        LABEL="run-full-ci",
+        BASE_SHA="base",
+        HEAD_SHA="head",
+        PATH=str(tmp_path) + os.pathsep + os.environ["PATH"],
+    )
+    assert code == 0
+    assert [job["target"] for job in json.loads(outputs["matrix"])["include"]] == [
+        "android-ui",
+        "android-integration",
+    ]
+    assert outputs["performance"] == "false"
+
+
+def test_android_heavy_work_skips_unrelated_labeled_changes(tmp_path):
+    git = tmp_path / "git"
+    git.write_text("#!/bin/sh\nprintf 'docs/testing.md\\n'\n")
+    git.chmod(0o755)
+    code, outputs = execute(
+        tmp_path,
+        "full-ci.yml",
+        "Select Android work",
+        EVENT="pull_request",
+        ACTION="labeled",
+        LABEL="run-full-ci",
+        BASE_SHA="base",
+        HEAD_SHA="head",
+        PATH=str(tmp_path) + os.pathsep + os.environ["PATH"],
+    )
+    assert code == 0
+    assert outputs["matrix"] == '{"include":[]}'
+
+
+def test_manual_android_dispatch_can_request_performance(tmp_path):
+    code, outputs = execute(
+        tmp_path,
+        "full-ci.yml",
+        "Select Android work",
+        EVENT="workflow_dispatch",
+        PERFORMANCE="true",
+    )
+    assert code == 0
+    assert outputs["performance"] == "true"
+    assert [job["target"] for job in json.loads(outputs["matrix"])["include"]] == [
+        "android-ui",
+        "android-integration",
+    ]
 
 
 @pytest.mark.parametrize("elapsed,warning", [(179, False), (180, False), (181, True), (500, True)])
