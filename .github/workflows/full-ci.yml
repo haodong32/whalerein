@@ -282,6 +282,11 @@ jobs:
       - name: Add Android Rust targets
         run: rustup target add aarch64-linux-android x86_64-linux-android
 
+      - name: Install protoc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq protobuf-compiler
+
       - name: Fetch Rust dependencies
         run: cargo fetch --locked
 
