@@ -258,6 +258,8 @@ func (s *stack) hostClient(t *testing.T) *mqttClient {
 	ready, err := proto.Marshal(&whalereinv1.HostReady{
 		HostId:            s.hostID,
 		ConnectedAtUnixMs: now,
+		Receive:           acceptanceAdvertisement(1),
+		RelayVersion:      relayEpochV4,
 	})
 	if err != nil {
 		t.Fatalf("encode HostReady: %v", err)
@@ -268,6 +270,7 @@ func (s *stack) hostClient(t *testing.T) *mqttClient {
 		ResultBody:        ready,
 		CompletedAtUnixMs: now,
 		ProtocolVersion:   1,
+		RelayVersion:      relayEpochV4,
 	})
 	if err != nil {
 		t.Fatalf("encode HostReady result: %v", err)
@@ -425,6 +428,24 @@ func waitNotReady(t *testing.T, accessURL string) {
 	t.Fatal("Access stayed ready on a read-only database")
 }
 
+// relayEpochV4 is the only relay contract Access admits (proto/v1/WIRE.md).
+const relayEpochV4 uint32 = 4
+
+// acceptanceAdvertisement is the Host receive budget the broker requires on
+// readiness; values mirror the packaged default transport profile.
+func acceptanceAdvertisement(generation uint64) *whalereinv1.ReceiveAdvertisement {
+	return &whalereinv1.ReceiveAdvertisement{
+		Profile: whalereinv1.TransportProfile_TRANSPORT_PROFILE_DEFAULT,
+		Budget: &whalereinv1.TransportBudget{
+			PacketBytes: 65536, EnvelopeBytes: 16 << 20,
+			BulkConcurrency: 4, ReservedBytes: 32 << 20,
+			TransferTimeoutMs: 120000,
+		},
+		ConnectionGeneration: generation,
+		RelayVersion:         relayEpochV4,
+	}
+}
+
 func eventPayload(hostID, deviceID string) []byte {
 	envelope := &whalereinv1.EventEnvelope{
 		HostId:          hostID,
@@ -434,6 +455,7 @@ func eventPayload(hostID, deviceID string) []byte {
 		Ciphertext:      []byte("ciphertext-acceptance"),
 		TraceId:         "acceptance",
 		CreatedAtUnixMs: time.Now().UnixMilli(),
+		RelayVersion:    relayEpochV4,
 	}
 	encoded, err := proto.Marshal(envelope)
 	if err != nil {
@@ -520,16 +542,10 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 		}
 	})
 
-	t.Run("AC-06 receipts are authorized locally", func(t *testing.T) {
-		before := s.metrics(t)
-		for i := 0; i < 10; i++ {
-			if err := deviceA.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/ack", []byte("ack")); err != nil {
-				t.Fatalf("ack %d: %v", i, err)
-			}
-		}
-		after := s.metrics(t)
-		if delta := after["grant_admission_loads_total"] - before["grant_admission_loads_total"]; delta != 0 {
-			t.Fatalf("receipts performed %v grant loads", delta)
+	t.Run("AC-06 retired acknowledgement topic is rejected", func(t *testing.T) {
+		// The relay epoch has no device acknowledgement or receipt topic.
+		if err := deviceA.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/ack", []byte("ack")); err == nil {
+			t.Fatal("retired device acknowledgement topic was accepted")
 		}
 	})
 
@@ -589,7 +605,7 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 		// The broker connection must be closed with its published policy.
 		deadline := time.Now().Add(10 * time.Second)
 		for {
-			if err := deviceA.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/ack", []byte("x")); err != nil {
+			if err := deviceA.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[0]+"/ready", nil); err != nil {
 				break
 			}
 			if time.Now().After(deadline) {
@@ -618,7 +634,7 @@ func TestMosquittoLineAcceptance(t *testing.T) {
 			retry.close()
 		}
 		// Other grants remain usable.
-		if err := deviceB.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[1]+"/ack", []byte("ok")); err != nil {
+		if err := deviceB.publish(t, "whalerein/v1/h/"+s.hostID+"/d/"+s.devices[1]+"/ready", nil); err != nil {
 			t.Fatalf("unrelated grant lost after revoke: %v", err)
 		}
 		// Revocation survives an Access restart.
