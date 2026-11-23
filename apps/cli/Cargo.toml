@@ -24,5 +24,8 @@ tokio = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+bytes = { workspace = true }
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-no-provider"] }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net"] }
 whalerein-core = { workspace = true, features = ["test-support"] }

@@ -1201,6 +1201,20 @@ pub fn pad_cell(value: &str, width: usize) -> String {
     text
 }
 
+/// One Host's authoritative device connection, from a fresh probe.
+pub fn render_host_status(snapshot: &whalerein_core::api::ConnectionSnapshot) -> String {
+    let mut line = format!(
+        "{}  {}",
+        sanitize_field(&snapshot.host_id),
+        snapshot.state.as_str()
+    );
+    if let Some(code) = &snapshot.code {
+        line.push_str(&format!(" ({})", sanitize_field(code)));
+    }
+    line.push('\n');
+    line
+}
+
 pub fn render_hosts(hosts: &[HostInfo]) -> String {
     if hosts.is_empty() {
         return "No authorized hosts. Pair one with `whalerein host connect --invite-stdin`.\n"

@@ -33,7 +33,7 @@ struct WaitControlView: View {
                         Label(L10nKey.waitStart.key, systemImage: "hourglass")
                     }
                     .buttonStyle(.bordered)
-                    .disabled(!model.connection.isOnline || model.watchEnded)
+                    .disabled(!model.connectivity.isOnline(model.hostId) || model.watchEnded)
                     .accessibilityIdentifier("wait.start")
                     .accessibilityLabel(L10nKey.waitStart.key)
                 }

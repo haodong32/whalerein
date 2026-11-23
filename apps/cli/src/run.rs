@@ -22,10 +22,10 @@ use crate::output::{
     history_message_data, history_page_data, hosts_data, is_tail_output, lifecycle_error_code,
     lifecycle_exit_code, manifest_data, message_json, render_approval, render_approvals,
     render_command, render_doctor, render_download, render_history_message, render_history_page,
-    render_hosts, render_lifecycle_outcome, render_manifest, render_models, render_pair,
-    render_pairing_history, render_questions, render_queue, render_session_model, render_sessions,
-    retain_visible_sessions, sanitize_field, sessions_data, shell_quote, tail_event_json, CliError,
-    CliOutcome, DownloadProgressRenderer, TailRenderer,
+    render_host_status, render_hosts, render_lifecycle_outcome, render_manifest, render_models,
+    render_pair, render_pairing_history, render_questions, render_queue, render_session_model,
+    render_sessions, retain_visible_sessions, sanitize_field, sessions_data, shell_quote,
+    tail_event_json, CliError, CliOutcome, DownloadProgressRenderer, TailRenderer,
 };
 
 const DEFAULT_TAIL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -627,6 +627,39 @@ async fn dispatch(
         )),
         Command::Hosts if core.client_config().service == ClientService::WhaleReinCloud => {
             crate::account::run(core, command).await
+        }
+        Command::HostStatus { host } => {
+            let Some(host_id) = host.clone().or_else(|| core.default_host().ok().flatten()) else {
+                return Ok(CliOutcome::local_failure(
+                    command,
+                    "invalid_argument",
+                    "Select a Host with --host or `whalerein host default`.",
+                    2,
+                ));
+            };
+            // The probe is the point: a reported state always means "right
+            // now", never a cached value from an earlier session.
+            let snapshot = match core.connect_host(&host_id).await {
+                Ok(snapshot) => snapshot,
+                // A terminal refusal still has a specific state to report; an
+                // unknown Host keeps the original error.
+                Err(error) => match core.connection_snapshot(&host_id) {
+                    Some(snapshot) => snapshot,
+                    None => return Err(error),
+                },
+            };
+            Ok(CliOutcome::success(
+                command,
+                json!({
+                    "host_id": snapshot.host_id,
+                    "connection": {
+                        "state": snapshot.state.as_str(),
+                        "code": snapshot.code,
+                        "since_unix_ms": snapshot.since_unix_ms,
+                    }
+                }),
+                render_host_status(&snapshot),
+            ))
         }
         Command::Hosts => match core.inspect_regional_hosts().await {
             Ok(hosts) => Ok(CliOutcome::success(

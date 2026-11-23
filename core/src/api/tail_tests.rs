@@ -268,7 +268,7 @@ async fn rejected_subscription_fails_without_forgetting_identity() {
     peer.abort();
 }
 #[tokio::test]
-async fn watch_deadline_cancels_the_mqtt_pump_and_closes_its_connection() {
+async fn a_finished_watch_keeps_the_host_connection_and_a_fresh_watch_reattaches() {
     let (_dir, core, _access, listener) = setup().await;
     let peer = tokio::spawn(async move {
         let mut stream = subscribe(&listener).await;
@@ -285,18 +285,24 @@ async fn watch_deadline_cancels_the_mqtt_pump_and_closes_its_connection() {
             .await,
         Err(CoreError::Timeout)
     ));
-    tokio::time::timeout(Duration::from_secs(1), peer)
-        .await
-        .unwrap()
-        .unwrap();
-    // AC-07.cancel: cancellation releases the profile watch lease with the
-    // pump, so a fresh watch attaches instead of conflicting with the finished
-    // one.
+    // The watch ends; the Host connection does not. A second watch attaches
+    // over the same broker session instead of opening another one.
     assert!(matches!(
         core.watch_session(&key, Some(Duration::from_millis(100)), |_| true)
             .await,
         Err(CoreError::Timeout)
     ));
+    assert_eq!(
+        core.connection_snapshot("host-1")
+            .map(|snapshot| snapshot.state),
+        Some(crate::runtime::ConnectionState::Connected),
+        "ending a watch must not disturb the Host connection"
+    );
+    core.disconnect_host("host-1");
+    tokio::time::timeout(Duration::from_secs(1), peer)
+        .await
+        .unwrap()
+        .unwrap();
 }
 #[tokio::test]
 async fn host_scoped_sync_is_idempotent_and_summary_refresh_does_not_advance_it() {
@@ -750,27 +756,38 @@ async fn gap_recovery_delivers_unseen_committed_messages_and_not_the_baseline() 
 #[tokio::test]
 async fn reconnect_does_not_replay_committed_history() {
     use tokio::sync::oneshot;
-    let (_dir, core, _access, listener) = setup().await;
+    let (_dir, core, access, listener) = setup().await;
+    let host_state = access.host.clone();
     let peer_core = core.clone();
     let (reset_tx, reset_rx) = oneshot::channel();
     let mut reset_tx = Some(reset_tx);
     let peer = tokio::spawn(async move {
-        // First connection: the source resets, forcing a reconnect.
-        let mut first = subscribe(&listener).await;
+        // The Host connection is shared and survives a watch reconnect, so the
+        // peer keeps publishing over the one broker session.
+        let mut stream = subscribe(&listener).await;
+        let baseline = host_state.lock().unwrap().query_attempts;
         let _ = reset_rx.await;
-        publish_control(&mut first, reset_event(&peer_core, "session-1", "watch-1")).await;
+        publish_control(&mut stream, reset_event(&peer_core, "session-1", "watch-1")).await;
         let mut b = [0; 16];
-        let _ = first.read(&mut b).await;
-        // Second connection: only new live output may be delivered.
-        let mut second = subscribe(&listener).await;
-        publish(&mut second, event(&peer_core, "session-1", "watch-1")).await;
-        let _ = second.read(&mut b).await;
+        let _ = stream.read(&mut b).await;
+        // Only after the watch re-attached may new live output be delivered.
+        // The shared Host connection stays subscribed, so publishing after the
+        // reattach window is enough; a few retries cover the backoff.
+        let _ = baseline;
+        // Publish across the reconnect backoff window; the shared connection
+        // keeps the broker session, so the first frame after the reattach is
+        // the one the new watch sees.
+        for _ in 0..80 {
+            publish(&mut stream, event(&peer_core, "session-1", "watch-1")).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = stream.read(&mut b).await;
     });
     let key = core.session_key("session-1").await.unwrap();
     let mut messages = 0;
     let mut previews = 0;
     let count = core
-        .watch_session(&key, Some(Duration::from_secs(5)), |update| {
+        .watch_session(&key, Some(Duration::from_secs(12)), |update| {
             match update {
                 ViewUpdate::State(_) => {
                     if let Some(sender) = reset_tx.take() {
@@ -1334,13 +1351,15 @@ async fn a_transient_channel_path_failure_reconnects_the_watch_and_keeps_output(
     let (gap_tx, gap_rx) = oneshot::channel();
     let mut gap_tx = Some(gap_tx);
     let peer = tokio::spawn(async move {
-        let mut first = subscribe(&listener).await;
+        let mut stream = subscribe(&listener).await;
+        let baseline = host_state.lock().unwrap().query_attempts;
         let _ = gap_rx.await;
         // A gap forces a history read; make that read fail the way a channel
-        // path change does, then let the retry succeed.
+        // path change does, then let the retry succeed. The Host connection is
+        // shared, so the retry reuses this broker session.
         host_state.lock().unwrap().query_error = Some(whalerein_proto::ErrorCode::Internal);
         publish_control(
-            &mut first,
+            &mut stream,
             history_event(
                 &peer_core,
                 "session-1",
@@ -1353,21 +1372,24 @@ async fn a_transient_channel_path_failure_reconnects_the_watch_and_keeps_output(
         )
         .await;
         let mut b = [0; 16];
-        let _ = first.read(&mut b).await;
+        let _ = stream.read(&mut b).await;
         host_state.lock().unwrap().query_error = None;
-        let mut second = subscribe(&listener).await;
-        publish(
-            &mut second,
-            live_frame_event(&peer_core, "session-1", "watch-1", 2, "x"),
-        )
-        .await;
-        let _ = second.read(&mut b).await;
+        let _ = baseline;
+        for _ in 0..80 {
+            publish(
+                &mut stream,
+                live_frame_event(&peer_core, "session-1", "watch-1", 2, "x"),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = stream.read(&mut b).await;
     });
     let key = core.session_key("session-1").await.unwrap();
     let mut previews = 0;
     let mut armed = true;
     let count = core
-        .watch_session(&key, Some(Duration::from_secs(5)), |update| {
+        .watch_session(&key, Some(Duration::from_secs(12)), |update| {
             if let ViewUpdate::State(_) = update {
                 if armed {
                     armed = false;

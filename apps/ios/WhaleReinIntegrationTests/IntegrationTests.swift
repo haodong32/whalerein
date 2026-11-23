@@ -345,8 +345,7 @@ func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
         case .reasoningPreview: return "reasoningPreview"
         case .toolActivity: return "toolActivity"
         case .attemptEnded: return "attemptEnded"
-        case .state: return "state"
-        case .connection: return "connection"
+        case .hostConnection: return "hostConnection"
         case .capabilities: return "capabilities"
         case .approvals: return "approvals"
         case .approvalChanged: return "approvalChanged"
@@ -359,11 +358,11 @@ func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
     }
 }
 
-func lastConnection(in envelopes: [SessionEventEnvelope]) -> ConnectionStatus? {
+func lastConnection(in envelopes: [SessionEventEnvelope]) -> HostConnectionStatus? {
     for envelope in envelopes.reversed() {
         switch envelope.event {
-        case .connection(_, let status), .state(let status):
-            return status
+        case .hostConnection(_, let state, let code, _):
+            return HostConnectionStatus(state: state, code: code)
         default:
             continue
         }
@@ -480,6 +479,8 @@ class IntegrationTestCase: XCTestCase {
     func startWatching(_ live: LiveCase) async throws -> EventCollector {
         let stream = live.service.makeEventStream()
         let collector = EventCollector(stream)
+        // The Host connection is app-level; a watch alone no longer reports it.
+        live.service.startHostMonitor(hostIds: [live.environment.hostId])
         try await live.service.startWatch(
             hostId: live.environment.hostId,
             sessionId: live.environment.sessionId
@@ -659,7 +660,7 @@ extension IntegrationTestCase {
         let live = try makeLive(environment)
         try await live.pairFreshInvitation()
         let collector = try await startWatching(live)
-        _ = await collector.wait(timeout: 20) { lastConnection(in: $0) == .online }
+        _ = await collector.wait(timeout: 20) { lastConnection(in: $0) == .connected }
         try await live.control.seedEvent("running")
         try await live.control.seedEvent("stream")
 
@@ -705,7 +706,7 @@ extension IntegrationTestCase {
         var baselineCount = transcript(from: collector.envelopes).count
         // Prove the live subscription is receiving committed events before
         // driving the ephemeral preview, which is not replayed from history.
-        _ = await collector.wait(timeout: 20) { lastConnection(in: $0) == .online }
+        _ = await collector.wait(timeout: 20) { lastConnection(in: $0) == .connected }
         try await live.control.seedEvent("output")
         let liveDelivered = await collector.wait(timeout: 20) {
             transcript(from: $0).count > baselineCount
@@ -765,7 +766,7 @@ extension IntegrationTestCase {
         let live = try makeLive(environment)
         try await live.pairFreshInvitation()
         let collector = try await startWatching(live)
-        let online = await collector.wait(timeout: 20) { lastConnection(in: $0) == .online }
+        let online = await collector.wait(timeout: 20) { lastConnection(in: $0) == .connected }
         XCTAssertTrue(
             online,
             "watch did not report an online connection; last=\(String(describing: lastConnection(in: collector.envelopes))); events=\(eventKinds(collector.envelopes))"
@@ -782,7 +783,7 @@ extension IntegrationTestCase {
 
         let degraded = await collector.wait(timeout: 30) { envelopes in
             guard let status = lastConnection(in: envelopes) else { return false }
-            return status != .online
+            return status != .connected
         }
         XCTAssertTrue(
             degraded,
@@ -798,7 +799,7 @@ extension IntegrationTestCase {
         XCTAssertFalse(cached.isEmpty)
 
         try await live.control.startBroker()
-        let recovered = await collector.wait(timeout: 40) { lastConnection(in: $0) == .online }
+        let recovered = await collector.wait(timeout: 40) { lastConnection(in: $0) == .connected }
         XCTAssertTrue(recovered, "watch did not recover after the broker restarted")
         collector.cancel()
     }
@@ -1224,14 +1225,14 @@ extension IntegrationTestCase {
         let live = try makeLive(environment)
         try await live.pairFreshInvitation()
         let watch = try await startWatching(live)
-        _ = await watch.wait(timeout: 20) { lastConnection(in: $0) == .online }
+        _ = await watch.wait(timeout: 20) { lastConnection(in: $0) == .connected }
 
         try await live.control.stopBroker()
         addBrokerRestoreTeardown(live)
 
         let degraded = await watch.wait(timeout: 30) { envelopes in
             guard let status = lastConnection(in: envelopes) else { return false }
-            return status != .online
+            return status != .connected
         }
         XCTAssertTrue(degraded, "watch did not report a degraded connection with MQTT down")
 
@@ -1244,7 +1245,7 @@ extension IntegrationTestCase {
         XCTAssertTrue(report.stages.contains { $0.kind == .mqtt && $0.status != .ok })
 
         try await live.control.startBroker()
-        let recovered = await watch.wait(timeout: 40) { lastConnection(in: $0) == .online }
+        let recovered = await watch.wait(timeout: 40) { lastConnection(in: $0) == .connected }
         XCTAssertTrue(recovered, "watch did not recover after MQTT was restored")
         watch.cancel()
     }

@@ -20,30 +20,22 @@ use crate::sync::SyncState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
     Disconnected,
-    Pairing,
     Connecting,
-    Handshaking,
-    Syncing,
     Connected,
     Reconnecting,
     Offline,
     Revoked,
-    Failed,
 }
 
 impl ConnectionState {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Disconnected => "disconnected",
-            Self::Pairing => "pairing",
             Self::Connecting => "connecting",
-            Self::Handshaking => "handshaking",
-            Self::Syncing => "syncing",
             Self::Connected => "connected",
             Self::Reconnecting => "reconnecting",
             Self::Offline => "offline",
             Self::Revoked => "revoked",
-            Self::Failed => "failed",
         }
     }
 
@@ -57,27 +49,19 @@ impl ConnectionState {
         if next == Self::Revoked {
             return true;
         }
-        if matches!(next, Self::Offline | Self::Failed) {
+        if next == Self::Offline {
             return true;
         }
         matches!(
             (self, next),
-            (Self::Disconnected, Self::Pairing)
-                | (Self::Disconnected, Self::Connecting)
-                | (Self::Pairing, Self::Handshaking)
-                | (Self::Pairing, Self::Disconnected)
-                | (Self::Connecting, Self::Handshaking)
-                | (Self::Handshaking, Self::Syncing)
-                | (Self::Syncing, Self::Connected)
+            (Self::Disconnected, Self::Connecting)
+                | (Self::Connecting, Self::Connected)
                 | (Self::Connected, Self::Reconnecting)
                 | (Self::Connected, Self::Disconnected)
                 | (Self::Reconnecting, Self::Connecting)
                 | (Self::Reconnecting, Self::Connected)
                 | (Self::Offline, Self::Connecting)
                 | (Self::Offline, Self::Reconnecting)
-                | (Self::Failed, Self::Connecting)
-                | (Self::Failed, Self::Reconnecting)
-                | (Self::Failed, Self::Disconnected)
         )
     }
 }
@@ -469,18 +453,15 @@ mod tests {
     #[test]
     fn allows_only_defined_connection_state_transitions() {
         use ConnectionState::*;
-        assert!(Disconnected.can_transition(Pairing));
         assert!(Disconnected.can_transition(Connecting));
-        assert!(Connecting.can_transition(Handshaking));
-        assert!(Handshaking.can_transition(Syncing));
-        assert!(Syncing.can_transition(Connected));
+        assert!(Connecting.can_transition(Connected));
         assert!(Connected.can_transition(Reconnecting));
         assert!(Reconnecting.can_transition(Connecting));
         assert!(Connected.can_transition(Offline));
         assert!(Connected.can_transition(Revoked));
         assert!(!Revoked.can_transition(Connecting));
         assert!(!Disconnected.can_transition(Connected));
-        assert!(!Syncing.can_transition(Handshaking));
+        assert!(!Disconnected.can_transition(Reconnecting));
     }
 
     #[test]
@@ -489,13 +470,9 @@ mod tests {
         assert_eq!(runtime.state("h"), ConnectionState::Disconnected);
         runtime.set_state("h", ConnectionState::Connecting).unwrap();
         assert!(matches!(
-            runtime.set_state("h", ConnectionState::Connected),
+            runtime.set_state("h", ConnectionState::Reconnecting),
             Err(CoreError::Internal(_))
         ));
-        runtime
-            .set_state("h", ConnectionState::Handshaking)
-            .unwrap();
-        runtime.set_state("h", ConnectionState::Syncing).unwrap();
         runtime.set_state("h", ConnectionState::Connected).unwrap();
         assert_eq!(runtime.state("h"), ConnectionState::Connected);
     }

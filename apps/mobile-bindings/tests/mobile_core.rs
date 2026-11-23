@@ -97,7 +97,10 @@ fn unpaired_hosts_is_a_typed_error_not_a_panic() {
             .code(),
         "not_paired"
     );
-    assert_eq!(core.connection_state("host-1".into()), "disconnected");
+    assert!(
+        core.host_connection("host-1".into()).is_none(),
+        "a Host whose connection was never opened has no state"
+    );
 }
 
 #[test]
@@ -619,6 +622,55 @@ fn has_message(events: &[ConversationEvent], text: &str) -> bool {
 }
 
 #[test]
+fn host_monitor_reports_connection_transitions_without_a_watch() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let mqtt_url = format!("mqtt://{}", listener.local_addr().unwrap());
+    spawn_mqtt_peer(&runtime, listener);
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair_with_mqtt(&core, &access, &mqtt_url);
+
+    core.start_host_monitor(vec![host_id.clone()]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut states = Vec::new();
+    while Instant::now() < deadline {
+        for event in core.poll_events(200) {
+            if let ConversationEvent::HostConnection {
+                host_id: event_host,
+                state,
+                ..
+            } = event
+            {
+                if event_host == host_id {
+                    states.push(state);
+                }
+            }
+        }
+        if states.iter().any(|state| state == "connected") {
+            break;
+        }
+    }
+    assert!(
+        states.iter().any(|state| state == "connected"),
+        "the monitor never reported a usable connection: {states:?}"
+    );
+    let snapshot = core
+        .host_connection(host_id.clone())
+        .expect("a probed Host has a snapshot");
+    assert_eq!(snapshot.state, "connected");
+    assert_eq!(snapshot.host_id, host_id);
+
+    core.stop_host_monitor();
+    assert_eq!(
+        core.host_connection(host_id).map(|snapshot| snapshot.state),
+        Some("disconnected".to_owned()),
+        "stopping the monitor closes the connection it opened"
+    );
+}
+
+#[test]
 fn queued_old_watch_events_never_become_the_next_sessions_events() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let access = runtime.block_on(FakeAccess::start());
@@ -823,17 +875,15 @@ fn identical_session_ids_on_two_authorized_hosts_keep_their_event_scopes() {
         !has_message(&emitted, "HOST-A-ONLY"),
         "Host A's queued message was emitted as Host B's session event: {emitted:?}"
     );
+    // Connection events are Host-scoped and no longer produced by a watch;
+    // switching sessions must never relabel them either.
     assert!(
         !emitted.iter().any(|event| matches!(
             event,
-            ConversationEvent::Connection { host_id, .. } if host_id == &host_a
+            ConversationEvent::HostConnection { host_id, .. } if host_id == &host_a
         )),
-        "Host A's queued connection event surfaced under the Host B watch: {emitted:?}"
+        "Host A's connection surfaced under the Host B watch: {emitted:?}"
     );
-    assert!(emitted.iter().any(|event| matches!(
-        event,
-        ConversationEvent::Connection { host_id, .. } if host_id == &host_b
-    )));
     // The replacement watch records its own typed terminal because the
     // fixture's WatchReady is bound to Host A; old-watch liveness is covered
     // by the queued-old-watch test. The scoping assertion above is the point:

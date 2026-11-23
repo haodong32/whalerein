@@ -1064,6 +1064,16 @@ impl From<PreviewPrefix> for PreviewPrefixView {
     }
 }
 
+/// The authoritative connection of one Host. `None` from `hostConnection`
+/// means the connection was never opened; `offline` means it was and stopped.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct HostConnectionView {
+    pub host_id: String,
+    pub state: String,
+    pub code: Option<String>,
+    pub since_unix_ms: u64,
+}
+
 /// Ordered events produced by a running watch and by pairing.
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ConversationEvent {
@@ -1106,9 +1116,16 @@ pub enum ConversationEvent {
         attempt: AttemptRefView,
         outcome: String,
     },
-    Connection {
+    /// One authoritative Host connection transition. Host-scoped: it is
+    /// delivered with no session open and survives watch replacement.
+    HostConnection {
         host_id: String,
-        status: String,
+        /// `connecting`, `connected`, `reconnecting`, `offline`,
+        /// `disconnected`, or `revoked`.
+        state: String,
+        /// Present only for a terminal state (revoked, unauthorized, TLS...).
+        code: Option<String>,
+        since_unix_ms: u64,
     },
     PairingPrompt {
         prompt: PairingPromptView,

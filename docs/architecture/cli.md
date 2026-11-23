@@ -24,6 +24,12 @@ receipt, resolves the confirmed canonical message through Core's public history
 read, and renders its typed blocks in the original command under one remaining
 deadline.
 
+`host status` is the explicit connection probe: it opens the Host
+connection, waits a bounded time for a usable state, and reports the
+authoritative `state`, terminal `code` and `since_unix_ms`. It needs no
+session and never reads a cached value; a Host that cannot be reached keeps
+its current state instead of failing the command.
+
 `session show` stays the finite metadata summary. `session history` is the
 independent committed-history entry point. It performs one bounded Core page
 read with no watch lease, MQTT subscription or cache write, starts with the

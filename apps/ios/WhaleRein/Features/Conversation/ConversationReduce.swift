@@ -14,7 +14,6 @@ enum ConversationAction: Equatable, Sendable {
     case contentLoaded
     case snapshot(messages: [ConversationMessage], approvals: [Approval])
     case watchEnded
-    case connectionChanged(ConnectionStatus)
     case capabilitiesLoaded(SessionCapabilities)
 
     // Content
@@ -84,7 +83,6 @@ enum ConversationReduce {
             state.loadError = nil
             state.provenance = .confirmed
             state.watch.ended = false
-            state.connection = .online
             // A pending approval that is no longer reported has been decided
             // elsewhere; the screen must not keep acting on it.
             if let current = state.approval.approval,
@@ -94,11 +92,6 @@ enum ConversationReduce {
 
         case .watchEnded:
             state.watch.ended = true
-            state.connection = .offline
-
-        case .connectionChanged(let status):
-            state.connection = status
-            if status == .online { state.watch.ended = false }
 
         case .capabilitiesLoaded(let capabilities):
             state.capabilities = capabilities

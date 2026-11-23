@@ -18,7 +18,6 @@ final class LiveSessionService: SessionService {
 
     private var eventPump: Task<Void, Never>?
     private var continuations: [UUID: AsyncStream<SessionEventEnvelope>.Continuation] = [:]
-    private(set) var connectionStatus: ConnectionStatus = .offline
 
     private var activeWatch: SessionContext?
     private var watchGeneration: UInt64 = 0
@@ -157,6 +156,17 @@ final class LiveSessionService: SessionService {
             return
         case .pairingPrompt:
             return
+        case .hostConnection(let hostId, let state, let code, let sinceUnixMs):
+            // Host-scoped and independent of any watch. Broadcast it before the
+            // watch guard so it is delivered with no session open and is never
+            // dropped when a watch is replaced.
+            broadcastHostConnection(
+                hostId: hostId,
+                state: state,
+                code: code,
+                sinceUnixMs: sinceUnixMs
+            )
+            return
         default:
             break
         }
@@ -165,13 +175,6 @@ final class LiveSessionService: SessionService {
 
         switch event {
         case .state(_, _, let running, _, let approvals):
-            // Core only emits an authoritative SessionState after a
-            // successful watch/snapshot handoff, so this implies connectivity
-            // even when the short-lived `connected` poll transition is missed.
-            if connectionStatus != .online {
-                connectionStatus = .online
-                broadcast(.state(.online), scope: scope)
-            }
             let mapped = approvals.map(Self.map(approval:))
             latestApprovals = mapped
             broadcast(.approvals(mapped), scope: scope)
@@ -241,12 +244,6 @@ final class LiveSessionService: SessionService {
                 scope: scope
             )
 
-        case .connection(let hostId, let status):
-            guard hostId == scope.hostId else { return }
-            let mapped = Self.map(connection: status)
-            connectionStatus = mapped
-            broadcast(.connection(hostId: hostId, status: mapped), scope: scope)
-
         case .commandStatus(let command):
             broadcast(.commandStatus(Self.map(command: command, delivery: nil)), scope: scope)
 
@@ -279,11 +276,10 @@ final class LiveSessionService: SessionService {
             )
 
         case .watchEnded:
-            connectionStatus = .offline
             activeWatch = nil
             broadcast(.watchEnded(reason: "ended"), scope: scope)
 
-        case .pairingFinished, .pairingPrompt:
+        case .pairingFinished, .pairingPrompt, .hostConnection:
             break
         }
     }
@@ -301,11 +297,52 @@ final class LiveSessionService: SessionService {
         }
     }
 
-    private func finishStreams() {
+    /// Host-scoped events are not owned by a watch: they are delivered with an
+    /// empty session id and survive every watch replacement.
+    private func broadcastHostConnection(
+        hostId: String,
+        state: String,
+        code: String?,
+        sinceUnixMs: UInt64
+    ) {
+        sequence += 1
+        let envelope = SessionEventEnvelope(
+            hostId: hostId,
+            sessionId: "",
+            sequence: sequence,
+            event: .hostConnection(
+                hostId: hostId,
+                state: state,
+                code: code,
+                sinceUnixMs: sinceUnixMs
+            )
+        )
         for continuation in continuations.values {
-            continuation.finish()
+            continuation.yield(envelope)
         }
-        continuations.removeAll()
+    }
+
+    // MARK: - Host connection
+
+    func hostConnection(hostId: String) -> HostConnectionSnapshot? {
+        let core = self.core
+        guard let view = core.hostConnection(hostId: hostId) else { return nil }
+        return HostConnectionSnapshot(
+            hostId: view.hostId,
+            state: view.state,
+            code: view.code,
+            sinceUnixMs: view.sinceUnixMs
+        )
+    }
+
+    func startHostMonitor(hostIds: [String]) {
+        let core = self.core
+        core.startHostMonitor(hostIds: hostIds)
+    }
+
+    func stopHostMonitor() {
+        let core = self.core
+        core.stopHostMonitor()
     }
 
     // MARK: - Pairing
@@ -477,10 +514,9 @@ final class LiveSessionService: SessionService {
     func stopWatch() {
         watchGeneration &+= 1
         activeWatch = nil
-        connectionStatus = .offline
         let core = self.core
         _ = Task.detached { core.stopWatch() }
-        finishStreams()    }
+    }
 
     // MARK: - Commands
 
@@ -1117,16 +1153,6 @@ final class LiveSessionService: SessionService {
         broadcast(.reset(messages: mapped, approvals: latestApprovals), scope: scope)
     }
 
-    private static func map(connection status: String) -> ConnectionStatus {
-        switch status.lowercased() {
-        case "connected": return .online
-        case "reconnecting": return .reconnecting
-        case "pairing", "connecting", "handshaking", "syncing": return .connecting
-        case "degraded": return .degraded
-        default: return .offline
-        }
-    }
-
     static func map(operationStatus status: CommandStatus) -> OperationStatus {
         switch status {
         case .accepted: return .accepted
@@ -1223,7 +1249,7 @@ final class LiveSessionService: SessionService {
             } else {
                 switch state {
                 case "connected": mqtt = .ok
-                case "failed", "offline", "revoked": mqtt = .failed
+                case "offline", "revoked": mqtt = .failed
                 default: mqtt = .idle
                 }
             }

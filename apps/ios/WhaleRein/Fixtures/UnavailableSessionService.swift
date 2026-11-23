@@ -8,7 +8,6 @@ import Foundation
 
 @MainActor
 final class UnavailableSessionService: SessionService {
-    let connectionStatus: ConnectionStatus = .offline
     let instanceId: String
     let coreRevision = "unavailable"
     let appVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0"
@@ -25,6 +24,10 @@ final class UnavailableSessionService: SessionService {
             continuation.finish()
         }
     }
+
+    func hostConnection(hostId: String) -> HostConnectionSnapshot? { nil }
+    func startHostMonitor(hostIds: [String]) {}
+    func stopHostMonitor() {}
 
     private func fail() throws -> Never {
         throw SessionServiceError(code)

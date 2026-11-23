@@ -168,7 +168,6 @@ final class ConversationModel {
         set { state.watch.reconnecting = newValue }
     }
 
-    var connection: ConnectionStatus { state.connection }
     var loadState: LoadState {
         if let error = state.loadError { return .failed(error) }
         if state.isLoaded { return .loaded }
@@ -266,12 +265,14 @@ final class ConversationModel {
     }
 
     let service: any SessionService
+    /// App-level authoritative Host status; the conversation never owns a
+    /// second connection state of its own.
+    let connectivity: HostConnectivityModel
     /// Queue and wait are independent observations; neither owns the watch.
     let queue: ConversationQueueController
     let wait: ConversationWaitController
     let onStatusChange: (() -> Void)?
     let onFatalError: ((AppErrorCode) -> Void)?
-    let onConnectionChange: ((ConnectionStatus) -> Void)?
     let onReconnected: (() -> Void)?
     let now: () -> Date
 
@@ -309,9 +310,9 @@ final class ConversationModel {
         sessionId: String,
         sessionTitle: String,
         service: any SessionService,
+        connectivity: HostConnectivityModel,
         onStatusChange: (() -> Void)? = nil,
         onFatalError: ((AppErrorCode) -> Void)? = nil,
-        onConnectionChange: ((ConnectionStatus) -> Void)? = nil,
         onReconnected: (() -> Void)? = nil,
         now: @escaping () -> Date = Date.init
     ) {
@@ -319,6 +320,7 @@ final class ConversationModel {
         self.sessionId = sessionId
         self.sessionTitle = sessionTitle
         self.service = service
+        self.connectivity = connectivity
         self.queue = ConversationQueueController(
             hostId: hostId,
             sessionId: sessionId,
@@ -331,7 +333,6 @@ final class ConversationModel {
         )
         self.onStatusChange = onStatusChange
         self.onFatalError = onFatalError
-        self.onConnectionChange = onConnectionChange
         self.onReconnected = onReconnected
         self.now = now
         self.attachments = AttachmentTransferModel(
@@ -352,6 +353,7 @@ final class ConversationModel {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && inFlightSend == nil
             && pendingSubmission == nil
+            && connectivity.isOnline(hostId)
             && !watchEnded
             && !isReconnecting
     }
@@ -375,7 +377,7 @@ final class ConversationModel {
     }
 
     var canInteractWithQuestions: Bool {
-        questions.isCurrent && !watchEnded && connection.isOnline
+        questions.isCurrent && !watchEnded && connectivity.isOnline(hostId)
             && questionAnswerState != .submitting
     }
 
@@ -447,7 +449,7 @@ final class ConversationModel {
     /// Reason a pending card's decision controls are disabled. Offline decisions
     /// are refused with an explicit message instead of failing silently.
     var approvalActionDisabledReasonKey: L10nKey? {
-        if watchEnded || !connection.isOnline { return .approvalOffline }
+        if watchEnded || !connectivity.isOnline(hostId) { return .approvalOffline }
         if resolvingApprovalId != nil { return .approvalBusy }
         return nil
     }
@@ -466,7 +468,7 @@ final class ConversationModel {
         approval.state == .pending
             && !isApprovalExpired(approval)
             && resolvingApprovalId == nil
-            && connection.isOnline
+            && connectivity.isOnline(hostId)
             && !watchEnded
             && approvalStatusRefresh[approval.approvalId] != .refreshing
     }

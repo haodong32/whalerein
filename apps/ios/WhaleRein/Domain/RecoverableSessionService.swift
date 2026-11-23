@@ -29,8 +29,6 @@ final class RecoverableSessionService: SessionService {
 
     var isRecovered: Bool { underlying != nil }
 
-    var connectionStatus: ConnectionStatus { underlying?.connectionStatus ?? .offline }
-
     var instanceId: String { underlying?.instanceId ?? fallbackInstanceId }
 
     var coreRevision: String { underlying?.coreRevision ?? "unavailable" }
@@ -63,6 +61,20 @@ final class RecoverableSessionService: SessionService {
         return AsyncStream { continuation in
             continuation.finish()
         }
+    }
+
+    // MARK: - Host connection
+
+    func hostConnection(hostId: String) -> HostConnectionSnapshot? {
+        underlying?.hostConnection(hostId: hostId)
+    }
+
+    func startHostMonitor(hostIds: [String]) {
+        (try? current())?.startHostMonitor(hostIds: hostIds)
+    }
+
+    func stopHostMonitor() {
+        underlying?.stopHostMonitor()
     }
 
     // MARK: - Pairing

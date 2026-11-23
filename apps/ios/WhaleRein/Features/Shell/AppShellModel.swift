@@ -23,6 +23,8 @@ final class AppShellModel {
 
     var pairing: PairingModel
     var hostList: HostListModel
+    /// One authoritative Host connection for every screen.
+    var connectivity: HostConnectivityModel
     var sessionList: SessionListModel
     var diagnostics: DiagnosticsModel
     var settings: SettingsModel
@@ -117,6 +119,7 @@ final class AppShellModel {
         )
         self.pairing = models.pairing
         self.hostList = models.hostList
+        self.connectivity = HostConnectivityModel()
         self.sessionList = models.sessionList
         self.diagnostics = models.diagnostics
         self.settings = models.settings

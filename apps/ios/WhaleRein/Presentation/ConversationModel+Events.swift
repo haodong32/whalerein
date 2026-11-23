@@ -62,11 +62,9 @@ extension ConversationModel {
             previewText = nil
             previewAttemptId = nil
             authoritativeRunEpoch += 1
-            state = ConversationReduce.reduce(state, .connectionChanged(.online))
             state = ConversationReduce.reduce(state, .contentLoaded)
             approvalClock = now()
             scroll.reset()
-            onConnectionChange?(connection)
             restartApprovalTimer()
 
         case .message(let message):
@@ -134,12 +132,10 @@ extension ConversationModel {
             updateCapabilities(running: false)
             Task { await queue.refresh() }
 
-        case .state(let status):
-            updateConnection(status)
-
-        case .connection(let eventHostId, let status):
-            guard eventHostId == hostId else { return }
-            updateConnection(status)
+        case .hostConnection:
+            // Host connection is authoritative at app level; a session watch
+            // neither owns nor overrides it.
+            break
 
         case .capabilities(let capabilities):
             // Any capabilities refresh advances the epoch, including an
@@ -180,7 +176,6 @@ extension ConversationModel {
         case .watchEnded:
             watchEnded = true
             stopApprovalTimer()
-            updateConnection(.offline)
         }
     }
 
@@ -232,17 +227,6 @@ extension ConversationModel {
         questions = state
         if state.freshness == .current && !reviewInvalidated {
             questionErrorKey = nil
-        }
-    }
-
-    func updateConnection(_ status: ConnectionStatus) {
-        state = ConversationReduce.reduce(state, .connectionChanged(status))
-        onConnectionChange?(status)
-        // Reconnecting can make a locally-expired pending approval valid again
-        // (the device clock was fast); recompute the display clock.
-        if status.isOnline {
-            approvalClock = now()
-            restartApprovalTimer()
         }
     }
 }

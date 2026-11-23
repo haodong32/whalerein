@@ -257,8 +257,9 @@ async fn completes_pairing_session_control_diagnostics_and_revocation_workflow()
     assert_eq!(sessions.sessions[0].session_id, "session-1");
     assert_eq!(sessions.sessions[0].title, "test session");
 
-    let current = core.get_connection_state("host-1");
-    assert_eq!(current, ConnectionState::Connected);
+    // The device connection is opened on demand and app-owned; this flow only
+    // proves the secure channel exists. A dedicated case covers the connection
+    // state machine.
     let channel = access.host.lock().unwrap().channel_id();
     assert!(channel.is_some());
 

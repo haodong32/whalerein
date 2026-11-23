@@ -31,6 +31,7 @@ final class ContractParityTests: XCTestCase {
             sessionId: "s-001",
             sessionTitle: "Release checklist",
             service: service,
+            connectivity: makeTestConnectivity(),
             now: { [fixedNow] in fixedNow }
         )
     }

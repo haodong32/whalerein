@@ -6,14 +6,23 @@ import Foundation
 
 @MainActor
 protocol SessionService: AnyObject {
-    var connectionStatus: ConnectionStatus { get }
     /// Stable app configuration instance this service was opened for.
     var instanceId: String { get }
     var coreRevision: String { get }
     var appVersion: String { get }
     /// Creates a fresh event stream for the caller. Each active watch consumer
-    /// receives every event for its Host/session scope.
+    /// receives every event for its Host/session scope, plus the unscoped
+    /// `hostConnection` transitions.
     func makeEventStream() -> AsyncStream<SessionEventEnvelope>
+
+    // Host connection (one device connection per Host, independent of sessions)
+    /// Authoritative connection snapshot. `nil` means it was never opened,
+    /// which is different from `offline`.
+    func hostConnection(hostId: String) -> HostConnectionSnapshot?
+    /// Starts the app-level probe and streams `hostConnection` transitions.
+    func startHostMonitor(hostIds: [String])
+    /// Stops the probe and closes those connections.
+    func stopHostMonitor()
 
     // Pairing
     func pairingStart(invitation: String) async throws -> PairingPrompt
