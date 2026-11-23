@@ -92,6 +92,9 @@ internal class CloudAuthAdapter(
         return Outcome.Success(attempt)
     }
 
+    override fun androidRedirectUri(environment: String): String =
+        com.whalerein.android.corebridge.androidRedirectUri(environment)
+
     override suspend fun start(
         instance: InstanceId,
         environment: String,
@@ -113,7 +116,7 @@ internal class CloudAuthAdapter(
             val view = cloudAttemptFrom(
                 attemptId = attempt.attemptId,
                 authorizationUrl = attempt.url,
-                redirectUri = owner.androidRedirectUri,
+                redirectUri = androidRedirectUri(active),
                 environment = active,
                 startedAtEpochMillis = nowMillis(),
             )

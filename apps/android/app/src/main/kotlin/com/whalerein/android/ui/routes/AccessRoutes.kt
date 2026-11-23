@@ -122,11 +122,13 @@ fun CloudSignInRoute(
     onNavigate: (Route) -> Unit,
     onRestartGraph: () -> Unit,
 ) {
-    // The active profile owns the Cloud environment. The model must validate
-    // the native attempt and the returned session against that same value.
-    val activeEnvironment =
-        (dependencies as? DebugEnvironmentAware)?.debugCloudEnvironment?.current()
-            ?: "production"
+    val debug = dependencies as? DebugEnvironmentAware
+    // The active profile owns the Cloud environment. The native attempt, the
+    // installed App Link callback and the returned session must all use that
+    // same value, so resolve it once for this screen.
+    val cloudEnvironment = remember {
+        runCatching { debug?.debugCloudEnvironment?.current() }.getOrNull() ?: "production"
+    }
     val viewModel: CloudSignInViewModel = viewModel(
         factory = viewModelFactory {
             initializer {
@@ -135,7 +137,7 @@ fun CloudSignInRoute(
                     auth = dependencies.cloudAuth,
                     clock = dependencies.clock,
                     diagnostics = dependencies.diagnosticSink,
-                    environment = activeEnvironment,
+                    environment = cloudEnvironment,
                     dispatcher = Dispatchers.Default,
                 )
             }
@@ -145,7 +147,6 @@ fun CloudSignInRoute(
     val callback by appLinks.callback.collectAsStateWithLifecycle()
     var browserRequested by remember { mutableStateOf(false) }
     val browser = platform?.browser
-    val debug = dependencies as? DebugEnvironmentAware
     var debugEnvironment by remember {
         mutableStateOf(debug?.debugCloudEnvironment?.current() ?: "production")
     }
