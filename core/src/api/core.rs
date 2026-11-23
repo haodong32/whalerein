@@ -177,6 +177,10 @@ pub struct Core {
     pub(crate) watch_active: Arc<AtomicBool>,
     pub(crate) attachments: Arc<crate::attachments::Downloads>,
     instance: Option<Arc<Instance>>,
+    /// Platform anchors supplied as data by a client that must extract them
+    /// from a store Rust cannot enumerate. System mode uses them instead of
+    /// rediscovering the store through a process-global path.
+    platform_roots: Option<Arc<Vec<u8>>>,
     #[cfg(test)]
     profile: Option<crate::profiles::ProfileContext>,
     #[cfg(test)]
@@ -188,7 +192,19 @@ pub struct Core {
 impl Core {
     /// Open one platform-selected TOML configuration and validate existing state offline.
     pub fn open(config_path: &Path, secrets: Arc<dyn SecretStore>) -> CoreResult<Self> {
-        Self::open_instance(config_path, secrets, Arc::default())
+        Self::open_instance(config_path, secrets, Arc::default(), None)
+    }
+
+    /// Open one configuration with platform anchors supplied as data.
+    ///
+    /// A client that must extract its platform store (Android) passes the
+    /// anchors here instead of mutating a process-global certificate path.
+    pub fn open_with_platform_roots(
+        config_path: &Path,
+        secrets: Arc<dyn SecretStore>,
+        platform_roots: Option<Vec<u8>>,
+    ) -> CoreResult<Self> {
+        Self::open_instance(config_path, secrets, Arc::default(), platform_roots)
     }
 
     /// Open a client with an instance-local receiver, including configuration diagnostics.
@@ -206,13 +222,24 @@ impl Core {
         secrets: Arc<dyn SecretStore>,
         diagnostics: DiagnosticContext,
     ) -> CoreResult<Self> {
-        Self::open_instance(config_path, secrets, diagnostics.0)
+        Self::open_instance(config_path, secrets, diagnostics.0, None)
+    }
+
+    /// As [`Core::open_with_diagnostics`], with platform anchors as data.
+    pub fn open_with_diagnostics_and_platform_roots(
+        config_path: &Path,
+        secrets: Arc<dyn SecretStore>,
+        diagnostics: DiagnosticContext,
+        platform_roots: Option<Vec<u8>>,
+    ) -> CoreResult<Self> {
+        Self::open_instance(config_path, secrets, diagnostics.0, platform_roots)
     }
 
     fn open_instance(
         config_path: &Path,
         secrets: Arc<dyn SecretStore>,
         diagnostics: Arc<Diagnostics>,
+        platform_roots: Option<Vec<u8>>,
     ) -> CoreResult<Self> {
         let loaded = Instance::open(config_path).and_then(|instance| {
             let data_dir = instance.runtime_dir();
@@ -241,6 +268,7 @@ impl Core {
             config,
             Some(instance),
             diagnostics,
+            platform_roots,
         ))
     }
 
@@ -320,6 +348,13 @@ impl Core {
         Ok(())
     }
 
+    /// Platform anchors supplied as data, when the client extracted them.
+    fn platform_roots(&self) -> Option<Vec<u8>> {
+        self.platform_roots
+            .as_ref()
+            .map(|roots| roots.as_ref().clone())
+    }
+
     pub(crate) fn ca_pem(&self) -> Option<Vec<u8>> {
         match &self.instance {
             Some(instance) => instance.ca_pem.clone(),
@@ -347,6 +382,7 @@ impl Core {
         config: Option<PersistedConfig>,
         instance: Option<Arc<Instance>>,
         diagnostics: Arc<Diagnostics>,
+        platform_roots: Option<Vec<u8>>,
     ) -> Self {
         let runtime = Arc::new(Runtime::new());
         if let Some(instance) = &instance {
@@ -363,6 +399,7 @@ impl Core {
             watch_active: Arc::new(AtomicBool::new(false)),
             attachments: Arc::new(crate::attachments::Downloads::new()),
             instance,
+            platform_roots: platform_roots.map(Arc::new),
             #[cfg(test)]
             profile: None,
             #[cfg(test)]
@@ -520,6 +557,7 @@ impl Core {
             instance.clone(),
             self.options.secrets.clone(),
             create,
+            self.platform_roots(),
         )
         .await
     }
@@ -594,7 +632,7 @@ impl Core {
             }
             Err(error) => return Err(error),
         };
-        let mut core = Self::from_parts(options, config, None, Arc::default());
+        let mut core = Self::from_parts(options, config, None, Arc::default(), None);
         core.profile = Some(profile);
         core._activation = Some(activation);
         if startup_marker
@@ -869,10 +907,13 @@ impl Core {
         base: Url,
         region: crate::account::native::RegionalSession,
     ) -> CoreResult<AccessClient> {
-        Ok(AccessClient::with_ca(
+        let ca = self.ca_pem();
+        let roots = self.platform_roots();
+        Ok(AccessClient::with_trust(
             base,
             Some(region.token),
-            self.ca_pem().as_deref(),
+            ca.as_deref(),
+            roots.as_deref(),
             self.diagnostics.clone(),
         )?
         .with_transport_budget(self.transport_budget())
@@ -912,9 +953,16 @@ impl Core {
         let token = load_device_token(&self.options.secrets, &config.device_id)?
             .ok_or(CoreError::NotPaired)?;
         let ca = self.ca_pem();
-        AccessClient::with_ca(base, Some(token), ca.as_deref(), self.diagnostics.clone())
-            .map(|access| access.with_transport_budget(self.transport_budget()))
-            .map_err(Into::into)
+        let roots = self.platform_roots();
+        AccessClient::with_trust(
+            base,
+            Some(token),
+            ca.as_deref(),
+            roots.as_deref(),
+            self.diagnostics.clone(),
+        )
+        .map(|access| access.with_transport_budget(self.transport_budget()))
+        .map_err(Into::into)
     }
 
     async fn adopt_cloud_route(
@@ -1907,10 +1955,12 @@ impl Core {
         )?;
 
         let ca = self.ca_pem();
-        let access = AccessClient::with_ca(
+        let roots = self.platform_roots();
+        let access = AccessClient::with_trust(
             parsed.access_url.clone(),
             None,
             ca.as_deref(),
+            roots.as_deref(),
             self.diagnostics.clone(),
         )?;
         let hello_response = access
@@ -4047,6 +4097,7 @@ impl Core {
         };
         Ok(settings
             .with_ca(self.ca_pem())
+            .with_platform_roots(self.platform_roots())
             .with_transport_budget(self.transport_budget()))
     }
 

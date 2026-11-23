@@ -198,6 +198,8 @@ Per-instance materialized Core configuration lives at
 `client/instances/<id>/ca.pem`. All document writes are atomic; activation
 writes and validates the materialized instance before committing
 `app.active_instance`, so a failed write keeps the previous selection.
+Cloud instances without an imported CA use the iOS platform verifier for both
+HTTPS and MQTT; an imported CA replaces that trust for the instance.
 
 The welcome screen and Settings offer the service selector. Production builds
 show Cloud production and Standalone; Debug/test builds also show Staging.

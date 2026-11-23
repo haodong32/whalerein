@@ -484,11 +484,13 @@ impl Core {
             }
         }
         let ca = self.ca_pem();
-        let access = AccessClient::with_ca(
+        let roots = self.platform_roots();
+        let access = AccessClient::with_trust(
             Url::parse(&pending.config.access_url)
                 .map_err(|_| CoreError::Config("invalid pending endpoint".into()))?,
             None,
             ca.as_deref(),
+            roots.as_deref(),
             self.diagnostics.clone(),
         )?;
         let reply = match access.pair_claim(&pending.finish).await {

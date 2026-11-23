@@ -55,6 +55,22 @@ written through it, so a later handler or library error cannot leak one. The
 master key is an environment secret; without it, records still omit the address
 and use the `[client]` placeholder.
 
+## Client TLS trust
+
+Core exposes two mutually exclusive trust modes to its HTTPS and MQTT
+transports. The decision is made once from configuration and the same
+`rustls::ClientConfig` shape is used for both connections:
+
+| Mode | Configuration | Trust set |
+|---|---|---|
+| System (default) | no CA configured | Apple/Windows platform verifier; elsewhere the platform certificate files, or the portable Mozilla roots when the platform exposes no store. A client that must extract the platform store itself (Android) supplies those anchors to Core as construction data instead of a process-global path |
+| Custom | explicit `ca_pem` / `ca_file` | exactly the supplied CA bundle; it replaces the platform roots |
+
+Custom mode follows the `--cacert` convention used by curl, Git, Go and
+requests: importing a private CA is a replacement, not an addition. A client
+that needs public and private roots trusts an explicit bundle containing both.
+There is no silent fallback from system verification to custom roots.
+
 ## Persistence
 
 | PostgreSQL table | Contents |

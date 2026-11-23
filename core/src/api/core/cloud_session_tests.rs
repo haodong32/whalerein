@@ -271,6 +271,7 @@ async fn cloud_session_connect_recovers_original_pairing_after_logout_and_route_
         None,
         Some(instance),
         Arc::default(),
+        None,
     );
 
     assert!(matches!(

@@ -42,7 +42,6 @@ class CoreBridge private constructor(
         fun open(
             configPath: String,
             instanceDirectory: File,
-            filesDir: File,
             diagnosticReceiver: CoreDiagnosticReceiver? = null,
             appVersion: String = CoreProvenance.appVersion,
         ): CoreBridge {
@@ -60,8 +59,11 @@ class CoreBridge private constructor(
                     )
                 }
             }
-            try {
-                AndroidTrustRoots.install(filesDir)
+            // The platform store is unreadable from Rust on Android, so the
+            // anchors travel to Core as data. A failed extraction degrades to
+            // the portable public roots instead of blocking startup.
+            val platformTrust = try {
+                AndroidTrustRoots.platformPem()
             } catch (_: Exception) {
                 diagnosticReceiver?.onDiagnostic(
                     DiagnosticEventView(
@@ -72,17 +74,30 @@ class CoreBridge private constructor(
                         emptyMap(),
                     ),
                 )
+                null
             }
             val secrets = AndroidSecretStore.create(instanceDirectory, secretDiagnostics)
-            val core = if (context != null) {
-                MobileCore.newWithDiagnosticContext(
+            val core = when {
+                context != null && platformTrust != null -> MobileCore.newWithDiagnosticContextAndPlatformTrust(
+                    configPath,
+                    secrets,
+                    appVersion,
+                    context,
+                    platformTrust,
+                )
+                context != null -> MobileCore.newWithDiagnosticContext(
                     configPath,
                     secrets,
                     appVersion,
                     context,
                 )
-            } else {
-                MobileCore(configPath, secrets, appVersion)
+                platformTrust != null -> MobileCore.newWithPlatformTrust(
+                    configPath,
+                    secrets,
+                    appVersion,
+                    platformTrust,
+                )
+                else -> MobileCore(configPath, secrets, appVersion)
             }
             return CoreBridge(core)
         }
