@@ -97,6 +97,9 @@ enum LogRedactor {
         "reason",
         "reason_code",
         "request_kind",
+        // Fixed query payload name; it attributes a failed query to its purpose
+        // without carrying any content.
+        "payload",
         "count",
         "duration_ms",
         "capability",
