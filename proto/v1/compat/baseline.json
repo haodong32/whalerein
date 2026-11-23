@@ -5743,14 +5743,6 @@
           "type_name": "whalerein.v1.RunPhase"
         },
         {
-          "json_name": "approvals",
-          "name": "approvals",
-          "number": 6,
-          "repeated": true,
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.Approval"
-        },
-        {
           "json_name": "questions",
           "name": "questions",
           "number": 7,
@@ -6405,6 +6397,68 @@
         }
       ]
     },
+    "WatchLease": {
+      "fields": [
+        {
+          "json_name": "watchId",
+          "name": "watch_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "leaseMs",
+          "name": "lease_ms",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "revision",
+          "name": "revision",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "runPhase",
+          "name": "run_phase",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.RunPhase"
+        },
+        {
+          "json_name": "liveEpoch",
+          "name": "live_epoch",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "historyHead",
+          "name": "history_head",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "projectionId",
+          "name": "projection_id",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "questions",
+          "name": "questions",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionDescriptor"
+        }
+      ]
+    },
     "WatchReady": {
       "fields": [
         {
@@ -6466,7 +6520,7 @@
           "number": 1,
           "repeated": true,
           "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.WatchReady"
+          "type_name": "whalerein.v1.WatchLease"
         }
       ]
     }

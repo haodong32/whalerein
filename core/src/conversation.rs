@@ -744,7 +744,10 @@ impl From<whalerein_proto::SessionState> for SessionState {
             history_head: value.history_head,
             projection_id: value.projection_id,
             run_phase: RunPhase::try_from(value.run_phase).unwrap_or_default(),
-            approvals: value.approvals.into_iter().map(Into::into).collect(),
+            // Approvals are content. They arrive only through the bounded
+            // ApprovalList query and are merged by the observation that emits
+            // this state.
+            approvals: Vec::new(),
         }
     }
 }

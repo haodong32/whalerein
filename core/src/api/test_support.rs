@@ -325,6 +325,9 @@ pub struct FakeHost {
     pub wait_replace_at: usize,
     pub fail_handshake_polls_after_replacement: bool,
     pub fail_handshake_polls: bool,
+    /// Error returned for every `RefreshWatches` query. Used to prove that a
+    /// lease failure is classified instead of looping on reconnects.
+    pub refresh_error: Option<ErrorCode>,
     handshake_request_ids: HashSet<String>,
     pending_source_error: Option<ErrorCode>,
     pub wait_ids: Vec<String>,
@@ -732,6 +735,7 @@ impl FakeHost {
             wait_replace_at: 0,
             fail_handshake_polls_after_replacement: false,
             fail_handshake_polls: false,
+            refresh_error: None,
             handshake_request_ids: HashSet::new(),
             pending_source_error: None,
             wait_ids: Vec::new(),
@@ -1698,18 +1702,31 @@ impl FakeHost {
                 )),
                 ..Default::default()
             },
-            Some(Payload::RefreshWatches(_)) => ResponsePayload {
-                payload: Some(whalerein_proto::response_payload::Payload::WatchStates(
-                    whalerein_proto::WatchStates {
-                        watches: vec![fake_watch(
-                            "session-1",
-                            &self.history_cut,
-                            self.question_descriptor.clone(),
-                        )],
-                    },
-                )),
-                ..Default::default()
-            },
+            Some(Payload::RefreshWatches(_)) => {
+                if let Some(code) = self.refresh_error {
+                    return Ok(ResponsePayload {
+                        error_code: code as i32,
+                        ..Default::default()
+                    });
+                }
+                ResponsePayload {
+                    payload: Some(whalerein_proto::response_payload::Payload::WatchStates(
+                        whalerein_proto::WatchStates {
+                            watches: vec![whalerein_proto::WatchLease {
+                                watch_id: "watch-1".into(),
+                                lease_ms: 30000,
+                                revision: 1,
+                                run_phase: whalerein_proto::RunPhase::Idle as i32,
+                                live_epoch: "epoch".into(),
+                                history_head: self.history_cut.clone(),
+                                projection_id: "projection-1".into(),
+                                questions: Some(self.question_descriptor.clone()),
+                            }],
+                        },
+                    )),
+                    ..Default::default()
+                }
+            }
             Some(Payload::UnwatchSession(_)) => ResponsePayload::default(),
             Some(Payload::WaitSession(wait)) => {
                 self.wait_queries += 1;
@@ -2284,7 +2301,6 @@ fn fake_watch(
             revision: 1,
             history_head: history_head.into(),
             run_phase: whalerein_proto::RunPhase::Idle as i32,
-            approvals: vec![],
             questions: Some(question_descriptor),
             projection_id: "projection-1".into(),
         }),

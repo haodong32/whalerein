@@ -267,6 +267,23 @@ test('a reference packet that itself exceeds the hop limit fails explicitly befo
   assert.ok(relay.calls.includes('delete'))
 })
 
+test('a result above the receiver envelope limit is staged and published as a reference', async () => {
+  // The receiver advertised a smaller inline bound than the Host's logical
+  // envelope. Content stays deliverable: it travels by reference, not by
+  // failing the query.
+  const relay = new FakeRelay()
+  const published = []
+  const sender = transport({ relay, packet: 512, envelope: 4096, publish: async (topic, bytes) => published.push(bytes) })
+  await sender.sendComplete(RESULT_TOPIC, hostResult({ body: new Uint8Array(1024) }), {
+    kind: 'result', receiverLimit: 400, envelopeLimit: 256,
+  })
+  assert.deepEqual(relay.calls.filter(call => call === 'reserve' || call === 'upload' || call === 'finish'),
+    ['reserve', 'upload', 'finish'])
+  const decoded = proto.decode('whalerein.v1.HostResult', published[0])
+  assert.equal((decoded.result_body ?? new Uint8Array(0)).length, 0)
+  assert.ok(decoded.result_reference)
+})
+
 test('a message above envelope_bytes fails with payload_too_large and no relay traffic', async () => {
   const relay = new FakeRelay()
   const sender = transport({ relay, packet: 512, envelope: 1024 })

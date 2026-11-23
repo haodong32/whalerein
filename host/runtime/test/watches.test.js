@@ -1061,3 +1061,47 @@ test('context or unknown authorship cannot smuggle a user body into a watch', as
   assert.equal(deliveredUpdates(ctx).filter(item => item.history).length, 0)
   assert.equal(ctx.access.published.length, 0)
 })
+
+test('a lease answer carries transition markers only, never session state', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  const baseline = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  // A large approval set makes the baseline big; the lease must stay small.
+  ctx.source.readState = async (id) => ({
+    session: { session_id: id }, history_head: 'bookmark:alpha', live_epoch: 'run-native',
+    revision: 2, run_phase: 'IDLE', projection_id: 'projection-1',
+    approvals: Array.from({ length: 2000 }, (_, index) => ({
+      approval_id: `a${index}`, session_id: 's', tool_name: 'Read', call_id: `c${index}`,
+      reason: 'x'.repeat(200), digest: new Uint8Array([1]), version: 1, expires_at_unix_ms: 1,
+    })),
+  })
+  const refreshed = await ctx.events.refresh('d', ctx.channel.channelId, [baseline.watch_id])
+  const lease = refreshed.watches[0]
+  assert.equal(lease.state, undefined, 'a lease never repeats the baseline')
+  assert.equal(lease.watch_id, baseline.watch_id)
+  assert.ok(lease.revision !== undefined)
+  assert.ok(lease.live_epoch)
+  assert.equal(lease.projection_id, 'projection-1')
+  assert.ok(JSON.stringify(lease).length < 512, 'lease size does not grow with the session')
+})
+
+test('a session state never carries approvals, in a baseline or in a delivered update', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  ctx.source.readState = async (id) => ({
+    session: { session_id: id }, history_head: 'bookmark:alpha', live_epoch: 'run-native',
+    revision: 4, run_phase: 'IDLE', projection_id: 'projection-1',
+    approvals: [{ approval_id: 'a1', session_id: id, tool_name: 'Read', call_id: 'c1', reason: 'x' }],
+  })
+  const ready = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  assert.equal(ready.state.approvals, undefined, 'a baseline carries markers, not approvals')
+  ctx.source.sinks.get('s')({ session: { session_id: 's' }, state: {
+    session: { session_id: 's' }, history_head: 'bookmark:alpha', live_epoch: 'run-native',
+    revision: 5, run_phase: 'IDLE', projection_id: 'projection-1',
+    approvals: [{ approval_id: 'a2', session_id: 's', tool_name: 'Read', call_id: 'c2', reason: 'y' }],
+  } })
+  await settle()
+  const delivered = deliveredUpdates(ctx).find(update => update.state)
+  assert.ok(delivered, 'the state update is delivered')
+  assert.equal(delivered.state.approvals, undefined, 'an update carries markers, not approvals')
+})

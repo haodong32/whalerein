@@ -647,11 +647,10 @@ export class HostRuntime {
       status: result.status,
       resultBody: responseBody ?? undefined,
       errorCode: result.errorCode,
-      // Canonical packing: a complete query result, including the sealed
-      // envelope, is admitted whole or reported payload_too_large. A durable
-      // command outcome keeps its journal semantics.
-      enforceResponseBudget: request.kind === 'REQUEST_KIND_QUERY',
-      resultMaxBytes: requestTransport?.result_max_bytes,
+      // A complete query result is admitted whole: if its inline form exceeds
+      // the receiver budget the transport stages the exact ciphertext and
+      // publishes a reference, so content never fails for a transport reason.
+      receiverLimitBytes: requestTransport?.result_max_bytes,
       completedAt,
     })
   }
@@ -673,7 +672,7 @@ export class HostRuntime {
     return null
   }
 
-  async #reply(request, { status, resultBody, errorCode = 'error_code_unspecified', enforceResponseBudget = false, resultMaxBytes, completedAt, errorDetail }) {
+  async #reply(request, { status, resultBody, errorCode = 'error_code_unspecified', receiverLimitBytes, completedAt, errorDetail }) {
     const known = isErrorCode(errorCode)
     if (!known && errorCode !== 'error_code_unspecified') {
       this.#logger?.warn('unknown_error_code', { code: typeof errorCode === 'string' ? errorCode.slice(0, 32) : 'non_string' })
@@ -695,24 +694,26 @@ export class HostRuntime {
       channel_id: request.channel_id ?? '',
       relay_version: RELAY_VERSION,
     }
-    // The encoded HostResult, including the sealed result framing, is the hard
-    // ceiling. The request metadata bound can only lower the local envelope.
-    const localLimit = Number.isSafeInteger(this.#access?.budget?.envelope_bytes)
-      ? this.#access.budget.envelope_bytes
-      : MESSAGE_BYTES
-    const hardLimit = Number.isSafeInteger(resultMaxBytes) && resultMaxBytes > 0
-      ? Math.min(localLimit, resultMaxBytes)
-      : localLimit
+    // A result is published as a complete message. The transport picks the
+    // cheap inline representation when it fits the receiver budget and stages
+    // the exact ciphertext behind a reference when it does not, so content
+    // never fails for a transport reason. `payload_too_large` remains the true
+    // hard failure: the envelope cannot be represented even by reference.
     let encoded = this.#codec.encode('whalerein.v1.HostResult', result)
-    if (enforceResponseBudget && encoded.length > hardLimit) {
-      this.#logger?.warn('host_result_oversize', { code: 'payload_too_large', kind: request.kind, bytes: encoded.length, limit: hardLimit, layer: 'host' })
+    try {
+      await this.#access.publishResult(encoded, { envelopeLimit: receiverLimitBytes })
+    } catch (error) {
+      if (error?.code !== 'payload_too_large') throw error
+      this.#logger?.warn('host_result_unrepresentable', {
+        code: 'payload_too_large', kind: request.kind, bytes: encoded.length, layer: 'host',
+      })
       result.status = 'failed'
       result.result_body = EMPTY
       result.error_code = 'payload_too_large'
       result.error_message = publicMessage('payload_too_large')
       encoded = this.#codec.encode('whalerein.v1.HostResult', result)
+      await this.#access.publishResult(encoded)
     }
-    await this.#access.publishResult(encoded)
     this.#logger?.info('host_result', { status: result.status, code: result.error_code, request: request.request_id, trace: request.trace_id, kind: request.kind, bytes: encoded.length, layer: 'host' })
     return result
   }

@@ -44,3 +44,15 @@ Rationale: Coordinated relay epoch 3 hard cut: inline-or-reference transport rep
 Rationale: Hard cut to relay epoch 4: the live delivery class is QoS 0 on dedicated live topics; epoch 3 is rejected.
 
 - removed enum value RelayEpoch.RELAY_EPOCH_V3 (3)
+## Breaking change accepted
+
+Rationale: A watch lease renewal answers with transition markers instead of the full session state. The periodic control message could grow without bound with the transcript and be rejected by the transport budget for reasons unrelated to connectivity, which Core then treated as a reconnect forever. Leases now carry watch_id, lease_ms and the revision/run-phase/epoch/history-head/projection markers, and content stays on the event stream and the paged history read; all peers ship together as one artifact set.
+
+- changed type_name of WatchStates.watches: 'whalerein.v1.WatchReady' -> 'whalerein.v1.WatchLease'
+
+## Breaking change accepted
+
+Rationale: Pending approvals left SessionState. Session state is a bounded transition summary (session, epoch, revision, history head, run phase, projection, question descriptor); approvals are content and travel only through the bounded ApprovalList query and are merged by Core into the state it emits. A state that carries approvals grows with the pending set and can exceed the transport budget for reasons unrelated to connectivity.
+
+- removed field SessionState.approvals (tag 6)
+

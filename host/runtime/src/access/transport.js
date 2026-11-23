@@ -297,18 +297,15 @@ export class RelayTransport {
     if (descriptor.inline === undefined) {
       throw new PluginError('invalid_argument', 'unsupported relay envelope kind')
     }
-    if (envelopeBytes.length > this.budget.envelope_bytes) {
-      this.logger?.warn('relay_envelope_rejected', {
-        code: 'payload_too_large', scope: 'envelope', bytes: envelopeBytes.length, limit: this.budget.envelope_bytes,
-      })
-      throw new PluginError('payload_too_large', 'complete message exceeds the envelope budget')
-    }
     const envelope = this.codec.decode(descriptor.type, envelopeBytes)
     assertRelayEpoch(envelope)
     if (descriptor.type === 'whalerein.v1.HostResult') assertResultRepresentation(envelope)
     else assertEventRepresentation(envelope)
 
     const limit = this.effectivePacketLimit(options.receiverLimit)
+    const envelopeLimit = Number.isSafeInteger(options.envelopeLimit) && options.envelopeLimit > 0
+      ? Math.min(this.budget.envelope_bytes, options.envelopeLimit)
+      : this.budget.envelope_bytes
     const encoded = publishPacketBytes(topic, envelopeBytes.length)
     const referenced = envelope[descriptor.reference] != null
     if (options.inlineOnly === true && encoded > limit) {
@@ -321,13 +318,20 @@ export class RelayTransport {
       await this.publish(topic, envelopeBytes)
       return { representation: 'reference', packetBytes: encoded }
     }
-    if (encoded <= limit) {
+    if (encoded <= limit && envelopeBytes.length <= envelopeLimit) {
       await this.publish(topic, envelopeBytes)
       return { representation: 'inline', packetBytes: encoded }
     }
+    if (envelopeBytes.length > this.budget.envelope_bytes) {
+      this.logger?.warn('relay_envelope_rejected', {
+        code: 'payload_too_large', scope: 'envelope', bytes: envelopeBytes.length, limit: this.budget.envelope_bytes,
+      })
+      throw new PluginError('payload_too_large', 'complete message exceeds the envelope budget')
+    }
 
-    // The full packet is oversized and the message is inline: stage the exact
-    // ciphertext before publishing its reference.
+    // The inline representation exceeds the packet or the receiver budget:
+    // stage the exact ciphertext and publish a reference. Content stays
+    // deliverable instead of failing for a transport reason unrelated to it.
     const body = envelope[descriptor.inline]
     if (!(body instanceof Uint8Array) || body.length === 0) {
       throw new PluginError('invalid_argument', 'oversized envelope carries no inline body')

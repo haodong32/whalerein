@@ -236,6 +236,7 @@
     "whalerein.v1.UpdatePendingQueue",
     "whalerein.v1.WaitSession",
     "whalerein.v1.WatchClosed",
+    "whalerein.v1.WatchLease",
     "whalerein.v1.WatchReady",
     "whalerein.v1.WatchSession",
     "whalerein.v1.WatchStates"
