@@ -55,6 +55,14 @@ class ConversationViewModel(
     private var resyncing = false
     private var announcementToken = 0L
     private val draftsBySession = mutableMapOf<SessionRef, String>()
+    private val pendingSends = mutableMapOf<SessionRef, PendingSendRecord>()
+
+    /**
+     * Monotonic per-session draft revision. A submission captures the revision
+     * it sent; an accepted receipt may clear the persisted draft only while the
+     * revision is unchanged, so a newer edit is never erased by an older send.
+     */
+    private val draftRevisions = mutableMapOf<SessionRef, Long>()
 
     /**
      * Opens [session]. Re-opening the same session is a no-op, so rotation and
@@ -88,6 +96,7 @@ class ConversationViewModel(
             ),
         )
         loadDraft(session)
+        loadPendingSend(session)
         loadLatestPage()
         refreshPendingInputs()
         refreshQueue()
@@ -301,6 +310,7 @@ class ConversationViewModel(
     fun updateDraft(text: String) {
         val session = loadedSession ?: return
         draftsBySession[session] = text
+        draftRevisions[session] = (draftRevisions[session] ?: 0L) + 1
         edit { copy(composer = composer.copy(text = text)) }
         scope.launch { drafts.save(session, text) }
     }
@@ -336,6 +346,7 @@ class ConversationViewModel(
         }
         // The stable send identity exists before submission.
         val sendId = SendId(ids.newId())
+        val draftRevision = draftRevisions[session] ?: 0L
         val followMode = ui.composer.follow
         edit {
             copy(
@@ -348,9 +359,30 @@ class ConversationViewModel(
                 send = SendUiState.Submitting(sendId, session),
             )
         }
-        draftsBySession[session] = ""
-        scope.launch { drafts.clear(session) }
-        scope.launch { submitInternal(session, sendId, text, mode, followMode) }
+        // Keep the persisted draft until the Host accepts the send. Clearing it
+        // here would lose the text if the process dies before the receipt.
+        draftsBySession[session] = text
+        // Persist the exact operation identity before touching the Host so a
+        // process restart can recover this send instead of resubmitting it.
+        val pending = PendingSendRecord(
+            sendId = sendId.value,
+            text = text,
+            follow = followMode.name,
+            submittedAtMillis = clock.epochMillis(),
+        )
+        pendingSends[session] = pending
+        scope.launch {
+            val saved = drafts.savePendingSend(session, pending)
+            if (saved is Outcome.Failure || saved is Outcome.Unconfirmed) {
+                diag.warn(
+                    ConversationDiagnosticStage.COMMAND,
+                    ConversationDiagnosticEventName.SEND_FAILED,
+                    actionId = sendId.value,
+                    code = "pending_send_not_persisted",
+                )
+            }
+            submitInternal(session, sendId, text, mode, followMode, draftRevision)
+        }
     }
 
     private suspend fun submitInternal(
@@ -359,6 +391,7 @@ class ConversationViewModel(
         text: String,
         mode: DeliveryMode,
         followMode: FollowMode,
+        draftRevision: Long,
     ) {
         val result = try {
             composer.submit(SendRequest(session, sendId, text, mode, followMode))
@@ -374,13 +407,22 @@ class ConversationViewModel(
             Outcome.Failure(unexpectedFailure())
         }
         when (result) {
-            is Outcome.Success -> onSubmitted(session, sendId, followMode, result.value)
+            is Outcome.Success -> onSubmitted(
+                session,
+                sendId,
+                followMode,
+                result.value,
+                text,
+                draftRevision,
+            )
+
             is Outcome.Failure -> onSendFailed(
                 session,
                 sendId,
                 text,
                 result.failure,
                 definite = true,
+                draftRevision = draftRevision,
             )
 
             is Outcome.Unconfirmed -> onSendFailed(
@@ -389,9 +431,10 @@ class ConversationViewModel(
                 text,
                 result.failure,
                 definite = false,
+                draftRevision = draftRevision,
             )
 
-            Outcome.Cancelled -> onSendCancelled(session, sendId, text)
+            Outcome.Cancelled -> onSendCancelled(session, sendId, text, draftRevision)
         }
     }
 
@@ -400,10 +443,14 @@ class ConversationViewModel(
         sendId: SendId,
         followMode: FollowMode,
         receipt: SendReceipt,
+        submittedText: String,
+        draftRevision: Long,
     ) {
         if (!isCurrentSend(sendId)) {
             return
         }
+        settleAcceptedDraft(session, submittedText, draftRevision)
+        clearPendingSend(session)
         diag.info(
             ConversationDiagnosticStage.COMMAND,
             ConversationDiagnosticEventName.SEND_ACCEPTED,
@@ -528,6 +575,7 @@ class ConversationViewModel(
         submittedText: String,
         failure: CoreFailure,
         definite: Boolean,
+        draftRevision: Long,
     ) {
         if (!isCurrentSend(sendId)) {
             diag.warn(
@@ -537,6 +585,10 @@ class ConversationViewModel(
                 code = "late_receipt_ignored",
             )
             return
+        }
+        restoreDraftAfterFailure(session, submittedText, draftRevision)
+        if (definite) {
+            clearPendingSend(session)
         }
         val levelCode = if (definite) "definite_failure" else "unconfirmed"
         diag.warn(
@@ -551,15 +603,8 @@ class ConversationViewModel(
             fields = mapOf("outcome" to levelCode),
         )
         edit {
-            // A late receipt cannot overwrite a newer draft.
-            val restored = if (composer.text.isEmpty() && loadedSession == session) {
-                submittedText
-            } else {
-                composer.text
-            }
             copy(
                 composer = composer.copy(
-                    text = restored,
                     submitting = false,
                     availability = if (failure.code == ConversationFailureCodes.OFFLINE) {
                         ComposerAvailability.Offline
@@ -580,21 +625,151 @@ class ConversationViewModel(
         session: SessionRef,
         sendId: SendId,
         submittedText: String,
+        draftRevision: Long,
     ) {
         if (!isCurrentSend(sendId)) {
             return
         }
+        restoreDraftAfterFailure(session, submittedText, draftRevision)
+        clearPendingSend(session)
         edit {
-            val restored = if (composer.text.isEmpty() && loadedSession == session) {
-                submittedText
-            } else {
-                composer.text
-            }
             copy(
-                composer = composer.copy(text = restored, submitting = false),
+                composer = composer.copy(submitting = false),
                 send = SendUiState.Cancelled(sendId),
             )
         }
+    }
+
+    /**
+     * Clears the persisted draft only after an accepted send, and only while no
+     * newer edit replaced it. A newer draft is written back instead, so neither
+     * an old submission nor a late receipt can erase it.
+     */
+    private fun settleAcceptedDraft(
+        session: SessionRef,
+        submittedText: String,
+        submittedRevision: Long,
+    ) {
+        val currentRevision = draftRevisions[session] ?: 0L
+        val currentText = draftsBySession[session] ?: state.value.composer.text
+        if (currentRevision == submittedRevision && currentText == submittedText) {
+            draftsBySession[session] = ""
+            scope.launch { drafts.clear(session) }
+        } else {
+            draftsBySession[session] = currentText
+            scope.launch { drafts.save(session, currentText) }
+        }
+    }
+
+    /**
+     * Restores the submitted text for a definite failure or unknown outcome.
+     * The persisted draft was never cleared, so a process restart still restores
+     * it; a newer edit keeps ownership of the composer and the store.
+     */
+    private fun restoreDraftAfterFailure(
+        session: SessionRef,
+        submittedText: String,
+        submittedRevision: Long,
+    ) {
+        if (loadedSession != session) {
+            return
+        }
+        val currentRevision = draftRevisions[session] ?: 0L
+        if (currentRevision != submittedRevision) {
+            return
+        }
+        draftsBySession[session] = submittedText
+        scope.launch { drafts.save(session, submittedText) }
+        edit {
+            if (composer.text.isEmpty()) {
+                copy(composer = composer.copy(text = submittedText))
+            } else {
+                this
+            }
+        }
+    }
+
+    /**
+     * Restores the one unresolved send identity for this exact scope. The
+     * composer stays untouched so a newer draft keeps ownership; the existing
+     * recovery action reads the original operation, never a new submission.
+     */
+    private fun loadPendingSend(session: SessionRef) {
+        scope.launch {
+            val result = try {
+                drafts.loadPendingSend(session)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (throwable: Throwable) {
+                Outcome.Failure(unexpectedFailure())
+            }
+            if (loadedSession != session) {
+                return@launch
+            }
+            if (result !is Outcome.Success) {
+                diag.warn(
+                    ConversationDiagnosticStage.COMMAND,
+                    ConversationDiagnosticEventName.SEND_UNCONFIRMED,
+                    code = "pending_send_unreadable",
+                )
+                return@launch
+            }
+            val record = result.value ?: return@launch
+            if (record.sendId.isBlank() || state.value.send != SendUiState.Idle) {
+                return@launch
+            }
+            pendingSends[session] = record
+            edit {
+                copy(
+                    send = SendUiState.Unconfirmed(
+                        SendId(record.sendId),
+                        CoreFailure(
+                            "uncertain",
+                            "The previous send result is unknown; recover the original operation.",
+                            retryable = true,
+                        ),
+                    ),
+                )
+            }
+            diag.info(
+                ConversationDiagnosticStage.COMMAND,
+                ConversationDiagnosticEventName.SEND_UNCONFIRMED,
+                actionId = record.sendId,
+                code = "pending_send_restored",
+            )
+        }
+    }
+
+    private fun clearPendingSend(session: SessionRef) {
+        pendingSends.remove(session)
+        scope.launch { drafts.clearPendingSend(session) }
+    }
+
+    /**
+     * Explicit dismissal of a restored unknown send: clears its durable
+     * identity and restores the submitted text only when no newer draft exists.
+     */
+    fun discardUnconfirmedSend() {
+        val send = state.value.send as? SendUiState.Unconfirmed ?: return
+        val session = loadedSession ?: return
+        val record = pendingSends[session]?.takeIf { it.sendId == send.sendId.value }
+        clearPendingSend(session)
+        record?.let { restorePendingText(session, it) }
+        edit {
+            copy(
+                send = SendUiState.Idle,
+                composer = composer.copy(submitting = false),
+            )
+        }
+    }
+
+    private fun restorePendingText(session: SessionRef, record: PendingSendRecord) {
+        if (loadedSession != session || state.value.composer.text.isNotEmpty()) {
+            return
+        }
+        draftsBySession[session] = record.text
+        scope.launch { drafts.save(session, record.text) }
+        edit { copy(composer = composer.copy(text = record.text)) }
     }
 
     /** Recovers the current ambiguous send by its original operation identity. */
@@ -620,6 +795,7 @@ class ConversationViewModel(
             when (result) {
                 is RecoveryResult.Confirmed -> {
                     result.reply?.let { applyCommittedReply(session, it) }
+                    clearPendingSend(session)
                     edit {
                         copy(
                             send = SendUiState.Recovered(sendId, result.receipt, result.reply),
@@ -634,15 +810,18 @@ class ConversationViewModel(
                     )
                 }
 
-                is RecoveryResult.ConfirmedUnread -> edit {
-                    copy(
-                        send = SendUiState.ConfirmedUnread(
-                            sendId,
-                            result.receipt,
-                            result.failure,
-                        ),
-                        composer = composer.copy(submitting = false),
-                    )
+                is RecoveryResult.ConfirmedUnread -> {
+                    clearPendingSend(session)
+                    edit {
+                        copy(
+                            send = SendUiState.ConfirmedUnread(
+                                sendId,
+                                result.receipt,
+                                result.failure,
+                            ),
+                            composer = composer.copy(submitting = false),
+                        )
+                    }
                 }
 
                 is RecoveryResult.StillUnconfirmed -> edit {
@@ -652,11 +831,16 @@ class ConversationViewModel(
                     )
                 }
 
-                is RecoveryResult.Failed -> edit {
-                    copy(
-                        send = SendUiState.DefiniteFailure(result.failure),
-                        composer = composer.copy(submitting = false),
-                    )
+                is RecoveryResult.Failed -> {
+                    val record = pendingSends[session]?.takeIf { it.sendId == sendId.value }
+                    clearPendingSend(session)
+                    record?.let { restorePendingText(session, it) }
+                    edit {
+                        copy(
+                            send = SendUiState.DefiniteFailure(result.failure),
+                            composer = composer.copy(submitting = false),
+                        )
+                    }
                 }
             }
         }

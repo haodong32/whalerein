@@ -31,12 +31,27 @@ data class AppSessionInfo(
     val current: Boolean = false,
 )
 
+/**
+ * Device and grant rows the account screen may act on.
+ *
+ * [cloudHostGrants] are Hosts where the current device grant is still usable;
+ * [standaloneDevices] are the paired Standalone Host records this device can
+ * forget. Both come from Core, never from the UI layer.
+ */
+data class AccountRevocableTargets(
+    val cloudHostGrants: List<HostId> = emptyList(),
+    val standaloneDevices: List<String> = emptyList(),
+)
+
 enum class RetentionCertainty { Certain, Uncertain }
 
 sealed interface RevocationScope {
     data class AppSession(val sessionId: String) : RevocationScope
 
     data object AllAppSessions : RevocationScope
+
+    /** Every grant held by this device, distinct from one selected grant. */
+    data object CurrentDevice : RevocationScope
 
     data class CloudHostGrant(val hostId: HostId) : RevocationScope
 
@@ -73,6 +88,10 @@ interface AccountPort {
 
     suspend fun listAppSessions(instance: InstanceId): Outcome<List<AppSessionInfo>>
 
+    /** Core-owned Host grants and Standalone device records for this instance. */
+    suspend fun revocableTargets(instance: InstanceId): Outcome<AccountRevocableTargets> =
+        Outcome.Success(AccountRevocableTargets())
+
     /**
      * Revokes exactly one App Session when [sessionId] is non-null, or all
      * sessions for the instance when it is null.
@@ -81,6 +100,15 @@ interface AccountPort {
         instance: InstanceId,
         sessionId: String?,
     ): Outcome<RevocationReport>
+
+    /** Revokes every grant held by this device without ending the identity. */
+    suspend fun revokeCurrentDevice(instance: InstanceId): Outcome<RevocationReport> =
+        Outcome.Failure(
+            CoreFailure(
+                code = "revocation_unsupported",
+                message = "Current-device revocation is not available.",
+            ),
+        )
 
     suspend fun revokeCloudHostGrant(
         instance: InstanceId,
@@ -102,6 +130,8 @@ sealed interface AccountAction {
 
     data object RevokeAllAppSessions : AccountAction
 
+    data object RevokeCurrentDevice : AccountAction
+
     data class RevokeCloudHostGrant(val hostId: HostId) : AccountAction
 
     data class RevokeStandaloneDevice(val deviceId: String) : AccountAction
@@ -113,6 +143,7 @@ enum class AccountScopeKind {
     Account,
     AppSession,
     AllAppSessions,
+    CurrentDevice,
     CloudHostGrant,
     StandaloneDevice,
     LocalIdentity,
@@ -140,6 +171,8 @@ sealed interface AccountNotice {
 
     data class SessionsFailed(val failure: CoreFailure) : AccountNotice
 
+    data class TargetsFailed(val failure: CoreFailure) : AccountNotice
+
     data object ActionCancelled : AccountNotice
 
     data class SignOutPendingRemote(val failure: CoreFailure? = null) : AccountNotice
@@ -161,6 +194,7 @@ data class AccountUiState(
     val loading: Boolean = false,
     val status: AccountStatus? = null,
     val appSessions: List<AppSessionInfo> = emptyList(),
+    val targets: AccountRevocableTargets = AccountRevocableTargets(),
     val confirmation: AccountConfirmation? = null,
     val report: AccountReport? = null,
     val notice: AccountNotice? = null,

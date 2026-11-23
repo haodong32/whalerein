@@ -122,6 +122,11 @@ fun CloudSignInRoute(
     onNavigate: (Route) -> Unit,
     onRestartGraph: () -> Unit,
 ) {
+    // The active profile owns the Cloud environment. The model must validate
+    // the native attempt and the returned session against that same value.
+    val activeEnvironment =
+        (dependencies as? DebugEnvironmentAware)?.debugCloudEnvironment?.current()
+            ?: "production"
     val viewModel: CloudSignInViewModel = viewModel(
         factory = viewModelFactory {
             initializer {
@@ -130,6 +135,7 @@ fun CloudSignInRoute(
                     auth = dependencies.cloudAuth,
                     clock = dependencies.clock,
                     diagnostics = dependencies.diagnosticSink,
+                    environment = activeEnvironment,
                     dispatcher = Dispatchers.Default,
                 )
             }

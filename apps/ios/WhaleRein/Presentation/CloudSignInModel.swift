@@ -115,10 +115,15 @@ final class CloudSignInModel {
     /// Cloud. A revoked session leaves no signed-in state.
     func restore() async {
         guard phase == .signedOut else { return }
+        // A retry after an unavailable Keychain must clear the previous failure;
+        // otherwise a successfully restored account would still render the old
+        // error guidance.
+        state.errorCode = nil
         apply(.restoreStarted)
         do {
             let status = try await service.cloudStatus()
             guard stillCurrent() else { return }
+            state.errorCode = nil
             apply(.restored(account: status.account, logoutPending: status.logoutPending))
             guard status.account != nil else { return }
             await loadDirectory()

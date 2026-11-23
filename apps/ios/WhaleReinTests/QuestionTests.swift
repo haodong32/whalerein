@@ -204,7 +204,7 @@ struct QuestionTests {
         #expect(harness.service.answerQuestionCalls.isEmpty)
     }
 
-    @Test("answer failure keeps the draft and the reviewed snapshot for retry")
+    @Test("a stale reviewed answer requires a fresh review and keeps the draft")
     func answerFailureKeepsDraft() async -> Void {
         var harness = await QuestionHarness()
         let batch = questionBatch()
@@ -224,7 +224,9 @@ struct QuestionTests {
         await harness.model.submitQuestionReview()
         #expect(harness.model.questionAnswerState == .failed)
         #expect(harness.model.questionErrorKey == .questionsGuardChanged)
-        #expect(harness.model.questionReview != nil)
+        // The rejected review snapshot is gone, so the same stale answer cannot
+        // be retried; the compositor draft is untouched.
+        #expect(harness.model.questionReview == nil)
         #expect(harness.model.draft == "composer draft survives")
     }
 

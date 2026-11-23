@@ -100,6 +100,13 @@ interface PairingPort {
 interface StartupPort {
     /** Reads the durable last target and Core's restore evidence. */
     suspend fun restore(instance: InstanceId): Outcome<StartupSnapshot>
+
+    /**
+     * Persists the authorized conversation the user just opened, so the next
+     * cold launch can restore it. A no-op implementation is valid for models
+     * that never open a conversation.
+     */
+    suspend fun recordTarget(session: com.whalerein.android.state.core.SessionRef) {}
 }
 
 interface ExternalEntryPort {

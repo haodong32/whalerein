@@ -299,3 +299,82 @@ final class RecoverableSessionService: SessionService {
 }
 
 extension RecoverableSessionService: InstanceStatusService {}
+
+// The recoverable wrapper must keep presenting the Cloud account and retained
+// operation surfaces while the Keychain is unavailable. Without these
+// forwarders the shell would decide the instance has no Cloud account at all,
+// so a locked-device launch would hide sign-out, the directory and recovery
+// even though the same Core state is restored after unlock.
+extension RecoverableSessionService: CloudAccountService {
+    func cloudAuthStart() async throws -> CloudAuthAttempt {
+        try await cloudService().cloudAuthStart()
+    }
+
+    func cloudAuthComplete(callbackURL: URL) async throws -> CloudAccount {
+        try await cloudService().cloudAuthComplete(callbackURL: callbackURL)
+    }
+
+    func cloudAuthCancel() async {
+        try? await cloudService().cloudAuthCancel()
+    }
+
+    func cloudStatus() async throws -> CloudAccountStatus {
+        try await cloudService().cloudStatus()
+    }
+
+    func cloudRefreshStatus() async throws -> CloudAccount {
+        try await cloudService().cloudRefreshStatus()
+    }
+
+    func cloudSignOut() async throws -> Bool {
+        try await cloudService().cloudSignOut()
+    }
+
+    func cloudAccountSessions() async throws -> [CloudAccountSession] {
+        try await cloudService().cloudAccountSessions()
+    }
+
+    func cloudRevokeSession(id: String) async throws -> CloudAccountSessionState {
+        try await cloudService().cloudRevokeSession(id: id)
+    }
+
+    func cloudRevokeAllSessions() async throws -> CloudAccountSessionState {
+        try await cloudService().cloudRevokeAllSessions()
+    }
+
+    func cloudHosts() async throws -> [CloudDirectoryHost] {
+        try await cloudService().cloudHosts()
+    }
+
+    func connectCloud(hostId: String) async throws -> CloudConnectResult {
+        try await cloudService().connectCloud(hostId: hostId)
+    }
+
+    private func cloudService() throws -> any CloudAccountService {
+        guard let service = try current() as? any CloudAccountService else {
+            throw SessionServiceError(.unsupportedCapability)
+        }
+        return service
+    }
+}
+
+extension RecoverableSessionService: OperationRecoveryService {
+    func listRetainedOperations() async throws -> [OperationReceipt] {
+        try await recoveryService().listRetainedOperations()
+    }
+
+    func recoverSend(operationId: String, follow: Bool) async throws -> OperationReceipt {
+        try await recoveryService().recoverSend(operationId: operationId, follow: follow)
+    }
+
+    func readMessage(_ reference: MessageReference) async throws -> ConversationMessage {
+        try await recoveryService().readMessage(reference)
+    }
+
+    private func recoveryService() throws -> any OperationRecoveryService {
+        guard let service = try current() as? any OperationRecoveryService else {
+            throw SessionServiceError(.unsupportedCapability)
+        }
+        return service
+    }
+}

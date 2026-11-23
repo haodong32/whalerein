@@ -38,6 +38,7 @@
     <string name="conversation_notice_default">提示</string>
     <string name="conversation_attachment_available">可用</string>
     <string name="conversation_attachment_unavailable">不可用</string>
+    <string name="conversation_attachment_save">保存</string>
     <string name="conversation_tool_expand">显示完整输出</string>
     <string name="conversation_tool_collapse">隐藏完整输出</string>
 

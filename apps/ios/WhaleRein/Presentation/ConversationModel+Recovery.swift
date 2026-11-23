@@ -65,9 +65,59 @@ extension ConversationModel {
         }
     }
 
+    /// On a cold launch the model has no in-memory operation identity. Core's
+    /// durable journal does, so adopt the single unresolved send recorded for
+    /// this exact instance/Host/session and read its exact result. This never
+    /// submits the message again; with several unresolved candidates the app
+    /// leaves selection to the explicit recovery surface instead of guessing.
+    func recoverRetainedSendIfNeeded() async {
+        guard lastSendOperationId == nil,
+              operationResult == nil,
+              let recovery = service as? any OperationRecoveryService else { return }
+        do {
+            let retained = try await recovery.listRetainedOperations()
+            let candidates = retained.filter {
+                $0.kind == .send
+                    && $0.scope == OperationScope(
+                        instanceId: service.instanceId,
+                        hostId: hostId,
+                        sessionId: sessionId
+                    )
+                    && $0.status.isUnresolved
+            }
+            guard candidates.count == 1, let candidate = candidates.first else { return }
+            lastSendOperationId = candidate.operationId
+            operationResult = candidate
+            let receipt = try await recovery.recoverSend(
+                operationId: candidate.operationId,
+                follow: true
+            )
+            applyOperationReceipt(receipt)
+        } catch {
+            // Leave the original operation listed for the Settings recovery
+            // path; a failed startup lookup cannot fabricate a result.
+            operationErrorKey = nil
+        }
+    }
+
     /// Applies results from the one coalesced visible-session refresh. Only the
-    /// original send is updated; a foreign scope is rejected.
+    /// original send is updated; a foreign scope is rejected. After a relaunch
+    /// the first refresh may be the only place that provides the durable
+    /// operation identity, so one unambiguous unresolved send for this exact
+    /// scope is adopted rather than dropped.
     func applyRecoveredOperations(_ receipts: [OperationReceipt]) {
+        if lastSendOperationId == nil {
+            let scope = OperationScope(
+                instanceId: service.instanceId,
+                hostId: hostId,
+                sessionId: sessionId
+            )
+            let candidates = receipts.filter {
+                $0.kind == .send && $0.scope == scope && $0.status.isUnresolved
+            }
+            guard candidates.count == 1 else { return }
+            lastSendOperationId = candidates[0].operationId
+        }
         guard let operationId = lastSendOperationId else { return }
         guard let receipt = receipts.first(where: { $0.operationId == operationId }) else {
             return

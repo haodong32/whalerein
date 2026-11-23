@@ -163,6 +163,12 @@ struct ComposerView: View {
                 statusLabel(key.key, systemImage: "stop.circle", color: .secondary)
                     .accessibilityIdentifier("conversation.stopStatus")
             }
+            if let key = model.draftStorageWarningKey {
+                // Non-blocking: the typed text stays usable, but the user is
+                // told it may not survive a restart when storage failed.
+                statusLabel(key.key, systemImage: "externaldrive.badge.exclamationmark", color: .orange)
+                    .accessibilityIdentifier("composer.draftStorageWarning")
+            }
             if let key = model.sendErrorKey {
                 statusLabel(key.key, systemImage: "exclamationmark.triangle", color: .red)
                     .accessibilityIdentifier("composer.error")

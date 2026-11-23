@@ -182,6 +182,33 @@ class DirectoryViewModelTest : AccessTest() {
         assertNull(viewModel.state.value.destination)
     }
 
+    @Test
+    @DisplayName("AC-26.signed-out-directory-offers-standalone-setup")
+    fun ac26SignedOutDirectoryOffersStandaloneSetup() = runTest(dispatcher) {
+        val directory = FakeDirectoryPort()
+        directory.listResult = Outcome.Failure(
+            CoreFailure("security", "The operation was blocked for security."),
+        )
+        directory.currentSessionResult = Outcome.Success(null)
+        val viewModel = newViewModel(directory)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.needsSignIn)
+        assertTrue(viewModel.state.value.standaloneSetupAvailable)
+    }
+
+    @Test
+    @DisplayName("AC-26.empty-first-use-directory-keeps-standalone-setup-reachable")
+    fun ac26EmptyFirstUseDirectoryKeepsStandaloneSetupReachable() = runTest(dispatcher) {
+        val directory = FakeDirectoryPort()
+        directory.listResult = Outcome.Success(emptyList())
+        val viewModel = newViewModel(directory)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.hosts.isEmpty())
+        assertTrue(viewModel.state.value.standaloneSetupAvailable)
+    }
+
     private fun newViewModel(directory: FakeDirectoryPort): DirectoryViewModel =
         DirectoryViewModel(
             instance = instance,

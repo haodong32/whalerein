@@ -60,7 +60,12 @@ data class CreateSessionInput(
 
 data class CreatedSession(
     val session: SessionRef,
-    val details: SessionDetails,
+    /**
+     * Full details when the follow-up read succeeded. Null means the Host
+     * confirmed the new session but the details read must be retried; callers
+     * must keep [session] and never create the session again.
+     */
+    val details: SessionDetails? = null,
 )
 
 data class ForkSessionInput(

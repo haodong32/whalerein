@@ -94,6 +94,9 @@ struct SessionForkView: View {
             Section {
                 if let summary = outcome.openableSummary {
                     Button(L10nKey.sessionsForkOpenChild.key) {
+                        // A late result from another scope must not open this
+                        // child under the parent the user selected.
+                        guard management.isForkConfirmed(for: scope) else { return }
                         openConversation(hostId, summary)
                         dismiss()
                     }
@@ -101,7 +104,7 @@ struct SessionForkView: View {
                 }
                 // A proven retryable failure may be attempted again; a
                 // confirmed or uncertain fork never is.
-                if outcome.canRetry {
+                if outcome.canRetry, management.forkScope == scope {
                     Button(L10nKey.commonRetry.key) {
                         Task {
                             await management.forkSession(hostId: hostId, sessionId: session.sessionId)

@@ -228,6 +228,29 @@ final class ConversationModel {
 
     var draft: String = ""
     var delivery: DeliveryChoice = .queue
+    /// Storage outcome for the composer draft. The in-memory text always stays
+    /// usable; these values tell the user whether it is likely to survive a
+    /// restart instead of pretending a failed save succeeded.
+    var draftLoadErrorKey: L10nKey?
+    var draftPersistenceErrorKey: L10nKey?
+    var closeDraftFlushErrorKey: L10nKey?
+    var closeDraftFlushDidComplete = false
+
+    /// True when the last write (or the close flush) failed, so the visible
+    /// draft may not survive a restart.
+    var draftMayNotSurviveRestart: Bool {
+        draftPersistenceErrorKey != nil || closeDraftFlushErrorKey != nil
+    }
+
+    /// One non-blocking composer notice covering both a failed read and a
+    /// failed write: in either case the user must not assume the text is safely
+    /// stored for the next launch.
+    var draftStorageWarningKey: L10nKey? {
+        if draftLoadErrorKey != nil || draftMayNotSurviveRestart {
+            return .conversationDraftStorageWarning
+        }
+        return nil
+    }
 
     struct QuestionDraft {
         let guardValue: QuestionGuard

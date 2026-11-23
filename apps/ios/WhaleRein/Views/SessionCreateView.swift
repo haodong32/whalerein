@@ -105,7 +105,10 @@ struct SessionCreateView: View {
                     .accessibilityIdentifier("create.submit")
                 }
             }
-            .task { await management.loadCreateSupport(hostId: hostId) }
+            .task {
+                management.prepareCreate(hostId: hostId)
+                await management.loadCreateSupport(hostId: hostId)
+            }
         }
     }
 
@@ -113,6 +116,7 @@ struct SessionCreateView: View {
         management.createForm.validation == nil
             && management.canCreate(hostId: hostId)
             && management.createState != .creating
+            && !management.isCreating
     }
 
     @ViewBuilder
@@ -187,6 +191,12 @@ struct SessionCreateView: View {
                 if let detailError = outcome.detailError {
                     Text(L10nKey.errorKey(for: detailError).key)
                         .foregroundStyle(.secondary)
+                    // The Host already created the session. Only the follow-up
+                    // read failed, so retry that read instead of creating again.
+                    Button(L10n.commonRetry.key) {
+                        Task { await retryDetails(outcome) }
+                    }
+                    .accessibilityIdentifier("create.retryDetails")
                 }
                 if let summary = outcome.openableSummary {
                     Button(L10nKey.sessionsOpen.key) {
@@ -217,6 +227,13 @@ struct SessionCreateView: View {
         let outcome = await management.submitCreate(hostId: hostId)
         guard let summary = outcome?.openableSummary else { return }
         open(summary)
+    }
+
+    /// Refreshes only the details of an already confirmed create. A failure
+    /// leaves the confirmed receipt and identity untouched.
+    private func retryDetails(_ outcome: SessionCreateOutcome) async {
+        guard let sessionId = outcome.sessionId else { return }
+        _ = await management.retryCreateDetails(hostId: hostId, sessionId: sessionId)
     }
 
     /// Looks the uncertain create up under the identity the Host asked the

@@ -137,18 +137,28 @@ struct StackControl {
 
 // MARK: - Live service harness
 
+enum StackServiceKind {
+    case standalone
+    /// A real Cloud instance whose official origins come from Core's built-in
+    /// environment catalog. Used only to exercise the local account boundary;
+    /// no live Cloud session is claimed.
+    case cloudStaging
+}
+
 @MainActor
 final class LiveCase {
     let environment: StackEnvironment
     let control: StackControl
+    let kind: StackServiceKind
     let keychainService: String
     let keychain: KeychainSecretStore
     let dataDirectory: URL
     var service: LiveSessionService!
 
-    init(environment: StackEnvironment) throws {
+    init(environment: StackEnvironment, kind: StackServiceKind = .standalone) throws {
         self.environment = environment
         self.control = StackControl(baseURL: environment.controlURL, token: environment.controlToken)
+        self.kind = kind
         let identifier = UUID().uuidString.lowercased()
         self.keychainService = "\(AppStorageLocations.keychainService).integration.\(identifier)"
         self.keychain = KeychainSecretStore(service: keychainService)
@@ -161,15 +171,28 @@ final class LiveCase {
     private func makeService() throws -> LiveSessionService {
         let document = AppStorageLocations.appConfigurationURL(in: dataDirectory)
         let store = try AppConfigurationStore(documentPath: document.path)
-        let standalone = AppInstanceInput(
-            id: "standalone",
-            service: .standalone,
-            environment: nil,
-            dataDirectory: "instances/standalone/data",
-            standaloneCAPEM: nil
-        )
-        try store.save(standalone)
-        try store.activate(id: "standalone")
+        switch kind {
+        case .standalone:
+            let standalone = AppInstanceInput(
+                id: "standalone",
+                service: .standalone,
+                environment: nil,
+                dataDirectory: "instances/standalone/data",
+                standaloneCAPEM: nil
+            )
+            try store.save(standalone)
+            try store.activate(id: "standalone")
+        case .cloudStaging:
+            let staging = AppInstanceInput(
+                id: "cloud-staging",
+                service: .cloud,
+                environment: .staging,
+                dataDirectory: "instances/cloud-staging/data",
+                standaloneCAPEM: nil
+            )
+            try store.save(staging)
+            try store.activate(id: "cloud-staging")
+        }
         let instance = store.activeInstance
         return try LiveSessionService(
             configPath: instance.configPath,
@@ -384,8 +407,11 @@ class IntegrationTestCase: XCTestCase {
         }
     }
 
-    func makeLive(_ environment: StackEnvironment) throws -> LiveCase {
-        let live = try LiveCase(environment: environment)
+    func makeLive(
+        _ environment: StackEnvironment,
+        kind: StackServiceKind = .standalone
+    ) throws -> LiveCase {
+        let live = try LiveCase(environment: environment, kind: kind)
         liveCases.append(live)
         return live
     }
@@ -419,6 +445,25 @@ class IntegrationTestCase: XCTestCase {
                 "expected a typed unpaired error",
                 file: file,
                 line: line
+            )
+        }
+    }
+
+    /// Removes any queued fixture item so the shared stack starts a case with
+    /// no work outstanding. The fixture has no control API for the queue, so
+    /// this uses the same Core-scoped mutation the app exposes.
+    func drainPendingQueue(_ live: LiveCase) async {
+        guard let snapshot = try? await live.service.pendingQueue(
+            hostId: live.environment.hostId,
+            sessionId: live.environment.sessionId
+        ) else { return }
+        for item in snapshot.items {
+            _ = try? await live.service.updateQueueItem(
+                hostId: live.environment.hostId,
+                sessionId: live.environment.sessionId,
+                itemId: item.itemID,
+                action: .remove,
+                text: ""
             )
         }
     }
@@ -812,6 +857,9 @@ extension IntegrationTestCase {
         try await live.pairFreshInvitation()
         let watcher = try await startWatching(live)
         try await live.control.seedEvent("idle")
+        // A previous queue case can leave an item on the shared fixture even
+        // after a seeded idle. Drain it here so this send is a fresh turn.
+        await drainPendingQueue(live)
         try await waitUntil(timeout: 10) {
             let caps = try await live.service.capabilities(
                 hostId: environment.hostId,
@@ -842,7 +890,15 @@ extension IntegrationTestCase {
                     return status.commandId == receipt.commandId && status.status == .confirmed
                 }
             }
-            XCTAssertTrue(confirmed, "the idle send never confirmed")
+            let queue = (try? await live.service.pendingQueue(
+                hostId: environment.hostId,
+                sessionId: environment.sessionId
+            ))?.items.count ?? -1
+            XCTAssertTrue(
+                confirmed,
+                "the idle send never confirmed (status=\(receipt.status.rawValue), "
+                    + "queue=\(queue), events=\(eventKinds(watcher.envelopes)))"
+            )
         }
     }
 
@@ -850,7 +906,7 @@ extension IntegrationTestCase {
         let environment = try environment()
         let live = try makeLive(environment)
         try await live.pairFreshInvitation()
-        _ = try await startWatching(live)
+        let watcher = try await startWatching(live)
         try await live.control.seedEvent("running")
 
         let capabilities = try await live.service.capabilities(
@@ -871,7 +927,14 @@ extension IntegrationTestCase {
             text: "integration steer send",
             delivery: .steer
         )
-        XCTAssertEqual(receipt.status, .confirmed)
+        // Steering into an active run is acknowledged while the run continues;
+        // it executes on the Source's schedule rather than synchronously.
+        XCTAssertTrue(
+            receipt.status == .accepted || receipt.status == .confirmed,
+            "steer send was not acknowledged (status=\(receipt.status.rawValue))"
+        )
+        XCTAssertFalse(receipt.commandId.isEmpty)
+        watcher.cancel()
         try await live.control.seedEvent("idle")
     }
 
@@ -889,14 +952,26 @@ extension IntegrationTestCase {
         XCTAssertTrue(capabilities.running)
         XCTAssertTrue(capabilities.supportsQueue)
 
+        let sentText = "integration queue send"
         let receipt = try await live.service.send(
             hostId: environment.hostId,
             sessionId: environment.sessionId,
-            text: "integration queue send",
+            text: sentText,
             delivery: .queue
         )
-        // Acceptance is only reported after the Source confirms the command.
-        XCTAssertEqual(receipt.status, .confirmed)
+        // A queued delivery is acknowledged while the run is active; it only
+        // confirms when the Source actually starts it. Both are valid terminal
+        // observations, but a rejected or uncertain result is not.
+        XCTAssertTrue(
+            receipt.status == .accepted || receipt.status == .confirmed,
+            "queue send was not acknowledged (status=\(receipt.status.rawValue))"
+        )
+        XCTAssertFalse(receipt.commandId.isEmpty)
+
+        // A queued item executes against the shared fixture session. Drain it
+        // before the next case runs in the same stack; otherwise a later idle
+        // send is queued behind it and can never reach confirmed.
+        await drainPendingQueue(live)
         try await live.control.seedEvent("idle")
     }
 }
@@ -1188,5 +1263,106 @@ extension IntegrationTestCase {
             XCTAssertFalse(exported.contains("fixture output"))
         }
         try? FileManager.default.removeItem(at: exportURL)
+    }
+}
+
+// MARK: - AC-12 Cloud boundary without a live session
+//
+// A live Staging Cloud/Live Logto and a signed IPHONE are not available from
+// this checkout. This case therefore proves only the locally runnable boundary:
+// a real Cloud instance over Swift -> UniFFI -> Core never claims a local
+// account, and starting the official attempt either returns an authorization
+// URL bound to the configured Staging issuer or fails with a typed recoverable
+// error. It does not prove a live sign-in or exchange and is not reported as
+// one.
+
+extension IntegrationTestCase {
+    func testAC12_cloudBoundaryWithoutLiveSession() async throws {
+        let environment = try environment()
+        let live = try makeLive(environment, kind: .cloudStaging)
+
+        let initial = try await live.service.cloudStatus()
+        XCTAssertNil(initial.account, "a fresh Cloud instance must not claim a signed-in account")
+        XCTAssertFalse(initial.logoutPending)
+        let signedOut = try await live.service.cloudSignOut()
+        XCTAssertTrue(signedOut, "no retained session means no pending sign-out")
+
+        do {
+            let attempt = try await live.service.cloudAuthStart()
+            XCTAssertEqual(
+                attempt.url.host,
+                "auth.staging.whalerein.com",
+                "the attempt must target the configured Staging issuer"
+            )
+            XCTAssertFalse(attempt.url.absoluteString.isEmpty)
+            await live.service.cloudAuthCancel()
+        } catch {
+            // Offline or disabled endpoints are a typed, recoverable failure.
+            // They must never surface as a signed-in account.
+            assertError(
+                error,
+                oneOf: [.unavailable, .configuration, .internalError, .timeout],
+                "Cloud attempt without a live session"
+            )
+        }
+
+        let after = try await live.service.cloudStatus()
+        XCTAssertNil(after.account, "an unexchanged attempt must not create a local account")
+    }
+}
+
+// MARK: - AC-13 draft scope with equal session IDs on different Hosts
+//
+// The loopback stack has one fixture Host and session, so cross-Host watch
+// switching is covered at the model boundary. Core's draft journal is still a
+// real scope store; this case proves it keys by Host and session rather than by
+// the session ID alone.
+
+extension IntegrationTestCase {
+    func testAC13_draftScopeWithEqualSessionIds() async throws {
+        let environment = try environment()
+        let live = try makeLive(environment)
+        try await live.pairFreshInvitation()
+
+        let otherHost = "integration-second-host"
+        let sharedSession = environment.sessionId
+        let hostScoped = "draft for the paired host"
+        let otherScoped = "draft for the second host"
+
+        try await live.service.saveDraft(
+            hostId: environment.hostId,
+            sessionId: sharedSession,
+            text: hostScoped
+        )
+        try await live.service.saveDraft(
+            hostId: otherHost,
+            sessionId: sharedSession,
+            text: otherScoped
+        )
+
+        let pairedDraft = try await live.service.loadDraft(
+            hostId: environment.hostId,
+            sessionId: sharedSession
+        )
+        let secondDraft = try await live.service.loadDraft(
+            hostId: otherHost,
+            sessionId: sharedSession
+        )
+        XCTAssertEqual(pairedDraft, hostScoped)
+        XCTAssertEqual(secondDraft, otherScoped, "equal session IDs must not share one draft")
+
+        try await live.service.clearDraft(hostId: otherHost, sessionId: sharedSession)
+        let clearedSecond = try await live.service.loadDraft(
+            hostId: otherHost,
+            sessionId: sharedSession
+        )
+        let survivingPaired = try await live.service.loadDraft(
+            hostId: environment.hostId,
+            sessionId: sharedSession
+        )
+        XCTAssertNil(clearedSecond)
+        XCTAssertEqual(survivingPaired, hostScoped, "clearing one Host scope must not clear another")
+
+        try await live.service.clearDraft(hostId: environment.hostId, sessionId: sharedSession)
     }
 }

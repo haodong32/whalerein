@@ -90,7 +90,8 @@ struct AttachmentBlockView: View {
                             await model.attachments.download(
                                 hostId: hostId,
                                 sessionId: sessionId,
-                                attachment: attachment
+                                attachment: attachment,
+                                dataDirectory: model.attachments.dataDirectory
                             )
                         }
                     }
@@ -106,6 +107,7 @@ struct AttachmentBlockView: View {
                                     hostId: hostId,
                                     sessionId: sessionId,
                                     attachment: attachment,
+                                    dataDirectory: model.attachments.dataDirectory,
                                     overwrite: true
                                 )
                             }

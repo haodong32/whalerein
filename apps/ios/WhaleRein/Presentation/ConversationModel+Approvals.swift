@@ -192,9 +192,16 @@ extension ConversationModel {
         isReconnecting = true
         defer { isReconnecting = false }
         do {
-            let loadedDraft = try await service.loadDraft(hostId: hostId, sessionId: sessionId) ?? ""
-            if draft.isEmpty, !loadedDraft.isEmpty {
-                draft = loadedDraft
+            // A draft read failure must not prevent the watch from restarting;
+            // the previous in-memory text remains authoritative for this run.
+            do {
+                let loadedDraft = try await service.loadDraft(hostId: hostId, sessionId: sessionId) ?? ""
+                draftLoadErrorKey = nil
+                if draft.isEmpty, !loadedDraft.isEmpty {
+                    draft = loadedDraft
+                }
+            } catch {
+                draftLoadErrorKey = .errorDraftUnavailable
             }
             let loaded = try await service.capabilities(hostId: hostId, sessionId: sessionId)
             state = ConversationReduce.reduce(state, .capabilitiesLoaded(loaded))

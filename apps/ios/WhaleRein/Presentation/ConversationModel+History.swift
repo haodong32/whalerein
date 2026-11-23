@@ -126,9 +126,14 @@ extension ConversationModel {
             historyErrorKey = nil
             return
         }
+        let generation = historyGeneration
         do {
             let message = try await history.historyMessage(reference)
+            // A watch reset replaces the transcript while this read is in
+            // flight. The old projection must not be restored into the new
+            // snapshot.
             guard !isClosed,
+                  generation == historyGeneration,
                   reference.hostId == hostId,
                   reference.sessionId == sessionId else { return }
             if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
@@ -141,6 +146,7 @@ extension ConversationModel {
             settleAuthoritativeContent(message)
             historyErrorKey = nil
         } catch {
+            guard !isClosed, generation == historyGeneration else { return }
             handleHistoryFailure(error)
         }
     }

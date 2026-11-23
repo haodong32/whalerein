@@ -167,6 +167,10 @@ extension AppShellModel {
         instance: AppInstance?
     ) {
         activationGeneration &+= 1
+        // The replacement instance has its own launch; a link for the previous
+        // instance must not be replayed into it.
+        self.isLaunched = false
+        self.pendingInvitationLink = nil
         self.service = service
         self.preferences = preferences
         self.dataDirectory = dataDirectory

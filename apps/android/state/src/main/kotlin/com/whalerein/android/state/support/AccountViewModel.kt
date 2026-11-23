@@ -34,7 +34,7 @@ class AccountViewModel(
                     } else {
                         null
                     }
-                    val (appSessions, notice) = when (sessions) {
+                    val (appSessions, sessionsNotice) = when (sessions) {
                         is Outcome.Success -> sessions.value to null
                         is Outcome.Failure -> emptyList<AppSessionInfo>() to
                             AccountNotice.SessionsFailed(sessions.failure)
@@ -42,11 +42,27 @@ class AccountViewModel(
                             AccountNotice.SessionsFailed(sessions.failure)
                         null, is Outcome.Cancelled -> emptyList<AppSessionInfo>() to null
                     }
+                    val targetsOutcome = if (status.signedIn) {
+                        port.revocableTargets(state.value.instanceId)
+                    } else {
+                        null
+                    }
+                    val (targets, targetsNotice) = when (targetsOutcome) {
+                        is Outcome.Success -> targetsOutcome.value to null
+                        is Outcome.Failure ->
+                            AccountRevocableTargets() to
+                                AccountNotice.TargetsFailed(targetsOutcome.failure)
+                        is Outcome.Unconfirmed ->
+                            AccountRevocableTargets() to
+                                AccountNotice.TargetsFailed(targetsOutcome.failure)
+                        null, is Outcome.Cancelled -> AccountRevocableTargets() to null
+                    }
                     setState(
                         state.value.copy(
                             status = status,
                             appSessions = appSessions,
-                            notice = notice,
+                            targets = targets,
+                            notice = sessionsNotice ?: targetsNotice,
                         ),
                     )
                 }
@@ -111,6 +127,20 @@ class AccountViewModel(
                     instanceId = state.value.instanceId,
                     accountId = state.value.status?.accountId,
                     scopeKind = AccountScopeKind.AllAppSessions,
+                ),
+                notice = null,
+            ),
+        )
+    }
+
+    fun requestRevokeCurrentDevice() {
+        setState(
+            state.value.copy(
+                confirmation = AccountConfirmation(
+                    action = AccountAction.RevokeCurrentDevice,
+                    instanceId = state.value.instanceId,
+                    accountId = state.value.status?.accountId,
+                    scopeKind = AccountScopeKind.CurrentDevice,
                 ),
                 notice = null,
             ),
@@ -190,6 +220,10 @@ class AccountViewModel(
                 AccountAction.RevokeAllAppSessions -> performRevocation(
                     scope = RevocationScope.AllAppSessions,
                     outcome = port.revokeAppSession(state.value.instanceId, null),
+                )
+                AccountAction.RevokeCurrentDevice -> performRevocation(
+                    scope = RevocationScope.CurrentDevice,
+                    outcome = port.revokeCurrentDevice(state.value.instanceId),
                 )
                 is AccountAction.RevokeCloudHostGrant -> performRevocation(
                     scope = RevocationScope.CloudHostGrant(action.hostId),
@@ -273,9 +307,22 @@ class AccountViewModel(
                 } else {
                     state.value.appSessions
                 }
+                val remainingTargets = when (scope) {
+                    is RevocationScope.CloudHostGrant -> state.value.targets.copy(
+                        cloudHostGrants = state.value.targets.cloudHostGrants
+                            .filterNot { it == scope.hostId },
+                    )
+                    is RevocationScope.StandaloneDevice -> state.value.targets.copy(
+                        standaloneDevices = state.value.targets.standaloneDevices
+                            .filterNot { it == scope.deviceId },
+                    )
+                    RevocationScope.CurrentDevice -> AccountRevocableTargets()
+                    else -> state.value.targets
+                }
                 setState(
                     state.value.copy(
                         appSessions = remaining,
+                        targets = remainingTargets,
                         report = AccountReport.Revoked(report),
                         notice = if (report.retention == RetentionCertainty.Uncertain) {
                             AccountNotice.RevocationRetentionUncertain(
@@ -298,6 +345,8 @@ class AccountViewModel(
                             DiagnosticEvents.ACCOUNT_SESSION_REVOKED
                         RevocationScope.AllAppSessions ->
                             DiagnosticEvents.ACCOUNT_SESSIONS_REVOKED_ALL
+                        RevocationScope.CurrentDevice ->
+                            DiagnosticEvents.ACCOUNT_CURRENT_DEVICE_REVOKED
                         is RevocationScope.CloudHostGrant ->
                             DiagnosticEvents.ACCOUNT_GRANT_REVOKED
                         is RevocationScope.StandaloneDevice ->
@@ -338,6 +387,7 @@ class AccountViewModel(
                                 ?: AccountConnection.Online,
                         ),
                         appSessions = emptyList(),
+                        targets = AccountRevocableTargets(),
                         report = AccountReport.Forgot(report),
                         notice = if (mode == ForgetMode.LocalOnly) {
                             AccountNotice.ForgottenLocalOnly(report.remoteAuthorityRetained)

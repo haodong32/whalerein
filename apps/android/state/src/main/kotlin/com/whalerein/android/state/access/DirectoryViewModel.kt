@@ -24,7 +24,13 @@ data class DirectoryUiState(
     val deniedHostId: HostId? = null,
     /** A Cloud directory without an account session cannot list Hosts. */
     val needsSignIn: Boolean = false,
-)
+) {
+    /**
+     * A signed-out or first-use directory is the only fresh-start surface, so it
+     * must keep Standalone setup reachable even though Welcome is not shown.
+     */
+    val standaloneSetupAvailable: Boolean get() = needsSignIn || hosts.isEmpty()
+}
 
 /**
  * Presents the Cloud directory.

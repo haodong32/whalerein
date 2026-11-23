@@ -24,17 +24,32 @@ extension ConversationModel {
         let text = draft
         let hostId = hostId
         let sessionId = sessionId
-        draftSaveTask = Task { [service] in
+        let service = service
+        draftSaveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(120))
-            if Task.isCancelled { return }
-            try? await service.saveDraft(hostId: hostId, sessionId: sessionId, text: text)
+            guard !Task.isCancelled else { return }
+            do {
+                try await service.saveDraft(hostId: hostId, sessionId: sessionId, text: text)
+                guard !Task.isCancelled else { return }
+                self?.draftPersistenceErrorKey = nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.draftPersistenceErrorKey = .errorDraftUnavailable
+            }
         }
     }
 
     func persistDraftNow() async {
         draftSaveTask?.cancel()
         draftSaveTask = nil
-        try? await service.saveDraft(hostId: hostId, sessionId: sessionId, text: draft)
+        do {
+            try await service.saveDraft(hostId: hostId, sessionId: sessionId, text: draft)
+            draftPersistenceErrorKey = nil
+        } catch {
+            // The typed text stays in memory; only its restart durability is
+            // uncertain, which the view reports from this key.
+            draftPersistenceErrorKey = .errorDraftUnavailable
+        }
     }
 
     func updateScroll(isAtLatest: Bool) {
@@ -203,8 +218,16 @@ extension ConversationModel {
         draft = ""
         draftSaveTask?.cancel()
         draftSaveTask = nil
-        Task { [service, hostId, sessionId] in
-            try? await service.clearDraft(hostId: hostId, sessionId: sessionId)
+        let hostId = hostId
+        let sessionId = sessionId
+        let service = service
+        Task { [weak self] in
+            do {
+                try await service.clearDraft(hostId: hostId, sessionId: sessionId)
+                self?.draftPersistenceErrorKey = nil
+            } catch {
+                self?.draftPersistenceErrorKey = .errorDraftUnavailable
+            }
         }
     }
 
@@ -212,7 +235,12 @@ extension ConversationModel {
         draft = ""
         draftSaveTask?.cancel()
         draftSaveTask = nil
-        try? await service.clearDraft(hostId: hostId, sessionId: sessionId)
+        do {
+            try await service.clearDraft(hostId: hostId, sessionId: sessionId)
+            draftPersistenceErrorKey = nil
+        } catch {
+            draftPersistenceErrorKey = .errorDraftUnavailable
+        }
     }
 
     func updateCapabilities(running: Bool) {
