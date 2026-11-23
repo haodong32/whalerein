@@ -477,7 +477,7 @@ internal class StartupAdapter(
         }
         var hostRevoked = lastTarget?.let { target ->
             try {
-                owner.core().connectionState(target.host.hostId.value) == "revoked"
+                owner.core().hostConnection(target.host.hostId.value)?.state == "revoked"
             } catch (_: Exception) {
                 false
             }
@@ -507,11 +507,9 @@ internal class StartupAdapter(
             // the connection state is the evidence that separates a live list
             // from a read-only cached one.
             val connection = runCatching {
-                owner.core().connectionState(hostId)
+                owner.core().hostConnection(hostId)?.state.orEmpty()
             }.getOrDefault("")
-            sessionIds = reachable?.takeIf {
-                connection == "connected" || connection == "syncing"
-            }
+            sessionIds = reachable?.takeIf { connection == "connected" }
             cachedSessionIds = try {
                 owner.core().cachedSessions(hostId).map { it.sessionId }.toSet()
             } catch (_: Exception) {
@@ -563,7 +561,7 @@ internal class ExternalEntryAdapter(private val owner: AndroidCore) : ExternalEn
         val hostId = target.hostId
         val hostRevoked = hostId?.let { host ->
             try {
-                owner.core().connectionState(host.value) == "revoked"
+                owner.core().hostConnection(host.value)?.state == "revoked"
             } catch (_: Exception) {
                 false
             }
