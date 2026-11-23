@@ -55,7 +55,7 @@ class CloudSignInViewModel(
     private val clock: Clock,
     private val diagnostics: DiagnosticSink,
     private val environment: String = "local",
-    private val expectedRedirect: String = DEFAULT_REDIRECT,
+    private val expectedRedirect: String = auth.androidRedirectUri(environment),
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ScreenModel<CloudSignInUiState>(CloudSignInUiState()) {
 
@@ -613,7 +613,4 @@ class CloudSignInViewModel(
         val parameters: Map<String, List<String>>,
     )
 
-    private companion object {
-        const val DEFAULT_REDIRECT = "https://app.whalerein.test/client/android/callback"
-    }
 }

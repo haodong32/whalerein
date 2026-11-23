@@ -33,15 +33,24 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Hosted PKCE returns through the registered HTTPS callback. The
-                 local development authority and the production authority are
-                 distinct associations registered by Cloud C-01.3/D-15. -->
+            <!-- Hosted PKCE returns through the registered HTTPS callback. Each
+                 official environment associates its own console origin; the
+                 active profile decides which callback the sign-in attempt uses. -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data
                     android:host="app.whalerein.test"
+                    android:path="/client/android/callback"
+                    android:scheme="https" />
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="app.staging.whalerein.com"
                     android:path="/client/android/callback"
                     android:scheme="https" />
             </intent-filter>

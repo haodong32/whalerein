@@ -48,6 +48,48 @@ class CloudSignInViewModelTest : AccessTest() {
     }
 
     @Test
+    @DisplayName("AC-01.staging uses the staging App Link callback end to end")
+    fun ac01StagingUsesTheStagingAppLinkCallback() = runTest(dispatcher) {
+        val auth = FakeCloudAuthPort()
+        auth.nextAttempt = { instance, environment ->
+            cloudAttempt(
+                instance = instance,
+                environment = environment,
+                redirect = "https://app.staging.whalerein.com/client/android/callback",
+                state = "state-staging",
+                id = "attempt-staging",
+            )
+        }
+        auth.enqueueComplete(
+            CloudAuthResult.Success(cloudSession(instance, environment = "staging")),
+        )
+        val viewModel = CloudSignInViewModel(
+            instance = instance,
+            auth = auth,
+            clock = FakeClock(),
+            diagnostics = RecordingDiagnosticSink(),
+            environment = "staging",
+            dispatcher = dispatcher,
+        )
+        advanceUntilIdle()
+        viewModel.start()
+        advanceUntilIdle()
+
+        assertEquals(CloudSignInPhase.AwaitingBrowser, viewModel.state.value.phase)
+        val attempt = requireNotNull(viewModel.state.value.attempt)
+        assertEquals(
+            "https://app.staging.whalerein.com/client/android/callback",
+            attempt.redirectUri,
+        )
+
+        viewModel.handleCallback(callback(attempt))
+        advanceUntilIdle()
+
+        assertEquals(CloudSignInPhase.Succeeded, viewModel.state.value.phase)
+        assertEquals(Route.Directory, viewModel.state.value.destination)
+    }
+
+    @Test
     @DisplayName("AC-01.recreated pending attempt survives process recreation and returns")
     fun ac01RecreatedPendingAttemptSurvivesProcessRecreationAndReturns() = runTest(dispatcher) {
         val auth = FakeCloudAuthPort()

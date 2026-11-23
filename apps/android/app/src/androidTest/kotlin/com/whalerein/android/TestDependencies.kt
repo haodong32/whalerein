@@ -489,6 +489,9 @@ class FakeDestinationWriter : DestinationWriter {
 }
 
 class FakeCloudAuthPort : CloudAuthPort {
+    override fun androidRedirectUri(environment: String): String =
+        "https://app.whalerein.test/client/android/callback"
+
     override suspend fun pendingAttempt(instance: InstanceId): Outcome<CloudAttempt?> =
         Outcome.Success(null)
 

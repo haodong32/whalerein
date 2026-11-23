@@ -127,10 +127,10 @@ pub fn new_operation_id() -> String {
     Core::new_command_id()
 }
 
-/// The pinned Android App Link callback for the local native client.
+/// The pinned Android App Link callback for one official Cloud environment.
 #[uniffi::export]
-pub fn android_redirect_uri() -> String {
-    whalerein_core::api::ANDROID_REDIRECT_URI.to_owned()
+pub fn android_redirect_uri(environment: String) -> String {
+    whalerein_core::api::android_redirect_uri(&environment).to_owned()
 }
 
 /// Install an explicit PEM bundle as the process native-root source.

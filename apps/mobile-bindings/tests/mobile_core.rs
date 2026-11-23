@@ -13,10 +13,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use whalerein_core::api::test_support::{history_message, FakeAccess, FakeAttachmentObject};
 use whalerein_mobile::{
-    new_operation_id, write_client_config, AttachmentDownloadRequestView, AttachmentReferenceView,
-    AttachmentTransferView, ConversationEvent, DeliveryChoice, MemorySecretStore,
-    MessageReferenceView, MessageReplyView, MessageView, MobileClientService, MobileCore,
-    QueueAction, SessionKeyView, WaitOutcome,
+    android_redirect_uri, new_operation_id, write_client_config, AttachmentDownloadRequestView,
+    AttachmentReferenceView, AttachmentTransferView, ConversationEvent, DeliveryChoice,
+    MemorySecretStore, MessageReferenceView, MessageReplyView, MessageView, MobileClientService,
+    MobileCore, QueueAction, SessionKeyView, WaitOutcome,
 };
 
 fn write_config(dir: &std::path::Path) -> String {
@@ -54,6 +54,22 @@ fn wait_for_pairing(core: &MobileCore) -> (Option<String>, Option<String>) {
             "pairing did not finish before the deadline"
         );
     }
+}
+
+#[test]
+fn android_redirect_uri_tracks_the_cloud_environment() {
+    assert_eq!(
+        android_redirect_uri("local".into()),
+        "https://app.whalerein.test/client/android/callback"
+    );
+    assert_eq!(
+        android_redirect_uri("staging".into()),
+        "https://app.staging.whalerein.com/client/android/callback"
+    );
+    assert_eq!(
+        android_redirect_uri("production".into()),
+        "https://app.whalerein.com/client/android/callback"
+    );
 }
 
 #[test]

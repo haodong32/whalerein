@@ -72,6 +72,9 @@ internal fun CloudAccountView.toSession(instance: InstanceId): CloudSession = Cl
 internal class CloudAuthAdapter(private val owner: AndroidCore) : CloudAuthPort {
     private val pending = mutableMapOf<String, CloudAttempt>()
 
+    override fun androidRedirectUri(environment: String): String =
+        com.whalerein.android.corebridge.androidRedirectUri(environment)
+
     override suspend fun pendingAttempt(instance: InstanceId): Outcome<CloudAttempt?> =
         Outcome.Success(pending[instance.value])
 
@@ -87,7 +90,7 @@ internal class CloudAuthAdapter(private val owner: AndroidCore) : CloudAuthPort 
                 attemptId = AttemptId(attempt.attemptId),
                 authorizationUrl = attempt.url,
                 state = state,
-                redirectUri = owner.androidRedirectUri,
+                redirectUri = androidRedirectUri(environment),
                 environment = environment,
                 expiresAtEpochMillis = 0,
             )

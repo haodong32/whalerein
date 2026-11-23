@@ -28,6 +28,14 @@ sealed interface CloudAuthResult {
 }
 
 interface CloudAuthPort {
+    /**
+     * The App Link callback registered for one official Cloud environment.
+     *
+     * The value comes from Core so the app never keeps a second copy of the
+     * per-environment redirect table.
+     */
+    fun androidRedirectUri(environment: String): String
+
     /** Returns the durable pending attempt for process recreation, if any. */
     suspend fun pendingAttempt(instance: InstanceId): Outcome<CloudAttempt?>
 

@@ -25,6 +25,31 @@ const ACCOUNT_SESSION: &str = "cloud-app-session";
 const IOS_REDIRECT_URI: &str = "whalerein://auth/callback";
 /// Fixed Android App Link callback for the pinned local native client.
 pub const ANDROID_REDIRECT_URI: &str = "https://app.whalerein.test/client/android/callback";
+/// App Link callback registered on the staging console origin.
+const ANDROID_STAGING_REDIRECT_URI: &str =
+    "https://app.staging.whalerein.com/client/android/callback";
+/// App Link callback registered on the production console origin.
+const ANDROID_PRODUCTION_REDIRECT_URI: &str = "https://app.whalerein.com/client/android/callback";
+
+/// The App Link callback registered for one official Cloud environment.
+///
+/// Cloud validates the exact redirect it is asked to use, so the client cannot
+/// keep one fixed callback once more than the local environment is reachable.
+pub fn android_redirect_uri(environment: &str) -> &'static str {
+    match environment {
+        "staging" => ANDROID_STAGING_REDIRECT_URI,
+        "production" => ANDROID_PRODUCTION_REDIRECT_URI,
+        _ => ANDROID_REDIRECT_URI,
+    }
+}
+
+/// Host component of the callback for one official Cloud environment.
+fn android_redirect_host(environment: &str) -> &'static str {
+    android_redirect_uri(environment)
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_default()
+}
 
 /// Native authorization-code platform. The platform decides the Cloud route,
 /// the registered redirect and the callback shape; an attempt can only be
@@ -52,16 +77,16 @@ impl CloudAuthPlatform {
         }
     }
 
-    fn redirect_uri(self) -> &'static str {
+    fn redirect_uri(self, environment: &str) -> &'static str {
         match self {
             Self::Ios => IOS_REDIRECT_URI,
-            Self::Android => ANDROID_REDIRECT_URI,
+            Self::Android => android_redirect_uri(environment),
         }
     }
 
     /// Reject a callback that is not the exact registered redirect for this
     /// platform before any attempt state is read.
-    fn accepts_callback(self, parsed: &Url) -> bool {
+    fn accepts_callback(self, parsed: &Url, environment: &str) -> bool {
         if !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.fragment().is_some()
@@ -76,7 +101,7 @@ impl CloudAuthPlatform {
             }
             Self::Android => {
                 parsed.scheme() == "https"
-                    && parsed.host_str() == Some("app.whalerein.test")
+                    && parsed.host_str() == Some(android_redirect_host(environment))
                     && parsed.port_or_known_default() == Some(443)
                     && parsed.path() == "/client/android/callback"
             }
@@ -321,6 +346,14 @@ impl AccountClient {
             secrets,
             instance,
         })
+    }
+
+    /// The official Cloud environment this client was opened for.
+    fn cloud_environment(&self) -> &str {
+        self.instance
+            .cloud
+            .as_ref()
+            .map_or("local", |cloud| cloud.environment.as_str())
     }
 
     async fn lock(&self, name: &str) -> CoreResult<std::fs::File> {
@@ -831,7 +864,7 @@ impl AccountClient {
                 revocation_digest: token_digest(&revocation),
                 code_challenge: &challenge,
                 code_challenge_method: "S256",
-                redirect_uri: platform.redirect_uri(),
+                redirect_uri: platform.redirect_uri(self.cloud_environment()),
                 instance_id: android_instance,
             })
             .send()
@@ -893,7 +926,7 @@ impl AccountClient {
         let platform = attempt.platform;
         let parsed = Url::parse(callback_url)
             .map_err(|_| CoreError::InvalidInput("invalid Cloud sign-in callback".into()))?;
-        if !platform.accepts_callback(&parsed) {
+        if !platform.accepts_callback(&parsed, self.cloud_environment()) {
             return Err(CoreError::Unauthorized);
         }
         if parsed
@@ -2474,12 +2507,43 @@ mod tests {
         assert_eq!(exchanges.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn android_redirect_follows_the_cloud_environment() {
+        assert_eq!(android_redirect_uri("local"), ANDROID_REDIRECT_URI);
+        assert_eq!(
+            android_redirect_uri("staging"),
+            "https://app.staging.whalerein.com/client/android/callback"
+        );
+        assert_eq!(
+            android_redirect_uri("production"),
+            "https://app.whalerein.com/client/android/callback"
+        );
+        assert_eq!(
+            CloudAuthPlatform::Ios.redirect_uri("staging"),
+            IOS_REDIRECT_URI
+        );
+
+        let staging = Url::parse(android_redirect_uri("staging")).unwrap();
+        assert!(CloudAuthPlatform::Android.accepts_callback(&staging, "staging"));
+        assert!(!CloudAuthPlatform::Android.accepts_callback(&staging, "production"));
+        assert!(!CloudAuthPlatform::Android.accepts_callback(&staging, "local"));
+        let insecure =
+            Url::parse("http://app.staging.whalerein.com/client/android/callback").unwrap();
+        assert!(!CloudAuthPlatform::Android.accepts_callback(&insecure, "staging"));
+        let wrong_path = Url::parse("https://app.staging.whalerein.com/other").unwrap();
+        assert!(!CloudAuthPlatform::Android.accepts_callback(&wrong_path, "staging"));
+    }
+
     fn callback_with_state(state: &str) -> String {
         format!("whalerein://auth/callback?code=code-ios&state={state}")
     }
 
     fn android_callback_with_state(state: &str) -> String {
-        format!("{ANDROID_REDIRECT_URI}?code=code-android&state={state}")
+        // The shared test instance resolves to the production environment.
+        format!(
+            "{}?code=code-android&state={state}",
+            android_redirect_uri("production")
+        )
     }
 
     #[tokio::test]
@@ -2496,7 +2560,7 @@ mod tests {
                 ("POST", "/api/v1/client/android/attempts") => {
                     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
                     let attempt_id = body["attemptId"].as_str().unwrap().to_owned();
-                    assert_eq!(body["redirectUri"], ANDROID_REDIRECT_URI);
+                    assert_eq!(body["redirectUri"], android_redirect_uri("production"));
                     assert_eq!(body["codeChallengeMethod"], "S256");
                     assert!(body["instanceId"]
                         .as_str()
