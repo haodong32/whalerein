@@ -305,6 +305,8 @@ export async function createManagedHost(rawConfig = {}, options = {}) {
       verifyAuthorization,
       expectedIssuer: config.expectedIssuer,
       runtimeConfig: config.runtimeConfig,
+      // Poll only while a removal is actively pending; idleness is event-driven.
+      removalPollMs: 2_000,
     })
   } catch (error) {
     // Runtime diagnostic text may contain private state or paths. Keep only a

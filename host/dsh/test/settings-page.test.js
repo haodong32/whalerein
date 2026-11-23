@@ -197,7 +197,7 @@ function savedSecrets() {
 
 async function createSettingsRuntime({
   connected = true, development = false, remoteFailure = false, describe = savedSecrets,
-  writable = true, managed = false,
+  writable = true, managed = false, connectionError = null,
 } = {}) {
   const writes = []
   let currentRemoteFailure = remoteFailure
@@ -234,6 +234,7 @@ async function createSettingsRuntime({
   } : {
     available: true,
     connected,
+    connectionError,
     hostId: 'host-real',
     pairingCode: 'abcd ef01 2345 6789',
     diagnostics: { identityReady: true, dshAvailable: true, revocationsPending: true,
@@ -724,6 +725,19 @@ test('when the host ID field is cleared, saving preserves the stored ID', async 
     renamed.props.onChange({ target: { value: 'office-host' } })
     await find(runtime.render(), (node) => node.type === UI.Button && text(node) === '保存修改').props.onClick()
     assert.ok(runtime.writes.some(([op, key, value]) => op === 'set' && key === 'host_id' && value === 'office-host'))
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('a refused Host credential replaces the automatic-reconnect hint', async () => {
+  const runtime = await createSettingsRuntime({ connected: false, connectionError: 'unauthorized' })
+  try {
+    runtime.render()
+    await runtime.settle()
+    const tree = runtime.render()
+    assert.match(text(tree), /服务拒绝了当前的主机凭据/)
+    assert.doesNotMatch(text(tree), /主机会自动重新连接/)
   } finally {
     await runtime.dispose()
   }
@@ -2329,12 +2343,14 @@ test('removal is not marked pending before the service accepts the intent', asyn
     runtime.setCloudState('removing', { connected: true })
     await runtime.refresh()
     assert.match(text(runtime.render()), /移除正在等待服务确认执行/)
-    runtime.setCloudState('removed', { connected: false })
+    runtime.setCloudState('removed', { connected: false, action: { kind: 'connect' } })
     await runtime.refresh()
     const removed = text(runtime.render())
     assert.match(removed, /服务已确认移除生效/)
     assert.equal(managedButton(runtime, '取消移除'), undefined)
     assert.equal(managedButton(runtime, '移除这台电脑').props.disabled, true)
+    assert.ok(managedButton(runtime, '重新连接这台电脑'), 'removed shows a fresh-approval reconnect action')
+    assert.equal(managedButton(runtime, '继续连接'), undefined)
   } finally {
     finish?.({ ok: false })
     globalThis.window = originalWindow

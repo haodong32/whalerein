@@ -38,6 +38,25 @@ test('when settings status is requested, it returns the host pairing code and pa
   }
 })
 
+test('standalone status exposes a refused transport credential without leaking its reason', () => {
+  const host = {
+    started: true,
+    config: { hostId: 'host-1' },
+    security: { hostFingerprintDisplay: 'abcd ef01', listChannels: () => [] },
+    store: { listPeerKeys: () => [] },
+    access: { connected: false, describe: () => ({ lastErrorCode: 'unauthorized', token: 'never-exposed' }) },
+    diagnostics: () => null,
+  }
+  const status = settingsStatus(host)
+  assert.equal(status.connected, false)
+  assert.equal(status.connectionError, 'unauthorized')
+  assert.equal(JSON.stringify(status).includes('never-exposed'), false)
+  host.access.describe = () => ({ lastErrorCode: 'not a code' })
+  assert.equal(settingsStatus(host).connectionError, 'internal')
+  host.access.describe = () => ({ lastErrorCode: '' })
+  assert.equal(settingsStatus(host).connectionError, null)
+})
+
 test('runtime diagnostics project only known fields and preserve unavailable values', () => {
   const host = {
     started: true, config: { hostId: 'host-1' },
@@ -489,7 +508,6 @@ test('settings load, refresh and details reads perform zero connection mutations
     reconnect: () => { calls.push('reconnect'); return {} },
     recoverCredential: () => { calls.push('recoverCredential'); return {} },
     remove: () => { calls.push('remove'); return {} },
-    reconcileRemoval: () => { calls.push('reconcileRemoval'); return {} },
   }
   const ctx = new Context()
   try {
@@ -502,29 +520,6 @@ test('settings load, refresh and details reads perform zero connection mutations
     assert.deepEqual(service.snapshot().action, { kind: 'connect' })
     assert.deepEqual(calls, ['details'])
   } finally { await ctx.fiber.dispose() }
-})
-
-test('a verified removal is reconciled in the background on refresh without duplicate polls', async () => {
-
-  const calls = []
-  let resolve
-  const manager = {
-    snapshot: () => ({ state: 'removing', removalUrl: 'https://app.example/hosts/host-1?removal=1' }),
-    reconcileRemoval: () => {
-      calls.push('reconcile')
-      return new Promise((done) => { resolve = done })
-    },
-  }
-  settingsStatus({ managed: true, manager })
-  settingsStatus({ managed: true, manager })
-  await new Promise((done) => setImmediate(done))
-  assert.equal(calls.length, 1)
-  resolve()
-  await new Promise((done) => setImmediate(done))
-  settingsStatus({ managed: true, manager })
-  await new Promise((done) => setImmediate(done))
-  assert.equal(calls.length, 2)
-  assert.equal(sanitizeManagerSnapshot(manager.snapshot()).removalUrl, 'https://app.example/hosts/host-1?removal=1')
 })
 
 test('credential recovery is exposed only when the runtime offers the scoped method', async () => {

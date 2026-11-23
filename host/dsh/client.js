@@ -32,6 +32,7 @@ window.__ModuleLoader__.load({
       connected: 'Host connected to server',
       disconnected: 'Host not connected to server',
       disconnectedHint: 'The host reconnects automatically.',
+      authFailureHint: 'The service refused this Host credential or trust configuration. Update the configuration and reload the plugin.',
       generate: 'Generate pairing link',
       generating: 'Generating…',
       pairingUri: 'Pairing link',
@@ -158,6 +159,7 @@ window.__ModuleLoader__.load({
       customCaFile: 'CA file (absolute path)',
       cloudIntro: 'Connect this computer to the selected service and approve it in your browser. Account sign-in stays in the browser.',
       cloudConnect: 'Connect to WhaleRein Cloud',
+      cloudReconnect: 'Reconnect this computer',
       cloudCancel: 'Cancel',
       cloudCancelling: 'Cancelling…',
       cloudTryAgain: 'Try again',
@@ -255,6 +257,7 @@ window.__ModuleLoader__.load({
       connected: '当前主机已连接服务器',
       disconnected: '当前主机未连接服务器',
       disconnectedHint: '主机会自动重新连接。',
+      authFailureHint: '服务拒绝了当前的主机凭据或信任配置。请更新配置并重新加载插件。',
       generate: '生成配对链接',
       generating: '正在生成…',
       pairingUri: '配对链接',
@@ -381,6 +384,7 @@ window.__ModuleLoader__.load({
       customCaFile: 'CA 文件绝对路径',
       cloudIntro: '将这台电脑连接到所选服务，并在浏览器中授权。账号登录始终留在浏览器中。',
       cloudConnect: '连接到 WhaleRein Cloud',
+      cloudReconnect: '重新连接这台电脑',
       cloudCancel: '取消',
       cloudCancelling: '正在取消…',
       cloudTryAgain: '重试',
@@ -762,6 +766,7 @@ window.__ModuleLoader__.load({
 
     function ConnectionCard({ t, snapshot, inviting, inviteError, pairingUri, pairingExpiresAt, pairingExpired, locale, copyFeedback, onGenerate, onCopy, onRefresh, titleId }) {
       const connected = snapshot.connected === true
+      const authFailure = ['unauthorized', 'forbidden', 'tls_trust', 'invalid_config'].includes(snapshot.connectionError)
       const statusColor = connected ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)'
       return h('section', { style: styles.statusCard, 'aria-labelledby': titleId },
         h('div', { style: styles.connectionHeader },
@@ -770,7 +775,7 @@ window.__ModuleLoader__.load({
               h(connected ? IconCheckCircleOutlineRegular : IconWarningOutlineRegular, { size: 20 })),
             h('div', { style: styles.statusText },
               h('h3', { id: titleId, style: { ...styles.statusTitle, margin: 0 } }, t(connected ? 'connected' : 'disconnected')),
-              connected ? null : h('p', { style: { ...styles.statusHint, margin: 0 } }, t('disconnectedHint')))),
+              connected ? null : h('p', { style: { ...styles.statusHint, margin: 0 } }, t(authFailure ? 'authFailureHint' : 'disconnectedHint')))),
           snapshot.available ? h(Button, { variant: 'primary', size: 'md', disabled: inviting, onClick: onGenerate }, inviting ? t('generating') : t('generate'))
             : h(Button, { variant: 'outline', size: 'md', onClick: onRefresh }, t('refresh'))),
         !snapshot.available ? h('p', { style: styles.hint, role: 'status' }, t('statusUnavailable')) : null,
@@ -1511,7 +1516,7 @@ window.__ModuleLoader__.load({
               showConnect ? h(Button, {
                 variant: 'primary', size: 'md', disabled: snapshot.available !== true || !!busy,
                 'aria-describedby': `${fieldId}-state-hint`, onClick: () => start(),
-              }, busy === 'start' ? tr('state_requesting') : state === 'idle' || actionKind === 'connect' ? tr(snapshot.service === 'custom' ? 'connectCustom' : 'cloudConnect') : tr('cloudTryAgain')) : null,
+              }, busy === 'start' ? tr('state_requesting') : state === 'removed' ? tr('cloudReconnect') : state === 'idle' || actionKind === 'connect' ? tr(snapshot.service === 'custom' ? 'connectCustom' : 'cloudConnect') : tr('cloudTryAgain')) : null,
               showResume ? h(Button, {
                 variant: 'primary', size: 'md', disabled: snapshot.available !== true || !!busy,
                 'aria-describedby': `${fieldId}-state-hint`, onClick: resume,
@@ -1817,7 +1822,7 @@ window.__ModuleLoader__.load({
     }
 
     function createStatusStore(remote) {
-      let snapshot = { available: false, ready: false, managed: false, connected: false, hostId: '', pairingCode: '', devices: [] }
+      let snapshot = { available: false, ready: false, managed: false, connected: false, hostId: '', pairingCode: '', devices: [], connectionError: null }
       let timer = null
       let disposed = false
       let running = false
@@ -1847,6 +1852,7 @@ window.__ModuleLoader__.load({
                 hostId: typeof result.value.hostId === 'string' ? result.value.hostId : '',
                 pairingCode: typeof result.value.pairingCode === 'string' ? result.value.pairingCode : '',
                 devices: Array.isArray(result.value.devices) ? result.value.devices : null,
+                connectionError: typeof result.value.connectionError === 'string' ? result.value.connectionError : null,
                 diagnostics: result.value.diagnostics ?? null,
                 configError: result.value.configError ?? null,
                 ...cloudSnapshot(result.value),

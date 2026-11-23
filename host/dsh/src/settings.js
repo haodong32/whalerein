@@ -203,29 +203,6 @@ function managedManager(host) {
   return host?.manager ?? host?.connectionManager ?? null
 }
 
-// Background removal reconciliation is a read-only scoped status poll. It may
-// run on settings refresh or startup, but never starts, stops or enrolls.
-const reconciling = new WeakSet()
-function pendingRemoval(raw) {
-  if (!raw || typeof raw !== 'object') return false
-  return raw.state === 'removing'
-    || ['pending', 'removing', 'disabled'].includes(raw.removalState)
-    || ['pending', 'removing', 'disabled'].includes(raw.removal?.state)
-    || raw.action?.kind === 'remove'
-}
-
-/** Poll a verified removal once in the background. */
-export function reconcileRemoval(manager, raw) {
-  if (!pendingRemoval(raw)) return undefined
-  if (!manager || typeof manager.reconcileRemoval !== 'function' || reconciling.has(manager)) return undefined
-  reconciling.add(manager)
-  const task = Promise.resolve()
-    .then(() => manager.reconcileRemoval())
-    .catch(() => undefined)
-    .finally(() => reconciling.delete(manager))
-  return task
-}
-
 export function settingsStatus(host) {
   const configError = host?.configError ?? null
   if (isManagedHost(host)) {
@@ -256,7 +233,6 @@ export function settingsStatus(host) {
     const snapshot = sanitizeManagerSnapshot(raw, {
       configError,
     })
-    void reconcileRemoval(manager, raw)
     return { ...snapshot, service }
   }
   if (!host?.started) {
@@ -282,6 +258,7 @@ export function settingsStatus(host) {
   } catch {
     devices = []
   }
+  const access = host.access?.describe?.() ?? {}
   return {
     available: true,
     managed: false,
@@ -291,6 +268,9 @@ export function settingsStatus(host) {
     pairingCode: security?.hostFingerprintDisplay ?? '',
     devices,
     diagnostics: settingsDiagnostics(host),
+    connectionError: typeof access.lastErrorCode === 'string' && access.lastErrorCode !== ''
+      ? safeCode(access.lastErrorCode)
+      : null,
     configError,
   }
 }
@@ -447,14 +427,5 @@ Object.defineProperty(WhaleReinSettingsService, 'initializeRemoteSnapshot', {
 export function createSettingsService(ctx, host) {
   const service = new WhaleReinSettingsService(ctx, host)
   WhaleReinSettingsService.initializeRemoteSnapshot.call(service)
-  // Resume a verified removal in the background even when the settings page is
-  // never opened. This only reads scoped status; it never starts a connection.
-  if (service.manager && typeof service.manager.snapshot === 'function') {
-    try {
-      void reconcileRemoval(service.manager, service.manager.snapshot())
-    } catch {
-      // Status remains available through the regular snapshot path.
-    }
-  }
   return service
 }

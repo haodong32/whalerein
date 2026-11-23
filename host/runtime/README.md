@@ -49,8 +49,18 @@ A confirmed enrollment and stored credential reconnect automatically after the
 original approval deadline. `disconnect()` persists the local pause before
 teardown; `remove()` only opens the verified management confirmation and does
 not claim removal until scoped status reports an accepted/enforced intent.
-`snapshot().action` projects the runtime-selected next action; settings refresh
-never starts or changes a connection.
+The manager resolves the scoped Cloud removal state at cold start, before a
+user-initiated connect or resume, and once after a definitive broker
+authentication refusal. Only an active removal is polled to completion
+(`removalPollMs`); a healthy connected profile has no background removal poll.
+A terminal removal stops the transport, drops the transport credential and
+projects `removed`; reconnecting from that state starts a fresh browser
+approval for the same Host identity. Cloud allocates the next enrollment
+revision and resets that workspace's removal intent on approval, so the old
+grant is never revived. A rejected removal leaves the live binding and
+credential intact. `snapshot().action` projects the runtime-selected next
+action; settings refresh never starts or changes a connection and never
+performs the removal read.
 
 | Module | Responsibility |
 | --- | --- |
