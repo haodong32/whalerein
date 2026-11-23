@@ -120,14 +120,30 @@ final class ConversationQueueController {
                 action: action,
                 text: text
             )
-            // Keep the confirmed operation receipt even if the refresh fails.
+            // Keep the native receipt even if the follow-up read fails.
             lastMutation = mutation
-            mutationErrorKey = nil
-            await refresh()
-            if action == .edit, editItemID == itemID {
-                clearEdit()
+            let status = mutation.receipt?.status ?? Self.status(for: mutation.operation.status)
+            switch status {
+            case .confirmed, .accepted:
+                mutationErrorKey = nil
+                await refresh()
+                if action == .edit, editItemID == itemID {
+                    clearEdit()
+                }
+                return true
+            case .uncertain:
+                // The change is not known to have happened. Keep an edit
+                // recoverable and let the authoritative Host queue decide; a
+                // failed read leaves the previous list marked stale.
+                mutationErrorKey = nil
+                await refresh()
+                return false
+            case .rejected, .cancelled:
+                // A rejected receipt is a real outcome, not a silent success.
+                mutationErrorKey = .queueMutationFailed
+                await refresh()
+                return false
             }
-            return true
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             mutationErrorKey = L10nKey.errorKey(for: code)
@@ -179,8 +195,21 @@ final class ConversationQueueController {
         }
         editErrorKey = nil
         let saved = await mutate(itemID: itemID, action: .edit, text: text)
-        if !saved, lastMutation == nil {
-            editErrorKey = mutationErrorKey ?? .errorInternal
+        if !saved {
+            // A rejected or unconfirmed result keeps the edit buffer and the
+            // reason visible instead of dropping the user's unsaved text.
+            editErrorKey = mutationErrorKey ?? .queueMutationUncertain
+        }
+    }
+
+    /// A mutation whose native receipt is missing still carries the shared
+    /// operation status; only a terminal success may clear local edit state.
+    private static func status(for status: OperationStatus) -> CommandStatus {
+        switch status {
+        case .confirmed: return .confirmed
+        case .accepted: return .accepted
+        case .failed: return .rejected
+        case .submitted, .uncertain: return .uncertain
         }
     }
 

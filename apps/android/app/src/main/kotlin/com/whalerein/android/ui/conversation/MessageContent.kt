@@ -39,10 +39,11 @@ fun MessageContent(
     item: RenderedItem,
     expandedToolCalls: Set<String>,
     onToggleTool: (String) -> Unit,
+    onSaveAttachment: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     when (item) {
-        is RenderedMessageItem -> RenderedMessage(item, modifier)
+        is RenderedMessageItem -> RenderedMessage(item, onSaveAttachment, modifier)
         is RenderedPreviewItem -> RenderedPreview(item, modifier)
         is RenderedToolItem -> ToolCard(
             item = item,
@@ -54,7 +55,11 @@ fun MessageContent(
 }
 
 @Composable
-fun RenderedMessage(item: RenderedMessageItem, modifier: Modifier = Modifier) {
+fun RenderedMessage(
+    item: RenderedMessageItem,
+    onSaveAttachment: (String) -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
     Column(
         modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -66,7 +71,7 @@ fun RenderedMessage(item: RenderedMessageItem, modifier: Modifier = Modifier) {
         )
         item.blocks.forEach { block ->
             if (block.visible) {
-                BlockContent(block)
+                BlockContent(block, onSaveAttachment)
             }
         }
     }
@@ -98,7 +103,11 @@ fun RenderedPreview(item: RenderedPreviewItem, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun BlockContent(block: RenderedBlock, modifier: Modifier = Modifier) {
+fun BlockContent(
+    block: RenderedBlock,
+    onSaveAttachment: (String) -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
     when (block.kind) {
         MessageBlockKind.Code -> CodeBlock(block, modifier)
         MessageBlockKind.Notice -> NoticeBlock(
@@ -108,6 +117,7 @@ fun BlockContent(block: RenderedBlock, modifier: Modifier = Modifier) {
 
         MessageBlockKind.Attachment -> AttachmentRow(
             attachment = requireNotNull(block.attachment),
+            onSave = onSaveAttachment,
             modifier = modifier,
         )
 
@@ -203,7 +213,11 @@ fun NoticeBlock(notice: RenderedNotice, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun AttachmentRow(attachment: RenderedAttachment, modifier: Modifier = Modifier) {
+fun AttachmentRow(
+    attachment: RenderedAttachment,
+    onSave: (String) -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -223,6 +237,11 @@ fun AttachmentRow(attachment: RenderedAttachment, modifier: Modifier = Modifier)
             ),
             style = MaterialTheme.typography.labelMedium,
         )
+        if (attachment.available) {
+            TextButton(onClick = { onSave(attachment.attachmentId) }) {
+                Text(text = stringResource(R.string.conversation_attachment_save))
+            }
+        }
     }
 }
 

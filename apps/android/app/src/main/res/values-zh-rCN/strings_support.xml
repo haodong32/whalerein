@@ -35,6 +35,8 @@
     <string name="support_account_signed_out">已退出登录</string>
     <string name="support_account_pending_sign_out">本地已退出，远程退出待完成</string>
     <string name="support_account_sign_out">退出登录</string>
+    <string name="support_account_revoke_current_device">撤销此设备</string>
+    <string name="support_account_current_device_hint">撤销此设备持有的全部授权，不影响单个选定的 Host 授权或独立设备。</string>
     <string name="support_account_forget">忘记本地身份</string>
     <string name="support_account_forget_local_only">仅移除本地身份</string>
     <string name="support_account_local_only_hint">仅移除本地身份时，远程云端授权会保留，直到被撤销。</string>
@@ -52,6 +54,7 @@
     <string name="support_account_current_session">此设备</string>
     <string name="support_account_load_failed">无法加载账号状态（%1$s）。</string>
     <string name="support_account_sessions_failed">无法加载 App Session（%1$s）。</string>
+    <string name="support_account_targets_failed">无法加载可撤销的授权与设备（%1$s）。</string>
     <string name="support_account_action_cancelled">操作已取消，未做任何更改。</string>
     <string name="support_account_sign_out_pending">本地退出已完成，远程退出待完成并将重试。</string>
     <string name="support_account_retention_uncertain">撤销已记录，但保留状态不确定（%1$s）。</string>
@@ -65,6 +68,7 @@
     <string name="support_scope_account">此账号</string>
     <string name="support_scope_app_session">一个云端 App Session</string>
     <string name="support_scope_all_app_sessions">此账号的全部云端 App Session</string>
+    <string name="support_scope_current_device">此设备持有的全部授权</string>
     <string name="support_scope_cloud_grant">一个云端 Host 授权</string>
     <string name="support_scope_standalone_device">一个 Standalone 设备</string>
     <string name="support_scope_local_identity">此设备的本地身份</string>

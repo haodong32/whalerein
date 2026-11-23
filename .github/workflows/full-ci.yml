@@ -80,17 +80,18 @@ jobs:
             echo 'Android verification not requested: add run-full-ci to test this revision.'
             exit 0
           fi
-          build=false
-          case "$EVENT" in
-            workflow_dispatch|schedule|push)
-              # Manual and main/scheduled runs verify the full tier.
-              build=true ;;
-            pull_request|merge_group)
-              changed=$(git diff --name-only --no-renames "$BASE_SHA" "$HEAD_SHA" --)
-              if printf '%s\n' "$changed" | grep -qE '^(apps/android/|tools/repo/src/repo/runners/(android|kotlin)\.py$|\.github/workflows/full-ci\.yml)'; then
-                build=true
-              fi ;;
-          esac
+          # The helper owns the label-versus-push policy and the shared native
+          # build inputs (core/, apps/mobile-bindings/, proto/).
+          build=$(python3 tools/repo/src/repo/ci.py android-plan \
+            --event "$EVENT" \
+            --action "$ACTION" \
+            --label "$LABEL" \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" | sed -n 's/^build=//p')
+          if [ -z "$build" ]; then
+            echo '::error::Android selection produced no decision.'
+            exit 1
+          fi
           if [ "$build" = false ]; then
             echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
           else
@@ -320,6 +321,61 @@ jobs:
             .data/runs/**/report.json
             .data/runs/**/report.html
             apps/android/**/build/outputs/androidTest-results/**/*.xml
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+  android-bridge:
+    name: Android bridge JVM tests
+    needs: changes
+    if: needs.changes.outputs.android_matrix != '{"include":[]}'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-37.0 build-tools;37.0.0'
+
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-android-macos-26-${{ hashFiles('apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/libs.versions.toml', 'apps/android/**/build.gradle.kts') }}
+          restore-keys: |
+            gradle-android-macos-26-
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.9'
+          python-version: '3.15.2'
+          enable-cache: true
+          cache-dependency-glob: tools/repo/uv.lock
+
+      - name: Run the Core bridge JVM suite
+        run: ./repo test android-bridge-jvm --json
+
+      - name: Upload bridge reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-bridge-jvm-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .data/runs/**/report.json
+            .data/runs/**/report.html
+            apps/android/core-bridge/build/test-results/testDebugUnitTest/*.xml
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 7
@@ -603,7 +659,17 @@ jobs:
   gate:
     name: Full CI gate
     if: always() && !cancelled() && needs.changes.result != 'skipped'
-    needs: [changes, fast, native, contract, deployment, android, android-performance]
+    needs:
+      [
+        changes,
+        fast,
+        native,
+        contract,
+        deployment,
+        android,
+        android-bridge,
+        android-performance,
+      ]
     runs-on: ubuntu-26.04
     steps:
       - name: Check required results
@@ -615,6 +681,7 @@ jobs:
           CONTRACT_RESULT: ${{ needs.contract.result }}
           DEPLOYMENT_RESULT: ${{ needs.deployment.result }}
           ANDROID_RESULT: ${{ needs.android.result }}
+          ANDROID_BRIDGE_RESULT: ${{ needs.android-bridge.result }}
           ANDROID_MATRIX: ${{ needs.changes.outputs.android_matrix }}
           ANDROID_PERFORMANCE_RESULT: ${{ needs.android-performance.result }}
           ANDROID_PERFORMANCE: ${{ needs.changes.outputs.android_performance }}
@@ -646,8 +713,10 @@ jobs:
           fi
           if [ "$ANDROID_MATRIX" = '{"include":[]}' ]; then
             test "$ANDROID_RESULT" = skipped
+            test "$ANDROID_BRIDGE_RESULT" = skipped
           else
             test "$ANDROID_RESULT" = success
+            test "$ANDROID_BRIDGE_RESULT" = success
           fi
           if [ "$ANDROID_PERFORMANCE" = true ]; then
             test "$ANDROID_PERFORMANCE_RESULT" = success

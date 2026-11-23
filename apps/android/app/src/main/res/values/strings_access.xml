@@ -36,6 +36,11 @@
     <string name="access_directory_default">Default</string>
     <string name="access_directory_current">Current</string>
     <string name="access_directory_denied">Access to this Host was denied.</string>
+    <string name="access_directory_more">More</string>
+    <string name="access_directory_standalone_entry">Set up a Standalone Host</string>
+    <string name="access_directory_account_entry">Account and devices</string>
+    <string name="access_directory_operations_entry">Retained operations</string>
+    <string name="access_directory_diagnostics_entry">Diagnostics</string>
 
     <string name="access_standalone_title">Standalone setup</string>
     <string name="access_standalone_body">Review the Host identity, trust, and local network access before pairing.</string>

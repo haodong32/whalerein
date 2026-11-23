@@ -160,6 +160,88 @@ struct InstanceActivationTests {
         #expect(harness.app.activeInstance?.id == "standalone")
     }
 
+    @Test("a rejected certificate import is not activated and changes no instance")
+    func rejectedCertificateImport() async throws {
+        let harness = try makeHarness()
+        harness.binding.saveError = SessionServiceError(.configuration)
+
+        let error = await harness.app.importStandaloneCA("not-a-valid-pem")
+
+        #expect(error == .configuration)
+        #expect(harness.app.activeInstance?.id == "cloud-production")
+        #expect(harness.app.service === harness.oldService)
+        let standalone = try #require(
+            harness.store.instances.first { $0.id == "standalone" }
+        )
+        #expect(!standalone.hasStandaloneCA)
+        #expect(standalone.standaloneCAPath == nil)
+        #expect(harness.binding.activateCalls.isEmpty)
+    }
+
+    @Test("an accepted certificate import is stored on the intended instance only")
+    func acceptedCertificateImport() async throws {
+        let harness = try makeHarness()
+
+        let error = await harness.app.importStandaloneCA("pem-bundle")
+
+        #expect(error == nil)
+        let standalone = try #require(
+            harness.store.instances.first { $0.id == "standalone" }
+        )
+        #expect(standalone.hasStandaloneCA)
+        #expect(standalone.standaloneCAPath?.lastPathComponent == "ca.pem")
+        let production = try #require(
+            harness.store.instances.first { $0.id == "cloud-production" }
+        )
+        #expect(!production.hasStandaloneCA)
+        // Importing while another instance is active must not switch runtimes.
+        #expect(harness.app.activeInstance?.id == "cloud-production")
+        #expect(harness.app.service === harness.oldService)
+    }
+
+    @Test("a failed switch keeps the old conversation and its instance data root")
+    func failedSwitchKeepsAttachmentDataRoot() async throws {
+        let harness = try makeHarness(
+            factoryError: SessionServiceError(.keychainUnavailable)
+        )
+        let oldData = try #require(harness.app.activeInstance?.dataDirectory)
+        harness.app.openConversation(
+            hostId: "studio-mac",
+            session: FixtureCatalog.sessions(hostId: "studio-mac")[0]
+        )
+        let oldConversation = try #require(harness.app.conversation)
+        #expect(oldConversation.attachments.dataDirectory == oldData)
+
+        let error = await harness.app.switchInstance(id: "standalone")
+
+        #expect(error == .keychainUnavailable)
+        #expect(harness.app.activeInstance?.id == "cloud-production")
+        #expect(harness.app.service === harness.oldService)
+        #expect(harness.app.conversation === oldConversation)
+        #expect(harness.app.conversation?.attachments.dataDirectory == oldData)
+        #expect(harness.app.preferences.value.paired)
+    }
+
+    @Test("a switched instance opens its conversation under its own data root")
+    func switchedInstanceUsesItsDataRoot() async throws {
+        let harness = try makeHarness()
+        harness.app.openConversation(
+            hostId: "studio-mac",
+            session: FixtureCatalog.sessions(hostId: "studio-mac")[0]
+        )
+        let oldRoot = try #require(harness.app.activeInstance?.dataDirectory)
+
+        #expect(await harness.app.switchInstance(id: "standalone") == nil)
+        let newRoot = try #require(harness.app.activeInstance?.dataDirectory)
+        #expect(newRoot != oldRoot)
+
+        harness.app.openConversation(
+            hostId: "travel-laptop",
+            session: FixtureCatalog.sessions(hostId: "travel-laptop")[0]
+        )
+        #expect(harness.app.conversation?.attachments.dataDirectory == newRoot)
+    }
+
     @Test("Local is exposed and created only in a debug build flavor")
     func localOptionCreation() async throws {
         let harness = try makeHarness()

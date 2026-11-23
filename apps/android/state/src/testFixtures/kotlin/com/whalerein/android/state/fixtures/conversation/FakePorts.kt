@@ -23,6 +23,7 @@ import com.whalerein.android.state.conversation.PendingActionOutcome
 import com.whalerein.android.state.conversation.PendingDetailResult
 import com.whalerein.android.state.conversation.PendingInputPort
 import com.whalerein.android.state.conversation.PendingListResult
+import com.whalerein.android.state.conversation.PendingSendRecord
 import com.whalerein.android.state.conversation.QueueMutation
 import com.whalerein.android.state.conversation.QueueSnapshot
 import com.whalerein.android.state.conversation.QuestionAnswer
@@ -399,7 +400,10 @@ class FakePendingInputPort : PendingInputPort {
 
 class FakeDraftPort : DraftPort {
     val drafts = mutableMapOf<SessionRef, String>()
+    val pendingSends = mutableMapOf<SessionRef, PendingSendRecord>()
     var loadFailure: CoreFailure? = null
+    var pendingSendSaveGate: CompletableDeferred<Unit>? = null
+    var pendingSendSaveFailure: CoreFailure? = null
 
     override suspend fun load(scope: SessionRef): Outcome<String?> {
         loadFailure?.let { return Outcome.Failure(it) }
@@ -413,6 +417,24 @@ class FakeDraftPort : DraftPort {
 
     override suspend fun clear(scope: SessionRef): Outcome<Unit> {
         drafts.remove(scope)
+        return Outcome.Success(Unit)
+    }
+
+    override suspend fun savePendingSend(
+        scope: SessionRef,
+        record: PendingSendRecord,
+    ): Outcome<Unit> {
+        pendingSendSaveGate?.await()
+        pendingSendSaveFailure?.let { return Outcome.Failure(it) }
+        pendingSends[scope] = record
+        return Outcome.Success(Unit)
+    }
+
+    override suspend fun loadPendingSend(scope: SessionRef): Outcome<PendingSendRecord?> =
+        Outcome.Success(pendingSends[scope])
+
+    override suspend fun clearPendingSend(scope: SessionRef): Outcome<Unit> {
+        pendingSends.remove(scope)
         return Outcome.Success(Unit)
     }
 }

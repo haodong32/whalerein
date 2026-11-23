@@ -105,14 +105,22 @@ final class SessionManagementModel {
     var createForm = SessionCreateForm()
     private(set) var createSupport: [String: Bool] = [:]
     private(set) var createState: SessionCreateState = .idle
+    private(set) var isCreating = false
+    /// Host the current create sheet is scoped to. A late result from another
+    /// scope (or an older sheet) is dropped instead of replacing this state.
+    private var createScope: String?
+    private var createToken: UInt64 = 0
 
     // Details
     private(set) var detailsScope: SessionScope?
     private(set) var detailsState: SessionDetailsState = .idle
+    private var detailsToken: UInt64 = 0
 
     // Fork
     private(set) var forkScope: SessionScope?
     private(set) var forkState: SessionForkState = .idle
+    private(set) var isForking = false
+    private var forkToken: UInt64 = 0
 
     // Model
     private(set) var modelScope: SessionScope?
@@ -121,6 +129,7 @@ final class SessionManagementModel {
     private(set) var sessionModel: SessionModelState?
     private(set) var sessionModelError: AppErrorCode?
     private(set) var isModelLoading = false
+    private var modelToken: UInt64 = 0
     private(set) var selectionState: ModelSelectionState = .idle
     /// Set when a selection was refused because the loaded catalog no longer
     /// lists the requested choice.
@@ -156,6 +165,16 @@ final class SessionManagementModel {
         }
     }
 
+    /// Scopes a fresh create sheet. It keeps a late create result from an
+    /// older sheet out of this one and clears any completed receipt so the
+    /// same sheet is reusable.
+    func prepareCreate(hostId: String) {
+        createScope = hostId
+        createToken &+= 1
+        isCreating = false
+        createState = .idle
+    }
+
     @discardableResult
     func submitCreate(hostId: String) async -> SessionCreateOutcome? {
         if let validation = createForm.validation {
@@ -168,15 +187,32 @@ final class SessionManagementModel {
             )
             return nil
         }
+        // A second tap while the response is pending must not create a second
+        // session. Preparation of a newer sheet invalidates this attempt.
+        guard !isCreating else { return nil }
+        if createScope == nil { createScope = hostId }
+        guard createScope == hostId else { return nil }
+        if case .result(let existing) = createState,
+           existing.receipt.status == .confirmed {
+            return existing
+        }
+        isCreating = true
+        createToken &+= 1
+        let token = createToken
+        defer {
+            if token == createToken { isCreating = false }
+        }
         createState = .creating
         do {
             let outcome = try await service.createSession(
                 hostId: hostId,
                 input: createForm.input
             )
+            guard token == createToken, createScope == hostId else { return nil }
             createState = .result(outcome)
             return outcome
         } catch {
+            guard token == createToken, createScope == hostId else { return nil }
             createState = .failed((error as? SessionServiceError)?.code ?? .internalError)
             return nil
         }
@@ -190,19 +226,23 @@ final class SessionManagementModel {
             detailsState = .idle
             detailsScope = scope
         }
+        detailsToken &+= 1
+        let token = detailsToken
         detailsState = .loading
         do {
-            detailsState = .loaded(
-                try await service.sessionDetails(hostId: hostId, sessionId: sessionId)
-            )
+            let detail = try await service.sessionDetails(hostId: hostId, sessionId: sessionId)
+            guard token == detailsToken, detailsScope == scope else { return }
+            detailsState = .loaded(detail)
         } catch {
+            guard token == detailsToken, detailsScope == scope else { return }
             detailsState = .unavailable((error as? SessionServiceError)?.code ?? .internalError)
         }
     }
 
     /// Reloads a confirmed identity without discarding it. Used after an
     /// uncertain create result to look the session up under the original
-    /// command.
+    /// command. The read publishes only while the details screen still owns
+    /// that scope, so a lookup for an old sheet cannot retarget a newer one.
     func refreshDetails(hostId: String, sessionId: String) async -> SessionDetail? {
         do {
             let detail = try await service.sessionDetails(
@@ -210,8 +250,40 @@ final class SessionManagementModel {
                 sessionId: sessionId
             )
             let scope = SessionScope(hostId: hostId, sessionId: sessionId)
-            detailsScope = scope
-            detailsState = .loaded(detail)
+            if detailsScope == scope {
+                detailsState = .loaded(detail)
+            }
+            return detail
+        } catch {
+            return nil
+        }
+    }
+
+    /// Retries only the follow-up detail read after a confirmed create whose
+    /// first read failed. It never submits another create; a failure keeps the
+    /// confirmed receipt and identity visible.
+    @discardableResult
+    func retryCreateDetails(hostId: String, sessionId: String) async -> SessionDetail? {
+        guard case .result(let existing) = createState,
+              existing.hostId == hostId,
+              existing.sessionId == sessionId,
+              existing.receipt.status == .confirmed else {
+            return nil
+        }
+        do {
+            let detail = try await service.sessionDetails(
+                hostId: hostId,
+                sessionId: sessionId
+            )
+            if case .result(let current) = createState, current.sessionId == sessionId {
+                createState = .result(SessionCreateOutcome(
+                    hostId: hostId,
+                    receipt: existing.receipt,
+                    sessionId: sessionId,
+                    session: detail,
+                    detailError: nil
+                ))
+            }
             return detail
         } catch {
             return nil
@@ -231,18 +303,34 @@ final class SessionManagementModel {
         if forkScope != scope {
             forkScope = scope
             forkState = .idle
+            forkToken &+= 1
+            // The previous scope's in-flight request is now fenced. Release
+            // the one-at-a-time guard so the new scope can proceed once its
+            // own action is selected.
+            isForking = false
         }
         // A confirmed fork is never submitted again from the same action; the
         // child already exists and its identity is authoritative.
         if case .result(let existing) = forkState, existing.isConfirmed {
             return existing
         }
+        // One in-flight fork at a time; a late result from an earlier scope is
+        // fenced so it cannot become the child of the newly selected session.
+        guard !isForking else { return nil }
+        isForking = true
+        forkToken &+= 1
+        let token = forkToken
+        defer {
+            if token == forkToken { isForking = false }
+        }
         forkState = .forking
         do {
             let outcome = try await service.forkSession(hostId: hostId, sessionId: sessionId)
+            guard token == forkToken, forkScope == scope else { return nil }
             forkState = .result(outcome)
             return outcome
         } catch {
+            guard token == forkToken, forkScope == scope else { return nil }
             forkState = .failed((error as? SessionServiceError)?.code ?? .internalError)
             return nil
         }
@@ -262,37 +350,51 @@ final class SessionManagementModel {
             isCatalogStale = false
             modelRefreshError = nil
         }
+        modelToken &+= 1
+        let token = modelToken
         isModelLoading = true
         // The catalog and the passive session observation are independent: one
-        // failing must not hide the other.
+        // failing must not hide the other. A newer load or scope change fences
+        // every earlier response.
         do {
-            catalog = try await service.modelCatalog(hostId: hostId)
+            let loadedCatalog = try await service.modelCatalog(hostId: hostId)
+            guard token == modelToken, modelScope == scope else { return }
+            catalog = loadedCatalog
             catalogError = nil
         } catch {
+            guard token == modelToken, modelScope == scope else { return }
             catalog = nil
             catalogError = (error as? SessionServiceError)?.code ?? .internalError
         }
         do {
-            sessionModel = try await service.readSessionModel(
+            let loadedModel = try await service.readSessionModel(
                 hostId: hostId,
                 sessionId: sessionId
             )
+            guard token == modelToken, modelScope == scope else { return }
+            sessionModel = loadedModel
             sessionModelError = nil
         } catch {
+            guard token == modelToken, modelScope == scope else { return }
             sessionModelError = (error as? SessionServiceError)?.code ?? .internalError
         }
+        guard token == modelToken, modelScope == scope else { return }
         isModelLoading = false
     }
 
     func refreshSessionModel(hostId: String, sessionId: String) async {
+        let scope = SessionScope(hostId: hostId, sessionId: sessionId)
         do {
-            sessionModel = try await service.readSessionModel(
+            let loaded = try await service.readSessionModel(
                 hostId: hostId,
                 sessionId: sessionId
             )
+            guard modelScope == scope else { return }
+            sessionModel = loaded
             sessionModelError = nil
             modelRefreshError = nil
         } catch {
+            guard modelScope == scope else { return }
             modelRefreshError = (error as? SessionServiceError)?.code ?? .internalError
         }
     }
@@ -306,6 +408,12 @@ final class SessionManagementModel {
         choice: ModelChoice
     ) async -> ModelSelectionOutcome? {
         if case .submitting = selectionState { return nil }
+        let scope = SessionScope(hostId: hostId, sessionId: sessionId)
+        guard modelScope == scope else {
+            isCatalogStale = true
+            selectionState = .stale
+            return nil
+        }
         guard let catalog, choice.isContained(in: catalog) else {
             isCatalogStale = true
             selectionState = .stale
@@ -319,10 +427,12 @@ final class SessionManagementModel {
                 sessionId: sessionId,
                 choice: choice
             )
+            guard modelScope == scope else { return outcome }
             selectionState = .result(outcome)
             await refreshSessionModel(hostId: hostId, sessionId: sessionId)
             return outcome
         } catch {
+            guard modelScope == scope else { return nil }
             selectionState = .failed((error as? SessionServiceError)?.code ?? .internalError)
             return nil
         }

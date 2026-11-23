@@ -245,6 +245,8 @@ internal fun ApprovalView.toPendingItem(): PendingItem = PendingItem.Approval(
     ),
 )
 
+private const val EXACT_REREAD_MAX_PAGES = 8
+
 internal class HistoryAdapter(private val owner: AndroidCore) : HistoryPort {
     override suspend fun latestPage(scope: SessionRef, projection: String): Outcome<HistoryPage> =
         page(scope, projection, cache = false, continuation = null)
@@ -260,15 +262,54 @@ internal class HistoryAdapter(private val owner: AndroidCore) : HistoryPort {
         projection: String,
         messageId: String,
     ): Outcome<HistoryPage> = outcomeOf {
-        val page = owner.core().cachedMessages(scope.hostId(), scope.sessionId())
-        val message = page.firstOrNull { it.messageId == messageId }
-            ?: throw MobileException.NotFound("message not found")
-        HistoryPage(
-            session = scope,
-            projection = projection,
-            messages = listOf(message.toStateMessage()),
-            exact = true,
-        )
+        // The cache only holds the live projection; a different requested
+        // projection must be resolved online instead of mislabelled exact.
+        if (cacheExactProjectionEligible(projection)) {
+            val cached = owner.core().cachedMessages(scope.hostId(), scope.sessionId())
+            val message = cached.firstOrNull { it.messageId == messageId }
+            if (message != null) {
+                return@outcomeOf HistoryPage(
+                    session = scope,
+                    projection = projection,
+                    messages = listOf(message.toStateMessage()),
+                    exact = true,
+                )
+            }
+        }
+        // Cache miss: Core has no message-reference locator for a page entry,
+        // so the exact binding reread cannot reconstruct one. Re-read the
+        // scoped online projection instead of reporting a false not-found.
+        var continuation: String? = null
+        var pages = 0
+        while (pages < EXACT_REREAD_MAX_PAGES) {
+            val page = owner.core().historyPage(
+                scope.hostId(),
+                scope.sessionId(),
+                false,
+                continuation,
+                100u,
+                4u * 1024u * 1024u,
+            )
+            if (!historyProjectionMatches(page.projection, projection)) {
+                throw MobileException.StaleHistory("content projection changed")
+            }
+            val message = page.messages.firstOrNull { it.messageId == messageId }
+            if (message != null) {
+                return@outcomeOf HistoryPage(
+                    session = scope,
+                    projection = page.projection.ifEmpty { projection },
+                    messages = listOf(message.toStateMessage()),
+                    exact = true,
+                )
+            }
+            val next = page.continuation
+            if (page.complete || next.isNullOrEmpty()) {
+                throw MobileException.NotFound("message not found")
+            }
+            continuation = next
+            pages += 1
+        }
+        throw MobileException.NotFound("message not found")
     }
 
     private suspend fun page(
@@ -306,7 +347,7 @@ internal class HistoryAdapter(private val owner: AndroidCore) : HistoryPort {
 }
 
 internal class ComposerAdapter(private val owner: AndroidCore) : ComposerPort {
-    override suspend fun submit(request: SendRequest): Outcome<SendReceipt> = outcomeOf {
+    override suspend fun submit(request: SendRequest): Outcome<SendReceipt> = try {
         val id = operationIdFor(request.sendId.value)
         val result = owner.core().sendWithOperationId(
             request.scope.hostId(),
@@ -315,15 +356,38 @@ internal class ComposerAdapter(private val owner: AndroidCore) : ComposerPort {
             request.mode.toCore(),
             id,
         )
-        val receipt = result.receipt
-        if (receipt == null) {
-            throw MobileException.Unavailable("send receipt is unconfirmed")
+        when (sendDisposition(result.receipt?.status)) {
+            SendDisposition.Accepted -> Outcome.Success(
+                SendReceipt(
+                    sendId = request.sendId,
+                    attempt = result.reply?.let { null },
+                    acceptedAtMillis = System.currentTimeMillis(),
+                ),
+            )
+
+            // A missing/ambiguous receipt keeps the original operation
+            // recoverable; it is never a definite failure.
+            SendDisposition.Unconfirmed -> Outcome.Unconfirmed(
+                CoreFailure(
+                    "uncertain",
+                    "The send result is unknown; recover the original operation.",
+                    retryable = true,
+                ),
+            )
+
+            SendDisposition.Rejected -> Outcome.Failure(
+                CoreFailure(
+                    result.receipt?.status ?: "send_rejected",
+                    "The Host rejected the send.",
+                    retryable = false,
+                ),
+            )
         }
-        SendReceipt(
-            sendId = request.sendId,
-            attempt = result.reply?.let { null },
-            acceptedAtMillis = System.currentTimeMillis(),
-        )
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        val failure = error.toCoreFailure()
+        if (failure.retryable) Outcome.Unconfirmed(failure) else Outcome.Failure(failure)
     }
 
     override suspend fun readReply(request: ReplyRequest): ReplyResult = try {
@@ -400,49 +464,116 @@ private suspend fun <T> onIoBlocking(block: () -> T): T =
     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { block() }
 
 internal class WaitAdapter(private val owner: AndroidCore) : WaitPort {
-    private val ids = mutableSetOf<String>()
+    private val identities = WaitIdentityRegistry()
+    private val identityMutex = Mutex()
 
-    override suspend fun wait(request: WaitRequest): WaitResult = try {
-        val id = onIoBlocking {
-            owner.core().beginWait(
-                request.scope.hostId(),
-                request.scope.sessionId(),
-                request.timeoutMillis.coerceIn(1, 60 * 60_000).toULong(),
-            )
+    override suspend fun wait(request: WaitRequest): WaitResult {
+        val nativeId = try {
+            onIoBlocking {
+                owner.core().beginWait(
+                    request.scope.hostId(),
+                    request.scope.sessionId(),
+                    request.timeoutMillis.coerceIn(1, 60 * 60_000).toULong(),
+                )
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            return WaitResult.Failed(error.toCoreFailure())
         }
-        ids += id
+        identityMutex.withLock { identities.bind(request.waitId, nativeId) }
         val deadline = System.currentTimeMillis() + request.timeoutMillis
         var result: com.whalerein.android.corebridge.WaitResultView? = null
-        while (System.currentTimeMillis() < deadline) {
-            result = onIoBlocking { owner.core().takeWaitResult(id, 250UL) }
-            if (result != null) break
-            delay(50)
-        }
-        ids -= id
-        when (result?.outcome) {
-            WaitOutcome.IDLE -> WaitResult.Quiescent
-            WaitOutcome.INPUT_REQUIRED -> {
-                val approval = approvalItem(request.scope)
-                if (approval != null) WaitResult.ApprovalInput(approval) else WaitResult.Quiescent
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                result = onIoBlocking { owner.core().takeWaitResult(nativeId, 250UL) }
+                if (result != null) break
+                delay(50)
             }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            // Keep the app/native mapping so an explicit cancel can still
+            // release exactly this native attempt.
+            throw cancelled
+        } catch (error: Throwable) {
+            identityMutex.withLock { identities.release(request.waitId) }
+            return WaitResult.Failed(error.toCoreFailure())
+        }
+        identityMutex.withLock { identities.release(request.waitId) }
+        if (result == null) {
+            // The local bounded wait expired; release the native attempt so it
+            // cannot settle into a later, unrelated wait state.
+            try {
+                onIoBlocking { owner.core().cancelWait(nativeId) }
+            } catch (_: Throwable) {
+                // The attempt may have settled between the take and the cancel.
+            }
+            return WaitResult.TimedOut
+        }
+        return when (result.outcome) {
+            WaitOutcome.IDLE -> WaitResult.Quiescent
+            WaitOutcome.INPUT_REQUIRED -> inputWaitResult(request.scope, result)
             WaitOutcome.TIMEOUT -> WaitResult.TimedOut
             WaitOutcome.CANCELLED -> WaitResult.Cancelled
             WaitOutcome.FAILED -> WaitResult.Failed(
                 CoreFailure(result.errorCode ?: "failed", "Wait failed."),
             )
-            null -> WaitResult.TimedOut
         }
-    } catch (error: Throwable) {
-        WaitResult.Failed(error.toCoreFailure())
     }
 
-    override suspend fun cancel(waitId: String): Outcome<Unit> = outcomeOf {
-        owner.core().cancelWait(waitId)
+    /**
+     * Releases only the native attempt behind [waitId]. The app id never reaches
+     * Core; a wait that already settled is a no-op, not a host interruption.
+     */
+    override suspend fun cancel(waitId: String): Outcome<Unit> {
+        val nativeId = identityMutex.withLock { identities.release(waitId) }
+            ?: return Outcome.Success(Unit)
+        return outcomeOf { owner.core().cancelWait(nativeId) }
+    }
+
+    private fun inputWaitResult(
+        scope: SessionRef,
+        result: com.whalerein.android.corebridge.WaitResultView,
+    ): WaitResult {
+        val pending = result.state?.pendingInput.orEmpty()
+        val kind = pendingInputKind(pending)
+        var approval = approvalItem(scope)
+        var question = questionItem(scope)
+        when (kind) {
+            PendingInputKind.Approval -> if (approval == null) question = questionItem(scope)
+            PendingInputKind.Question -> if (question == null) approval = approvalItem(scope)
+            PendingInputKind.None -> Unit
+        }
+        return when (waitSettlement(result.outcome, pending, approval != null, question != null)) {
+            WaitSettlement.Approval -> WaitResult.ApprovalInput(approval!!)
+            WaitSettlement.Question -> WaitResult.QuestionInput(question!!)
+            WaitSettlement.Quiescent -> WaitResult.Quiescent
+            WaitSettlement.TimedOut -> WaitResult.TimedOut
+            WaitSettlement.Cancelled -> WaitResult.Cancelled
+            WaitSettlement.Failed,
+            WaitSettlement.InputUnavailable,
+            -> WaitResult.Failed(
+                CoreFailure(
+                    result.errorCode ?: "input_unavailable",
+                    "The pending input could not be read.",
+                    retryable = true,
+                ),
+            )
+        }
     }
 
     private fun approvalItem(scope: SessionRef): PendingItem.Approval? = try {
         owner.core().approvals(scope.hostId(), scope.sessionId()).firstOrNull()?.toPendingItem()
             as? PendingItem.Approval
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun questionItem(scope: SessionRef): PendingItem.Questions? = try {
+        owner.core()
+            .listQuestions(scope.hostId(), scope.sessionId(), "")
+            .batches
+            .firstOrNull()
+            ?.toPendingItem(scope)
     } catch (_: Throwable) {
         null
     }

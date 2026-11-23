@@ -53,6 +53,16 @@ build enforces a 90% per-package line rule; a package below the gate fails the
 saved report. Ordinary push CI does not request Android coverage; full/explicit
 verification does.
 
+The `:core-bridge` adapter JVM suite is a separate explicit target. It runs
+`:core-bridge:testDebugUnitTest` and needs JDK 21, the Android SDK, Cargo and
+`protoc`, but no `adb` or device. It is not selected by an ordinary push; the
+full workflow runs it when Android-facing paths are selected.
+
+```bash
+./repo test android-bridge-jvm --json
+./repo test android-bridge-jvm --only AdapterMappingTest --json
+```
+
 ## Build and package
 
 ```bash
@@ -92,11 +102,14 @@ never selected by an ordinary pull-request push:
 ./repo test android-ui --list
 ```
 
-| Target | Gradle task by default | Scope |
+| Target | Gradle tasks by default | Scope |
 |---|---|---|
 | `android-ui` | `:app:connectedNoGmsDebugAndroidTest` | Compose fixture instrumentation on a compatible target. |
-| `android-integration` | `:app:connectedNoGmsDebugAndroidTest` | Native bridge, Keystore, TLS and device checks. Set `WHALEREIN_ANDROID_INTEGRATION_TASK` when the integration source set gets a dedicated module task. |
+| `android-integration` | `:app:connectedNoGmsDebugAndroidTest` and `:core-bridge:connectedDebugAndroidTest` | App device cases plus the six Core bridge native, Keystore and TLS device cases. |
 | `android-performance` | `:benchmark:connectedNoGmsReleaseAndroidTest` | Macrobenchmark with fixed workloads on a physical device. Set `WHALEREIN_ANDROID_PERFORMANCE_TASK` for a different benchmark module. |
+
+`WHALEREIN_ANDROID_INTEGRATION_TASK` replaces the whole integration selection
+with one task when a dedicated integration module or task is introduced.
 
 All device suites require `adb` and an Android SDK (`ANDROID_HOME`,
 `ANDROID_SDK_ROOT`, or `local.properties`). `android-performance` additionally
@@ -105,18 +118,22 @@ integration run also requires `WHALEREIN_ANDROID_ACCESS_URL` for the official
 local Cloud or Standalone stack. Missing prerequisites produce explicit
 `unavailable` evidence with exit status 3; they are never reported as a skip or
 a pass. `--only` filters parsed instrumentation case IDs, and an unmatched
-selector is a usage error. Reports record the selected suite and task, case IDs
+selector is a usage error. Reports record the selected suite and tasks, case IDs
 and statuses, the tested revision, and the device ABI, API level, release,
-effective page size and emulator flag when `adb` exposes them.
+effective page size and emulator flag when `adb` exposes them. The
+`android-bridge-jvm` target accepts `--only` and `--json`; it does not support
+`--list`, because Gradle has no body-free discovery mode for that suite.
 
 ## CI
 
 Ordinary push CI runs only JDK-only `android-state` static checks and tests. It
 installs no Android SDK/NDK, packages nothing, starts no emulator and runs no
 device or performance suite. The `run-full-ci` label event, manual dispatch and
-the full workflow request the Android device suites; a push that merely keeps
-the label attached stays on the quick path. Performance runs are manual and need
-a physical-device runner.
+the full workflow request the Android device suites and the Core bridge JVM
+suite; a push that merely keeps the label attached stays on the quick path. The
+full workflow treats `core/`, `apps/mobile-bindings/` and `proto/` changes as
+native Android inputs, so a labeled run tests the bridge suites those inputs
+feed. Performance runs are manual and need a physical-device runner.
 
 ## Local device acceptance against the development Cloud
 

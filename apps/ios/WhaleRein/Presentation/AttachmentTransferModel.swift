@@ -36,8 +36,26 @@ final class AttachmentTransferModel {
 
     private(set) var states: [String: State] = [:]
 
+    /// App-owned root for this model's transfers. The shell points it at the
+    /// active instance's data directory so equal Host/session IDs on different
+    /// instances can never share staged bytes.
+    var dataDirectory: URL = AppStorageLocations.applicationSupportDirectory()
+
+    private struct Attempt: Equatable, Sendable {
+        let id: UInt64
+        let scope: UInt64
+        let attachmentRef: String
+    }
+
     private let service: (any AttachmentTransferService)?
     private var pollTasks: [String: Task<Void, Never>] = [:]
+    /// One cancellable attempt per attachment. An attempt is removed as soon as
+    /// cancel/close invalidates it, so a late start result cannot begin polling.
+    private var attempts: [String: Attempt] = [:]
+    private var attemptCounter: UInt64 = 0
+    /// Bumped by `cancelAll` so every result from the replaced conversation is
+    /// fenced, even when the same attachment ref reappears there.
+    private var scopeGeneration: UInt64 = 0
 
     init(service: (any AttachmentTransferService)?) {
         self.service = service
@@ -75,7 +93,7 @@ final class AttachmentTransferModel {
         let destination: URL
         do {
             destination = try AppStorageLocations.attachmentStagingDirectory(
-                in: dataDirectory ?? AppStorageLocations.applicationSupportDirectory(),
+                in: dataDirectory ?? self.dataDirectory,
                 hostId: hostId,
                 sessionId: sessionId
             )
@@ -86,6 +104,13 @@ final class AttachmentTransferModel {
             )
             return
         }
+        attemptCounter &+= 1
+        let attempt = Attempt(
+            id: attemptCounter,
+            scope: scopeGeneration,
+            attachmentRef: attachment.attachmentRef
+        )
+        attempts[attachment.attachmentRef] = attempt
         var state = State(phase: .downloading)
         state.progress = AttachmentDownloadProgress(received: 0, total: attachment.size)
         state.errorKey = nil
@@ -104,11 +129,19 @@ final class AttachmentTransferModel {
                     overwrite: overwrite
                 )
             )
+            // Cancel or a conversation switch may have happened while the
+            // native start was in flight. Release the returned transfer
+            // instead of polling into the replaced conversation.
+            guard isCurrent(attempt) else {
+                await service.cancelAttachmentDownload(id)
+                return
+            }
             var started = self.state(for: attachment.attachmentRef)
             started.downloadId = id
             states[attachment.attachmentRef] = started
-            startPolling(attachmentRef: attachment.attachmentRef, downloadId: id, service: service)
+            startPolling(attempt: attempt, downloadId: id, service: service)
         } catch {
+            guard isCurrent(attempt) else { return }
             let code = (error as? SessionServiceError)?.code ?? .internalError
             states[attachment.attachmentRef] = State(
                 phase: .failed,
@@ -117,19 +150,50 @@ final class AttachmentTransferModel {
         }
     }
 
+    /// Cancels one transfer, including a start that has not returned its
+    /// native id yet. The returned id is cancelled by `download` once it
+    /// arrives; no polling or completion can publish after this call.
     func cancel(_ attachmentRef: String) {
-        guard let id = state(for: attachmentRef).downloadId, let service else { return }
-        Task { await service.cancelAttachmentDownload(id) }
+        guard state(for: attachmentRef).isDownloading else { return }
+        invalidate(attachmentRef)
+        var state = state(for: attachmentRef)
+        if let id = state.downloadId {
+            Task { [service] in
+                await service?.cancelAttachmentDownload(id)
+            }
+        }
+        state.phase = .cancelled
+        state.downloadId = nil
+        state.errorKey = .conversationAttachmentCancelled
+        states[attachmentRef] = state
     }
 
     /// Cancels every in-flight transfer when the conversation is replaced.
+    /// The scope fence drops any late progress or completion from the old
+    /// conversation, even when the replacement uses the same attachment refs.
     func cancelAll() {
-        guard let service else { return }
-        for (attachmentRef, state) in states where state.isDownloading {
-            if let id = state.downloadId {
-                Task { await service.cancelAttachmentDownload(id) }
-            }
+        scopeGeneration &+= 1
+        let inFlight = attempts
+        attempts.removeAll()
+        for (attachmentRef, _) in inFlight {
             pollTasks[attachmentRef]?.cancel()
+            pollTasks.removeValue(forKey: attachmentRef)
+        }
+        let downloading = states.filter { $0.value.isDownloading }
+        var ids: [String] = []
+        for (attachmentRef, state) in downloading {
+            if let id = state.downloadId {
+                ids.append(id)
+            }
+            var cancelled = state
+            cancelled.phase = .cancelled
+            cancelled.downloadId = nil
+            cancelled.errorKey = .conversationAttachmentCancelled
+            states[attachmentRef] = cancelled
+        }
+        guard let service, !ids.isEmpty else { return }
+        for id in ids {
+            Task { await service.cancelAttachmentDownload(id) }
         }
     }
 
@@ -155,27 +219,37 @@ final class AttachmentTransferModel {
         }
     }
 
+    private func isCurrent(_ attempt: Attempt) -> Bool {
+        attempt.scope == scopeGeneration
+            && attempts[attempt.attachmentRef]?.id == attempt.id
+    }
+
+    private func invalidate(_ attachmentRef: String) {
+        attempts.removeValue(forKey: attachmentRef)
+        pollTasks.removeValue(forKey: attachmentRef)?.cancel()
+    }
+
     private func startPolling(
-        attachmentRef: String,
+        attempt: Attempt,
         downloadId: String,
         service: any AttachmentTransferService
     ) {
-        pollTasks[attachmentRef]?.cancel()
-        pollTasks[attachmentRef] = Task { [weak self] in
+        pollTasks[attempt.attachmentRef]?.cancel()
+        pollTasks[attempt.attachmentRef] = Task { [weak self] in
             while !Task.isCancelled {
                 do {
                     let snapshot = try await service.takeAttachmentResult(downloadId, waitMs: 250)
-                    guard let self else { return }
-                    self.apply(snapshot, for: attachmentRef)
+                    guard let self, self.isCurrent(attempt) else { return }
+                    self.apply(snapshot, for: attempt.attachmentRef)
                     if snapshot.status != .running { return }
                 } catch {
-                    guard let self else { return }
+                    guard let self, self.isCurrent(attempt) else { return }
                     let code = (error as? SessionServiceError)?.code ?? .internalError
-                    var state = self.state(for: attachmentRef)
+                    var state = self.state(for: attempt.attachmentRef)
                     state.phase = .failed
                     state.errorKey = Self.downloadErrorKey(for: code)
-                    self.states[attachmentRef] = state
-                            return
+                    self.states[attempt.attachmentRef] = state
+                    return
                 }
             }
         }

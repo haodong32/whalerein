@@ -241,6 +241,14 @@ final class AppShellModel {
         get { shell.resumeMarker }
         set { shell.resumeMarker = newValue }
     }
+    var isLaunched: Bool {
+        get { shell.isLaunched }
+        set { shell.isLaunched = newValue }
+    }
+    var pendingInvitationLink: URL? {
+        get { shell.pendingInvitationLink }
+        set { shell.pendingInvitationLink = newValue }
+    }
 
     /// App-section reasoning visibility. The history feature reads and writes
     /// this through the same authoritative document; no reasoning UI lives here.

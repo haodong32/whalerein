@@ -48,6 +48,7 @@ fun AccountScreen(
     onSignOut: () -> Unit,
     onRevokeSession: (String) -> Unit,
     onRevokeAllSessions: () -> Unit,
+    onRevokeCurrentDevice: () -> Unit,
     onRevokeCloudGrant: (HostId) -> Unit,
     onRevokeStandaloneDevice: (String) -> Unit,
     onRequestForget: (ForgetMode) -> Unit,
@@ -79,17 +80,36 @@ fun AccountScreen(
             item { AccountStatusCard(state) }
             state.notice?.let { notice -> item { AccountNoticeCard(notice) } }
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onSignOut) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
                         Text(stringResource(R.string.support_account_sign_out))
                     }
-                    OutlinedButton(onClick = { onRequestForget(ForgetMode.Ordinary) }) {
+                    OutlinedButton(
+                        onClick = onRevokeCurrentDevice,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(stringResource(R.string.support_account_revoke_current_device))
+                    }
+                    OutlinedButton(
+                        onClick = { onRequestForget(ForgetMode.Ordinary) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Text(stringResource(R.string.support_account_forget))
                     }
-                    TextButton(onClick = { onRequestForget(ForgetMode.LocalOnly) }) {
+                    TextButton(
+                        onClick = { onRequestForget(ForgetMode.LocalOnly) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Text(stringResource(R.string.support_account_forget_local_only))
                     }
                 }
+            }
+            item {
+                Text(
+                    text = stringResource(R.string.support_account_current_device_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             item {
                 Text(
@@ -218,6 +238,10 @@ private fun AccountNoticeCard(notice: AccountNotice) {
             R.string.support_account_sessions_failed,
             notice.failure.code,
         )
+        is AccountNotice.TargetsFailed -> stringResource(
+            R.string.support_account_targets_failed,
+            notice.failure.code,
+        )
         AccountNotice.ActionCancelled -> stringResource(R.string.support_account_action_cancelled)
         is AccountNotice.SignOutPendingRemote -> stringResource(
             R.string.support_account_sign_out_pending,
@@ -306,6 +330,7 @@ private fun scopeDescription(scope: AccountScopeKind): Int = when (scope) {
     AccountScopeKind.Account -> R.string.support_scope_account
     AccountScopeKind.AppSession -> R.string.support_scope_app_session
     AccountScopeKind.AllAppSessions -> R.string.support_scope_all_app_sessions
+    AccountScopeKind.CurrentDevice -> R.string.support_scope_current_device
     AccountScopeKind.CloudHostGrant -> R.string.support_scope_cloud_grant
     AccountScopeKind.StandaloneDevice -> R.string.support_scope_standalone_device
     AccountScopeKind.LocalIdentity -> R.string.support_scope_local_identity

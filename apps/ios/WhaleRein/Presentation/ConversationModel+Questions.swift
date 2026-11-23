@@ -124,6 +124,10 @@ extension ConversationModel {
             case .uncertain:
                 questionAnswerState = .uncertain(commandId: receipt.commandId)
             case .rejected:
+                // The Host refused this exact reviewed snapshot. Drop it so the
+                // user must review a fresh answer instead of retrying a guard
+                // that is already known to be stale.
+                questionReview = nil
                 questionAnswerState = .failed
                 questionErrorKey = .questionsAnswerRejected
             default:
@@ -134,9 +138,14 @@ extension ConversationModel {
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             questionAnswerState = .failed
-            questionErrorKey = code == .conflict || code == .staleApproval
-                ? .questionsGuardChanged
-                : L10nKey.errorKey(for: code)
+            if code == .conflict || code == .staleApproval {
+                // A changed Host guard is never repaired locally. Require a
+                // fresh review of the new state before another submission.
+                questionReview = nil
+                questionErrorKey = .questionsGuardChanged
+            } else {
+                questionErrorKey = L10nKey.errorKey(for: code)
+            }
             reportFatalIfNeeded(code)
         }
     }

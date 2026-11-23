@@ -54,7 +54,9 @@ The opt-in `.github/workflows/full-ci.yml` owns the full platform matrix:
 |---|---|---|
 | Checks and coverage | `ubuntu-26.04` | Static checks, builds and affected-project unit coverage. |
 | Native Rust checks and coverage | `macos-26`, `windows-2025` | Native checks, builds, unit tests and per-crate coverage. |
-| Android device suites | `macos-26` emulator; physical device for performance | Compose fixtures, native bridge/Keystore/TLS checks and the explicit Macrobenchmark. |
+| Android device suites | `macos-26` emulator; physical device for performance | Compose fixtures, app and Core bridge native/Keystore/TLS checks and the explicit Macrobenchmark. |
+| Android bridge JVM tests | `macos-26` | Core bridge adapter JVM cases without `adb` or a device. |
+| iOS stack integration | self-hosted macOS (`WHALEREIN_IOS_STACK_RUNNER`) | Nightly or manual `ios-integration` against the disposable fixture stack. |
 | Deployment acceptance | `ubuntu-24.04` | Compose restart/recovery, shutdown, backup/restore and retention. |
 
 The full native jobs reuse the affected-project selection and invoke the repo
@@ -72,13 +74,15 @@ capability failure, not permission to skip the case in another job.
 
 ## Android layers
 
-The Android client has one JDK-only layer and three explicit device layers:
+The Android client has one JDK-only ordinary layer, one explicit host-side
+bridge layer and three explicit device layers:
 
 | Layer | Entry | Prerequisites | Ordinary PR |
 |---|---|---|---|
 | Kotlin/JVM state | `./repo test --project android-state` | JDK 21 and the Gradle wrapper only. No Android SDK, NDK, emulator or Rust compiler. | Yes, together with `./repo check android-state`. |
+| Core bridge JVM | `./repo test android-bridge-jvm` | JDK 21, Android SDK, Cargo and `protoc`. No `adb` or device. | No. Full workflow, explicit label event or manual dispatch only. |
 | Compose UI | `./repo test android-ui` | Android SDK, `adb`, a compatible target, and the fixture test APK. | No. Explicit label event, manual dispatch or full workflow only. |
-| Native integration | `./repo test android-integration` | Android SDK, `adb`, a device, and the official local stack when `WHALEREIN_ANDROID_LOCAL_STACK=1` is requested. | No. |
+| Native integration | `./repo test android-integration` | Android SDK, `adb`, a device, and the official local stack when `WHALEREIN_ANDROID_LOCAL_STACK=1` is requested. Runs the app suite and the `:core-bridge` instrumentation suite. | No. |
 | Performance | `./repo test android-performance` | Physical device, Android SDK and a release-like Macrobenchmark package. | No. |
 
 `android-state` is the only Android project registered in
@@ -87,11 +91,12 @@ never selects a device suite. Focused JVM runs pass the literal selector to the
 state build's `-PcaseFilter` condition, which disables non-matching bodies
 before execution; discovery uses `-PcaseList=true`, which disables every body.
 Filter-skipped JVM cases are not selected evidence; a genuinely skipped
-selected case is reported by an unfiltered run. The device targets accept
+selected case is reported by an unfiltered run. Device targets accept
 `--only` (a literal case-ID substring), `--list` and `--json`, and save the
-common repository report with the selected suite, task, case IDs, statuses,
+common repository report with the selected suite, tasks, case IDs, statuses,
 tested revision, and device ABI/API/page-size facts when `adb` can report them.
-`--only` with no observed match is a usage error.
+`--only` with no observed match is a usage error. `android-bridge-jvm` accepts
+`--only` and `--json`; it has no body-free list mode.
 
 A missing SDK, device, physical device or requested local stack is recorded as
 unavailable evidence with prerequisite exit status 3. It is not a skip and not a
@@ -101,9 +106,13 @@ reports a passing coverage gate without measurements.
 
 Android device work is bound to the tested revision. The `run-full-ci` label
 event, manual dispatch and the full workflow may request it; a later push that
-merely leaves the label attached stays on the quick path. `CI gate` requires
-only the JDK-only Android quick checks on ordinary pushes, and `Full CI gate`
-requires the selected device suites. See
+merely leaves the label attached stays on the quick path. The device path
+filter treats `apps/android/`, `core/`, `apps/mobile-bindings/`, `proto/` and the
+Android runner files as native build inputs, so a labeled change to a shared
+input selects the device and bridge suites. It does not add device work to an
+ordinary push. `CI gate` requires only the JDK-only Android quick checks on
+ordinary pushes, and `Full CI gate` requires the selected device and bridge JVM
+jobs. See
 [apps/android/README.md](../apps/android/README.md) for build, signing and
 device-suite commands.
 
@@ -379,8 +388,15 @@ remains scheduled by `.github/workflows/integration.yml` at 03:17 Asia/Shanghai
 and the iOS full plan at 02:47 Asia/Shanghai (18:47 UTC); GitHub scheduling is
 best-effort, and manual dispatch can validate a repair or high-risk change
 without waiting.
-iOS dispatch accepts `unit`, `smoke` or `full`; choose the PR branch and `full`
-to run the complete UI plan before merging.
+iOS dispatch accepts `unit`, `smoke`, `full` or `integration`; choose the PR
+branch and `full` to run the complete UI plan before merging. The nightly and
+`integration` dispatch paths run `./repo test ios-integration`, which starts the
+fixture stack itself. Hosted macOS runners do not provide Docker, so that job
+reads `vars.WHALEREIN_IOS_STACK_RUNNER` for a self-hosted macOS runner with
+Docker and Xcode. Until the variable points at such a runner, the scheduled job
+fails its Docker preflight; this is a repository-runner setting, not a secret.
+The Unit plan's `ContractParityTests/testLocalStackParity` stays an explicit
+skip; the live contract comparison is the stack-backed integration plan.
 
 The scheduled Integration workflow freezes one main commit and fingerprints all tracked inputs except
 Markdown and the documentation/local-planning directories. A scheduled run skips

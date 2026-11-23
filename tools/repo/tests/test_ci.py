@@ -45,6 +45,152 @@ def test_plan_selects_only_affected_consumers(paths, expected):
     assert {p for job in matrix["include"] for p in job["projects"]} == expected
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "apps/android/core-bridge/src/androidTest/kotlin/NativeBridgeDeviceTest.kt",
+        "core/src/api.rs",
+        "apps/mobile-bindings/src/client.rs",
+        "proto/v1/whalerein.proto",
+        "tools/repo/src/repo/runners/android.py",
+        ".github/workflows/full-ci.yml",
+    ],
+)
+def test_android_device_filter_tracks_shared_native_inputs(path):
+    assert ci.android_device_selected([path])
+
+
+@pytest.mark.parametrize(
+    "path", ["docs/testing.md", "apps/ios/WhaleRein/App/WhaleReinApp.swift", "host/dsh/client.js"]
+)
+def test_android_device_filter_ignores_unrelated_inputs(path):
+    assert not ci.android_device_selected([path])
+
+
+@pytest.mark.parametrize(
+    ("event", "action", "label", "paths", "expected"),
+    [
+        ("pull_request", "synchronize", "run-full-ci", ["core/src/api.rs"], False),
+        ("pull_request", "labeled", "other", ["core/src/api.rs"], False),
+        ("pull_request", "labeled", "run-full-ci", ["apps/android/app/build.gradle.kts"], True),
+        ("pull_request", "labeled", "run-full-ci", ["core/src/api.rs"], True),
+        ("pull_request", "labeled", "run-full-ci", ["apps/mobile-bindings/src/lib.rs"], True),
+        ("pull_request", "labeled", "run-full-ci", ["proto/v1/whalerein.proto"], True),
+        ("pull_request", "labeled", "run-full-ci", ["docs/testing.md"], False),
+        ("merge_group", "", "", ["proto/v1/whalerein.proto"], True),
+        ("workflow_dispatch", "", "", [], True),
+        ("schedule", "", "", [], True),
+        ("push", "", "", [], True),
+    ],
+)
+def test_android_device_policy_respects_labels_and_push_tiers(
+    event, action, label, paths, expected
+):
+    assert ci.android_device_changes(event, action, label, paths) is expected
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "apps/ios/WhaleRein/App/WhaleReinApp.swift",
+        "apps/mobile-bindings/src/client.rs",
+        "core/src/api.rs",
+        "proto/v1/whalerein.proto",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "tools/repo/src/repo/testing.py",
+        "repo",
+        ".github/workflows/ios.yml",
+        ".github/actions/select-ios-simulator/action.yml",
+    ],
+)
+def test_ios_build_filter_tracks_app_binding_and_shared_inputs(path):
+    assert ci.ios_build_selected([path])
+
+
+@pytest.mark.parametrize(
+    "path", ["docs/testing.md", "apps/android/app/build.gradle.kts", "host/runtime/src/host.js"]
+)
+def test_ios_build_filter_ignores_unrelated_inputs(path):
+    assert not ci.ios_build_selected([path])
+
+
+def test_ios_matrix_selects_the_requested_suite():
+    assert [job["target"] for job in ci.ios_matrix("unit")["include"]] == ["ios-unit"]
+    assert [job["target"] for job in ci.ios_matrix("smoke")["include"]] == [
+        "ios-unit",
+        "ios-ui-smoke",
+    ]
+    assert [job["target"] for job in ci.ios_matrix("full")["include"]] == [
+        "ios-unit",
+        "ios-ui",
+        "ios-ui",
+        "ios-ui",
+        "ios-ui",
+    ]
+    assert ci.ios_matrix("integration") == {"include": []}
+    assert ci.ios_changes("schedule", "", "", "", []) == (True, True)
+    assert ci.ios_changes("workflow_dispatch", "", "", "integration", []) == (False, True)
+    assert ci.ios_changes("workflow_dispatch", "", "", "full", []) == (True, False)
+    assert ci.ios_changes("workflow_dispatch", "", "", "unit", []) == (True, False)
+    assert ci.ios_changes("pull_request", "synchronize", "run-full-ci", "full", []) == (
+        False,
+        False,
+    )
+    assert ci.ios_changes(
+        "pull_request", "labeled", "run-full-ci", "full", ["core/src/api.rs"]
+    ) == (
+        True,
+        False,
+    )
+
+
+def test_unknown_events_do_not_request_heavy_work():
+    assert ci.android_device_changes("unknown", "", "", ["core/src/api.rs"]) is False
+    assert ci.ios_changes("unknown", "", "", "", ["core/src/api.rs"]) == (False, False)
+
+
+def test_cli_android_and_ios_plan_outputs(monkeypatch, capsys):
+    monkeypatch.setattr(ci, "changed_paths", lambda *args: ["core/src/api.rs"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "ci",
+            "android-plan",
+            "--event",
+            "pull_request",
+            "--action",
+            "labeled",
+            "--label",
+            "run-full-ci",
+        ],
+    )
+    ci.main()
+    assert capsys.readouterr().out == "build=true\n"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "ci",
+            "ios-plan",
+            "--event",
+            "pull_request",
+            "--action",
+            "labeled",
+            "--label",
+            "run-full-ci",
+            "--suite",
+            "unit",
+        ],
+    )
+    ci.main()
+    output = capsys.readouterr().out.splitlines()
+    assert output[:2] == ["build=true", "integration=false"]
+    assert json.loads(output[2].removeprefix("matrix="))["include"][0]["target"] == "ios-unit"
+
+
 def test_shared_inputs_do_not_schedule_android_state():
     for path in (
         "proto/v1/whalerein.proto",

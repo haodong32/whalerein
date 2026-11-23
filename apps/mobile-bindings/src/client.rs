@@ -2182,11 +2182,30 @@ impl MobileCore {
         self.core.forget_device().map_err(MobileError::from)
     }
 
+    /// Forget the local identity only. Remote Cloud or Standalone grants stay
+    /// intact, so the same device record can be recovered later.
+    pub fn forget_local_device(&self) -> Result<(), MobileError> {
+        self.stop_watch();
+        self.core.forget_local_device().map_err(MobileError::from)
+    }
+
     /// Revoke this device's grants while keeping the profile identity.
     pub fn revoke(&self) -> Result<(), MobileError> {
         self.run(COMMAND_TIMEOUT, self.core.revoke())?;
         self.stop_watch();
         Ok(())
+    }
+
+    /// Revoke this device's grant for exactly one Cloud Host and return the
+    /// resulting server state. Other Host grants stay intact.
+    pub fn revoke_cloud_host(&self, host_id: String) -> Result<String, MobileError> {
+        validate_id(&host_id)?;
+        let outcome = self.run(COMMAND_TIMEOUT, self.core.revoke_cloud(&host_id))?;
+        Ok(match outcome.state {
+            whalerein_core::api::CloudRevocationState::Revoked => "revoked",
+            whalerein_core::api::CloudRevocationState::RevocationPending => "revocation_pending",
+        }
+        .to_owned())
     }
 
     // MARK: - Cloud account

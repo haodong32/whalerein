@@ -64,6 +64,7 @@ fun ConversationScreen(
     onRecoverSend: () -> Unit,
     onRetryContentRead: () -> Unit,
     onConsumeAnnouncement: () -> Unit,
+    onSaveAttachment: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var reasoningEnabled by rememberSaveable { mutableStateOf(false) }
@@ -171,6 +172,7 @@ fun ConversationScreen(
                                     expandedToolCalls + callId
                                 }
                             },
+                            onSaveAttachment = onSaveAttachment,
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }

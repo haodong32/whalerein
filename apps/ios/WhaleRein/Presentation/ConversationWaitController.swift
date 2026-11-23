@@ -1,6 +1,9 @@
 // Native state-only wait controller. The attempt has its own identity, deadline
 // and cancellation. It never owns or stops the conversation watch, so cancelling
 // a wait releases only that observation.
+//
+// Every start/reset advances a generation. A result from an older attempt is
+// dropped, so a late answer cannot settle (or "resurrect") a newer wait.
 
 import Foundation
 import Observation
@@ -26,6 +29,8 @@ final class ConversationWaitController {
 
     private let service: any SessionService
     private var observeTask: Task<Void, Never>?
+    /// Fences results from attempts that were reset, closed or replaced.
+    private var generation = 0
 
     init(hostID: String, sessionID: String, service: any SessionService) {
         self.hostID = hostID
@@ -40,6 +45,9 @@ final class ConversationWaitController {
     func start(timeoutMs: UInt64 = 120_000) async {
         guard phase != .waiting else { return }
         observeTask?.cancel()
+        observeTask = nil
+        generation &+= 1
+        let attemptGeneration = generation
         errorKey = nil
         result = nil
         do {
@@ -48,6 +56,13 @@ final class ConversationWaitController {
                 sessionId: sessionID,
                 timeoutMs: timeoutMs
             )
+            // The conversation may have been closed or the attempt replaced
+            // while the native start was in flight. Release that exact wait and
+            // do not observe it.
+            guard attemptGeneration == generation else {
+                _ = try? await service.cancelWait(waitId: id)
+                return
+            }
             waitID = id
             deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
             phase = .waiting
@@ -58,23 +73,26 @@ final class ConversationWaitController {
                         waitId: id,
                         waitMs: timeoutMs + 5_000
                     )
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled,
+                          attemptGeneration == self.generation,
+                          self.waitID == id else { return }
                     if let settled {
-                        self.finish(settled)
+                        self.finish(settled, waitID: id)
                     } else {
                         self.fail(.timeout)
                     }
                 } catch {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled,
+                          attemptGeneration == self.generation,
+                          self.waitID == id else { return }
                     let code = (error as? SessionServiceError)?.code ?? .internalError
-                    self.errorKey = L10nKey.errorKey(for: code)
-                    self.phase = .settled
+                    self.fail(code)
                 }
             }
         } catch {
+            guard attemptGeneration == generation else { return }
             let code = (error as? SessionServiceError)?.code ?? .internalError
-            errorKey = L10nKey.errorKey(for: code)
-            phase = .settled
+            fail(code)
         }
     }
 
@@ -94,6 +112,7 @@ final class ConversationWaitController {
     }
 
     func reset() {
+        generation &+= 1
         observeTask?.cancel()
         observeTask = nil
         phase = .idle
@@ -107,6 +126,7 @@ final class ConversationWaitController {
     /// watch, which the model stops separately.
     func close() {
         let id = waitID
+        generation &+= 1
         observeTask?.cancel()
         observeTask = nil
         if let id, phase == .waiting {
@@ -119,9 +139,10 @@ final class ConversationWaitController {
         deadline = nil
     }
 
-    private func finish(_ settled: WaitResult) {
+    private func finish(_ settled: WaitResult, waitID: String) {
+        guard self.waitID == waitID else { return }
         result = settled
-        waitID = nil
+        self.waitID = nil
         deadline = nil
         phase = .settled
         if settled.outcome == .failed {

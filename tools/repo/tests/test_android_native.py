@@ -82,9 +82,17 @@ class Device(FakeRunner):
             return ok("4096\n")
         if argv[0].endswith(("gradlew", "gradlew.bat")):
             if self.body is not None:
-                directory = Path(cwd) / "app/build/outputs/androidTest-results/connected"
-                directory.mkdir(parents=True, exist_ok=True)
-                (directory / "TEST-sample.xml").write_text(self.body)
+                if ":core-bridge:testDebugUnitTest" in argv:
+                    directories = [Path(cwd) / "core-bridge/build/test-results/testDebugUnitTest"]
+                else:
+                    directories = [Path(cwd) / "app/build/outputs/androidTest-results/connected"]
+                    if ":core-bridge:connectedDebugAndroidTest" in argv:
+                        directories.append(
+                            Path(cwd) / "core-bridge/build/outputs/androidTest-results/connected"
+                        )
+                for directory in directories:
+                    directory.mkdir(parents=True, exist_ok=True)
+                    (directory / "TEST-sample.xml").write_text(self.body)
             return ok(returncode=self.gradle_code)
         raise AssertionError(f"unexpected invocation: {argv}")
 
@@ -152,7 +160,7 @@ def test_execution_saves_device_facts_and_case_statuses(env, tmp_path):
     assert facts["artifacts"]["android-device"]["api"] == "36"
     assert facts["artifacts"]["android-device"]["abi"] == "arm64-v8a"
     assert facts["artifacts"]["android-device"]["page_size"] == "4096"
-    assert facts["artifacts"]["android-task"]["name"] == ":app:connectedNoGmsDebugAndroidTest"
+    assert facts["artifacts"]["android-task"]["names"] == [":app:connectedNoGmsDebugAndroidTest"]
     assert document["configuration"]["suite"] == "android-ui"
     assert [case["status"] for case in document["scopes"][0]["tests"]] == [
         "failed",
@@ -238,21 +246,89 @@ def test_requested_local_stack_must_be_available(env, tmp_path, monkeypatch):
 def test_task_overrides_keep_device_suites_configurable(monkeypatch):
     monkeypatch.setenv("WHALEREIN_ANDROID_INTEGRATION_TASK", ":integration:connectedCheck")
     monkeypatch.setenv("WHALEREIN_ANDROID_PERFORMANCE_TASK", ":benchmark:connectedCheck")
-    assert android.task_for("android-integration") == ":integration:connectedCheck"
-    assert android.task_for("android-performance") == ":benchmark:connectedCheck"
+    assert android.tasks_for("android-integration") == (":integration:connectedCheck",)
+    assert android.tasks_for("android-performance") == (":benchmark:connectedCheck",)
     monkeypatch.delenv("WHALEREIN_ANDROID_INTEGRATION_TASK")
-    assert android.task_for("android-integration") == ":app:connectedNoGmsDebugAndroidTest"
+    assert android.tasks_for("android-integration") == (
+        ":app:connectedNoGmsDebugAndroidTest",
+        ":core-bridge:connectedDebugAndroidTest",
+    )
+
+
+def test_integration_selects_app_and_bridge_instrumentation(env, tmp_path):
+    runner = Device(
+        body=xml(
+            '<testcase name="nativePairing" '
+            'classname="com.whalerein.android.corebridge.NativeBridgeDeviceTest"/>'
+        )
+    )
+    output = tmp_path / "integration"
+    result = android.run_android(runner, env, "android-integration", output=output)
+    assert result.exit_code == 0
+    command = next(call for call in runner.calls if call[0][0].endswith("gradlew"))[0]
+    assert command[1:3] == (
+        ":app:connectedNoGmsDebugAndroidTest",
+        ":core-bridge:connectedDebugAndroidTest",
+    )
+    document = report(output)
+    assert document["configuration"]["tasks"] == [
+        ":app:connectedNoGmsDebugAndroidTest",
+        ":core-bridge:connectedDebugAndroidTest",
+    ]
+    assert document["verification"]["artifacts"]["android-task"]["names"] == [
+        ":app:connectedNoGmsDebugAndroidTest",
+        ":core-bridge:connectedDebugAndroidTest",
+    ]
+
+
+def test_bridge_jvm_target_runs_the_core_bridge_unit_test_task(env, tmp_path):
+    runner = Device(
+        body=xml(
+            '<testcase name="mapsOutcomes" '
+            'classname="com.whalerein.android.corebridge.ports.AdapterMappingTest"/>'
+        )
+    )
+    output = tmp_path / "bridge"
+    result = android.run_android(
+        runner, env, "android-bridge-jvm", case_filter="mapsOutcomes", output=output
+    )
+    assert result.exit_code == 0
+    command = next(call for call in runner.calls if call[0][0].endswith("gradlew"))[0]
+    assert ":core-bridge:testDebugUnitTest" in command
+    assert not any(call[0][0] == "adb" for call in runner.calls)
+    document = report(output)
+    assert document["configuration"]["tasks"] == [":core-bridge:testDebugUnitTest"]
+    assert document["scopes"][0]["tests"] == [
+        {
+            "id": "com.whalerein.android.corebridge.ports.AdapterMappingTest::mapsOutcomes",
+            "status": "passed",
+        }
+    ]
+
+
+def test_bridge_jvm_target_rejects_list_mode(env, tmp_path):
+    output = tmp_path / "bridge-listed"
+    result = android.run_android(Device(), env, "android-bridge-jvm", output=output, list_only=True)
+    assert result.exit_code == 2
+    assert report(output)["verification"]["error_code"] == "android-bridge-list-unsupported"
 
 
 def test_targets_expose_explicit_device_suites():
     project = load_projects(ROOT)
     assert targets.resolve("test", "android-ui", project).kind == "android"
     names = set(targets.available("test", project))
-    assert {"android-ui", "android-integration", "android-performance"}.issubset(names)
+    assert {
+        "android-ui",
+        "android-integration",
+        "android-bridge-jvm",
+        "android-performance",
+    }.issubset(names)
     unit = {
         name for name, target in targets.available("test", project).items() if target.kind == "unit"
     }
-    assert not ({"android-ui", "android-integration", "android-performance"} & unit)
+    assert not (
+        {"android-ui", "android-integration", "android-bridge-jvm", "android-performance"} & unit
+    )
 
 
 def test_ci_run_binds_the_report_to_the_checked_out_commit(env, tmp_path, monkeypatch):

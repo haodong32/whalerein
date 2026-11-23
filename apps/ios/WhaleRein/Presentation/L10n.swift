@@ -97,6 +97,7 @@ enum L10nKey: String, CaseIterable, Sendable {
     case conversationDeliveryQueue = "conversation.delivery.queue"
     case conversationDeliveryUnsupported = "conversation.deliveryUnsupported"
     case conversationDraftPlaceholder = "conversation.draftPlaceholder"
+    case conversationDraftStorageWarning = "conversation.draftStorageWarning"
     case conversationEmpty = "conversation.empty"
     case conversationToolResult = "conversation.toolResult"
     case conversationShowDetails = "conversation.showDetails"
@@ -566,6 +567,7 @@ enum L10n {
     static let conversationDeliveryQueue = L10nKey.conversationDeliveryQueue
     static let conversationDeliveryUnsupported = L10nKey.conversationDeliveryUnsupported
     static let conversationDraftPlaceholder = L10nKey.conversationDraftPlaceholder
+    static let conversationDraftStorageWarning = L10nKey.conversationDraftStorageWarning
     static let conversationEmpty = L10nKey.conversationEmpty
     static let conversationToolResult = L10nKey.conversationToolResult
     static let conversationShowDetails = L10nKey.conversationShowDetails
