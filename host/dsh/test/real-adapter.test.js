@@ -956,6 +956,35 @@ test('creation preflight claims reuse only for a proven blank unarchived identit
   assert.equal((await adapter.preflightCreateSession({create_session:{preferred_session_id:'preferred'}})).reuse, '')
 })
 
+test('the workspace registry marks archived sessions in list and single reads', async () => {
+  const live = new Map([
+    ['live', makeLiveSession({ sessionId: 'live' })],
+    ['gone', makeLiveSession({ sessionId: 'gone' })],
+  ])
+  const ctx = makeCtx({ live })
+  ctx.workspaceRegistry = { archivedSessionIds: ['gone'] }
+  const adapter = new RealDshAdapter({ ctx, config: { hostId: 'host-1' } })
+  await adapter.open()
+  const sessions = await adapter.listSessions()
+  assert.deepEqual(sessions.map((session) => [session.sessionId, session.archived]), [['live', false], ['gone', true]])
+  assert.equal((await adapter.getSession('gone')).archived, true)
+  assert.equal((await adapter.getSession('live')).archived, false)
+  // The store/list fallback path carries the same projection.
+  delete ctx.sessionController.list
+  const fallback = await adapter.listSessions()
+  assert.deepEqual(fallback.map((session) => [session.sessionId, session.archived]), [['live', false], ['gone', true]])
+})
+
+test('a missing or unreadable archive registry reports no archived sessions', async () => {
+  const live = new Map([['s1', makeLiveSession({ sessionId: 's1' })]])
+  const ctx = makeCtx({ live })
+  const adapter = new RealDshAdapter({ ctx, config: { hostId: 'host-1' } })
+  await adapter.open()
+  assert.equal((await adapter.listSessions())[0].archived, false)
+  ctx.workspaceRegistry = { get archivedSessionIds() { throw new Error('registry unavailable') } }
+  assert.equal((await adapter.listSessions())[0].archived, false)
+})
+
 test('fork preflight proves a completed turn only from readable native projection', async () => {
   const complete = new Map([['parent', makeLiveSession({sessionId:'parent', events:[
     {type:'user/message',seq:1,time:1,data:{text:'x'}},

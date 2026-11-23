@@ -201,6 +201,9 @@ enum SessionArgs {
         /// Select the Host for this operation.
         #[arg(long, value_name = "HOST_ID")]
         host: Option<String>,
+        /// Include sessions the source reports as archived.
+        #[arg(long)]
+        all: bool,
     },
     /// Create or reuse a session according to the host's DSH rules.
     Create {
@@ -373,9 +376,10 @@ enum SessionArgs {
 impl SessionArgs {
     fn into_command(self) -> (Command, Option<String>) {
         match self {
-            Self::List { host } => (
+            Self::List { host, all } => (
                 Command::Sessions {
                     host: String::new(),
+                    all,
                 },
                 host,
             ),
@@ -738,6 +742,7 @@ pub enum Command {
     /// List sessions on one host.
     Sessions {
         host: String,
+        all: bool,
     },
 
     /// List currently available source models.

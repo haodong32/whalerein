@@ -2345,6 +2345,10 @@
                 "source_capabilities": {
                   "type": "SourceCapabilities",
                   "id": 14
+                },
+                "archived": {
+                  "type": "bool",
+                  "id": 11
                 }
               }
             },

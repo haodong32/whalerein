@@ -9,6 +9,17 @@ import { AdapterError } from 'whalerein-host/errors.js'
 import { createAdapter, hasDshServices } from '../src/adapter/index.js'
 import { approvalDigest } from 'whalerein-host/security/digest.js'
 
+test('fake sessions carry the archived projection through list and single reads', async () => {
+  const adapter = new FakeDshAdapter({ now: () => 1000 })
+  await adapter.open()
+  adapter.createSession({ sessionId: 'archived', archived: true })
+  adapter.createSession({ sessionId: 'live' })
+  const sessions = await adapter.listSessions()
+  assert.deepEqual(sessions.map((session) => [session.sessionId, session.archived]), [['archived', true], ['live', false]])
+  assert.equal((await adapter.getSession('archived')).archived, true)
+  assert.equal((await adapter.getSession('live')).archived, false)
+})
+
 test('when FakeDSH is queried or emits committed events, the adapter returns sessions and snapshots', async () => {
   const adapter = new FakeDshAdapter({ now: () => 1000 })
   await adapter.open()

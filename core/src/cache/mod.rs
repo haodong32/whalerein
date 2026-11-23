@@ -22,7 +22,7 @@ use crate::session::SessionKey;
 pub(crate) use conversation::HistoryView;
 
 pub const CACHE_NONCE_LEN: usize = 12;
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 const HISTORY_CACHE_BYTES: u64 = 128 * 1024 * 1024;
 /// How long an unknown send keeps its idempotency record. It is deliberately
 /// longer than one command request lifetime so a retry after reconnecting can
@@ -421,7 +421,11 @@ impl Cache {
             match version {
                 "1" => conn
                     .execute_batch("DROP TABLE IF EXISTS events; DROP TABLE IF EXISTS sessions;")?,
-                "2" | "3" => {}
+                // Schema 4 adds `archived` to the sealed Session summary. Cached
+                // summaries from schema 2 and 3 cannot represent it, so they are
+                // discarded instead of surfacing as an unarchived Session.
+                "2" | "3" => conn.execute_batch("DROP TABLE IF EXISTS sessions;")?,
+                "4" => {}
                 _ => return Err(CacheError::Corrupt),
             }
         }
@@ -600,8 +604,10 @@ impl Cache {
     /// Replace the complete cached session list for one Host.
     ///
     /// A completed remote listing is authoritative: sessions the source no
-    /// longer reports (deleted, archived or otherwise filtered) must disappear
-    /// from the offline view instead of lingering as stale rows.
+    /// longer reports (deleted or otherwise filtered) must disappear from the
+    /// offline view instead of lingering as stale rows. Archived Sessions are
+    /// still reported by the source, with `archived` set, so they stay cached
+    /// for the archived view.
     pub fn replace_sessions(
         &self,
         host_id: &str,
@@ -1493,6 +1499,49 @@ mod session_list_tests {
             .map(|session| session.session_id)
             .collect::<Vec<_>>();
         assert_eq!(ids, ["session-b", "session-a", "session-c"]);
+    }
+
+    #[test]
+    fn archived_sessions_survive_a_cache_round_trip() {
+        let cache = Cache::open_in_memory([7; 32]).unwrap();
+        let mut archived = session("session-archived", 5);
+        archived.archived = true;
+        cache
+            .replace_sessions(
+                "host-1",
+                &[archived, session("session-live", 6)],
+                "remote",
+                true,
+            )
+            .unwrap();
+        let sessions = cache.load_sessions("host-1").unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| (session.session_id.as_str(), session.archived))
+                .collect::<Vec<_>>(),
+            [("session-live", false), ("session-archived", true)]
+        );
+    }
+
+    #[test]
+    fn schema_three_session_rows_are_discarded_for_the_archived_field() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache.sqlite3");
+        {
+            let cache = Cache::open(&path, [7; 32]).unwrap();
+            cache
+                .put_sessions("host-1", &[session("session-old", 1)], "remote", true)
+                .unwrap();
+            cache
+                .conn
+                .lock()
+                .unwrap()
+                .execute("UPDATE meta SET value='3' WHERE key='schema_version'", [])
+                .unwrap();
+        }
+        let cache = Cache::open(&path, [7; 32]).unwrap();
+        assert!(cache.load_sessions("host-1").unwrap().is_empty());
     }
 
     #[test]

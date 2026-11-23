@@ -38,7 +38,8 @@ whalerein status
 whalerein login
 whalerein host list
 whalerein host connect <host-id>
-whalerein session list
+whalerein session list            # archived sessions are hidden
+whalerein session list --all      # include archived sessions
 whalerein session create
 whalerein session history <session-id>
 whalerein session send <session-id> "Hello"

@@ -254,6 +254,7 @@ export class FakeDshAdapter extends DshAdapter {
     parentSessionId = '',
     origin = '',
     queuedPrompts = 0,
+    archived = false,
     queue = [],
   } = {}) {
     if (this.#sessions.has(sessionId)) throw new AdapterError('conflict', 'session exists')
@@ -269,6 +270,7 @@ export class FakeDshAdapter extends DshAdapter {
       parentSessionId,
       origin,
       queuedPrompts,
+      archived,
       pendingDeliveries: [],
       queue: structuredClone(queue),
       modelSelection: null,
@@ -430,6 +432,7 @@ export class FakeDshAdapter extends DshAdapter {
       parentSessionId: session.parentSessionId,
       origin: session.origin,
       queuedPrompts: session.queuedPrompts,
+      archived: Boolean(session.archived),
     })
   }
 

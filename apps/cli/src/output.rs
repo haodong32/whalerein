@@ -1253,6 +1253,14 @@ pub fn hosts_data(hosts: &[HostInfo]) -> Value {
     json!({ "hosts": hosts })
 }
 
+/// Hide sessions the source reports as archived unless the caller asks for the
+/// complete list with `--all`.
+pub fn retain_visible_sessions(list: &mut SessionList, all: bool) {
+    if !all {
+        list.sessions.retain(|session| !session.archived);
+    }
+}
+
 pub fn render_sessions(list: &SessionList) -> String {
     if list.sessions.is_empty() {
         return format!(
@@ -1260,7 +1268,8 @@ pub fn render_sessions(list: &SessionList) -> String {
             sanitize_field(&list.source)
         );
     }
-    let mut out = String::from("SOURCE\tCOMPLETE\tSESSION\tPARENT\tORIGIN\tRUNNING\tTITLE\n");
+    let mut out =
+        String::from("SOURCE\tCOMPLETE\tSESSION\tPARENT\tORIGIN\tRUNNING\tARCHIVED\tTITLE\n");
     for session in &list.sessions {
         // Fork lineage is part of the session identity: an empty parent marks a
         // root session, any value names the session it was forked from.
@@ -1275,13 +1284,14 @@ pub fn render_sessions(list: &SessionList) -> String {
             session.origin.as_str()
         };
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             sanitize_field(&list.source),
             if list.complete { "yes" } else { "no" },
             sanitize_field(&session.session_id),
             sanitize_field(parent),
             sanitize_field(origin),
             if session.running { "yes" } else { "no" },
+            if session.archived { "yes" } else { "no" },
             sanitize_field(&session.title)
         ));
     }
@@ -2295,6 +2305,7 @@ mod tests {
                 history_cursor: String::new(),
                 source_capabilities: None,
                 queued_prompts: 0,
+                archived: false,
             }],
             source: "dsh".into(),
             complete: true,
@@ -3478,6 +3489,51 @@ mod cli_contract_tests {
     }
 
     #[test]
+    fn archived_sessions_hide_by_default_and_render_on_request() {
+        let session = |id: &str, archived: bool| whalerein_core::api::SessionSummary {
+            session_id: id.into(),
+            title: format!("title-{id}"),
+            cwd: "/work".into(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            running: false,
+            agent_available: true,
+            blank: false,
+            parent_session_id: String::new(),
+            origin: "cli".into(),
+            history_cursor: String::new(),
+            source_capabilities: None,
+            queued_prompts: 0,
+            archived,
+        };
+        let mut list = SessionList {
+            sessions: vec![session("live-1", false), session("archived-1", true)],
+            source: "remote".into(),
+            complete: true,
+        };
+        retain_visible_sessions(&mut list, false);
+        assert_eq!(
+            list.sessions
+                .iter()
+                .map(|entry| entry.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["live-1"]
+        );
+        let mut all = SessionList {
+            sessions: vec![session("live-1", false), session("archived-1", true)],
+            source: "remote".into(),
+            complete: true,
+        };
+        retain_visible_sessions(&mut all, true);
+        let text = render_sessions(&all);
+        assert!(text.contains("ARCHIVED"), "{text}");
+        assert!(text.contains("archived-1\t-\tcli\tno\tyes"), "{text}");
+        assert!(text.contains("live-1\t-\tcli\tno\tno"), "{text}");
+        let data = sessions_data("h-1", &all);
+        assert_eq!(data["sessions"][1]["archived"], true);
+    }
+
+    #[test]
     fn session_rendering_shows_fork_lineage_and_parent_identity() {
         let session = |id: &str, parent: &str, origin: &str| whalerein_core::api::SessionSummary {
             session_id: id.into(),
@@ -3493,6 +3549,7 @@ mod cli_contract_tests {
             history_cursor: String::new(),
             source_capabilities: None,
             queued_prompts: 0,
+            archived: false,
         };
         let list = SessionList {
             sessions: vec![

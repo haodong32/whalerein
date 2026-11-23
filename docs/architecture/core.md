@@ -139,7 +139,9 @@ failures request a new snapshot without deleting pairing or the previous cache.
 Session listings have one order for remote and cache-only views: most recently
 updated first, then session identity, so an offline list does not jump when the
 Host reconnects. A complete remote listing replaces the cached rows for that
-Host, and deleted or archived sessions disappear from the offline view. An
+Host, and deleted sessions disappear from the offline view. Archived sessions
+keep their row and the source's `archived` flag, so an archived view stays
+available offline; clients hide those rows by default. An
 explicit `sessions --host` accepts only a locally authorized Host identity; an
 unknown or unpinned Host is `not_found`, never a reason to pair again. That Host
 argument describes the listing; it is not an ambient scope that changes other

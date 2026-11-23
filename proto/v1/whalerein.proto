@@ -930,6 +930,7 @@ message SessionSummary {
   uint32 queued_prompts = 12;
   string history_cursor = 13;
   SourceCapabilities source_capabilities = 14;
+  bool archived = 11;
 }
 
 message SessionList {
