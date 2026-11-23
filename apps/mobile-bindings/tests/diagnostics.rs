@@ -41,7 +41,7 @@ fn diagnostic_sink_observes_core_events_with_stable_identifiers() {
 
     // A local read produces at least one redacted core event. Delivery is
     // asynchronous, so give the dispatcher a bounded window.
-    let _ = core.connection_state("host-1".into());
+    let _ = core.host_connection("host-1".into());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while sink.0.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -67,7 +67,7 @@ fn clear_diagnostics_empties_the_core_journal() {
     core.clear_diagnostics().expect("clear diagnostics");
     // Clearing is idempotent and never changes the facade behaviour.
     core.clear_diagnostics().expect("clear diagnostics twice");
-    assert_eq!(core.connection_state("host-1".into()), "disconnected");
+    assert!(core.host_connection("host-1".into()).is_none());
 }
 
 #[test]
@@ -87,5 +87,5 @@ fn panicking_diagnostic_sink_never_changes_core_results() {
         Arc::new(PanickingSink),
     )
     .expect("create MobileCore with panicking sink");
-    assert_eq!(core.connection_state("host-1".into()), "disconnected");
+    assert!(core.host_connection("host-1".into()).is_none());
 }

@@ -25,6 +25,7 @@ use super::types::{
     RevocationRetention, SessionList, SessionModel, SessionSummary,
 };
 use crate::access::{AccessClient, MqttSettings};
+use crate::api::{Cancellation, ConnectionSnapshot};
 use crate::cache::Cache;
 use crate::commands::CommandService;
 use crate::diagnostics;
@@ -175,6 +176,8 @@ pub struct Core {
     identity_init: Arc<Mutex<()>>,
     cache: Arc<Mutex<Option<Arc<Cache>>>>,
     pub(crate) watch_active: Arc<AtomicBool>,
+    /// One device connection per Host, independent of any session.
+    pub(crate) connections: Arc<crate::connection::HostConnections>,
     pub(crate) attachments: Arc<crate::attachments::Downloads>,
     instance: Option<Arc<Instance>>,
     /// Platform anchors supplied as data by a client that must extract them
@@ -397,6 +400,7 @@ impl Core {
             identity_init: Arc::new(Mutex::new(())),
             cache: Arc::new(Mutex::new(None)),
             watch_active: Arc::new(AtomicBool::new(false)),
+            connections: Arc::new(crate::connection::HostConnections::new()),
             attachments: Arc::new(crate::attachments::Downloads::new()),
             instance,
             platform_roots: platform_roots.map(Arc::new),
@@ -790,10 +794,6 @@ impl Core {
 
     pub fn metrics(&self) -> Vec<crate::diagnostics::MetricSample> {
         self.runtime.metrics()
-    }
-
-    pub(crate) fn secret_store(&self) -> &Arc<dyn SecretStore> {
-        &self.options.secrets
     }
 
     pub(crate) fn transport_budget(&self) -> crate::access::transport::TransportBudget {
@@ -2207,8 +2207,76 @@ impl Core {
             .ok_or_else(|| CoreError::NotFound("host not found".into()))
     }
 
-    pub fn get_connection_state(&self, host_id: &str) -> ConnectionState {
-        self.runtime.state(host_id)
+    /// The authoritative device connection for one Host, if it was opened.
+    ///
+    /// A Host that was never connected has no snapshot; callers must not read
+    /// "absent" as offline.
+    pub fn connection_snapshot(&self, host_id: &str) -> Option<ConnectionSnapshot> {
+        self.connections.snapshot(host_id)
+    }
+
+    /// Open (or reuse) the Host connection and wait for its first usable state.
+    ///
+    /// This is the app-level probe: it performs a real broker handshake and
+    /// subscription, so a success means the Host is reachable now, not that it
+    /// was reachable when the app started.
+    pub async fn connect_host(&self, host_id: &str) -> CoreResult<ConnectionSnapshot> {
+        let connection = self.host_connection(host_id).await?;
+        let snapshot = connection.snapshot();
+        if snapshot.state == ConnectionState::Connected {
+            return Ok(snapshot);
+        }
+        connection
+            .wait_ready(&Cancellation::new())
+            .await
+            .map(|()| connection.snapshot())
+    }
+
+    /// Open the connection without waiting for it, for a background monitor.
+    pub(crate) async fn host_connection(
+        &self,
+        host_id: &str,
+    ) -> CoreResult<Arc<crate::connection::HostConnection>> {
+        if let Some(existing) = self.connections.running(host_id) {
+            return Ok(existing);
+        }
+        let regional = self.cloud_transport().await?;
+        let input = self.connection_input(host_id, regional).await?;
+        Ok(self.connections.connect(input))
+    }
+
+    /// Everything a connection needs, gathered from the current authority.
+    pub(crate) async fn connection_input(
+        &self,
+        host_id: &str,
+        regional: Option<crate::account::native::RegionalSession>,
+    ) -> CoreResult<crate::connection::ConnectionInput> {
+        let config = self.require_config()?;
+        let token = match &regional {
+            Some(session) => session.token.clone(),
+            None => load_device_token(&self.options.secrets, &config.device_id)?
+                .ok_or(CoreError::NotPaired)?,
+        };
+        Ok(crate::connection::ConnectionInput {
+            host_id: host_id.to_owned(),
+            device_id: config.device_id.clone(),
+            settings: self.mqtt_settings(&config)?,
+            token,
+            cloud_session: regional.map(|session| session.id),
+            runtime: self.runtime.clone(),
+            diagnostics: self.diagnostics.clone(),
+            queue_bytes: self.transport_budget().reserved_bytes as usize,
+        })
+    }
+
+    /// Close the Host connection. Sessions attached to it are interrupted.
+    pub fn disconnect_host(&self, host_id: &str) {
+        self.connections.disconnect(host_id);
+    }
+
+    /// App-wide stream of connection transitions, independent of any session.
+    pub fn subscribe_connections(&self) -> tokio::sync::broadcast::Receiver<ConnectionSnapshot> {
+        self.connections.subscribe()
     }
 
     /// Confirm that this profile currently authorizes one Host identity.
@@ -4222,7 +4290,7 @@ impl Core {
             .enumerate()
             .map(|(index, host_id)| diagnostics::PreviewHost {
                 label: format!("host-{}", index + 1),
-                connection_state: self.get_connection_state(host_id).as_str().to_owned(),
+                connection_state: self.runtime.state(host_id).as_str().to_owned(),
             })
             .collect::<Vec<_>>();
         diagnostics::render_preview(

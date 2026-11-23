@@ -11,7 +11,9 @@ async fn returns_runtime_state_and_populates_host_session_and_event_cache() {
     let (core, _) = core(dir.path());
     assert_eq!(core.data_dir(), dir.path());
     assert_eq!(
-        core.get_connection_state("host-1"),
+        core.connection_snapshot("host-1")
+            .map(|snapshot| snapshot.state)
+            .unwrap_or(ConnectionState::Disconnected),
         ConnectionState::Disconnected
     );
     assert!(core.metrics().is_empty());
