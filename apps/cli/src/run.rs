@@ -25,8 +25,7 @@ use crate::output::{
     render_host_status, render_hosts, render_lifecycle_outcome, render_manifest, render_models,
     render_pair, render_pairing_history, render_questions, render_queue, render_session_model,
     render_sessions, retain_visible_sessions, sanitize_field, sessions_data, shell_quote,
-    tail_event_json, CliError,
-    CliOutcome, DownloadProgressRenderer, TailRenderer,
+    tail_event_json, CliError, CliOutcome, DownloadProgressRenderer, TailRenderer,
 };
 
 const DEFAULT_TAIL_TIMEOUT: Duration = Duration::from_secs(15);
