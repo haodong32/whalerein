@@ -54,10 +54,6 @@ enum HostConnectionStatus: Equatable, Sendable {
 
     var isOnline: Bool { self == .connected || self == .degraded }
 
-    var isTerminal: Bool {
-        if case .unavailable = self { return true }
-        return false
-    }
 }
 
 @MainActor
@@ -66,10 +62,6 @@ final class HostConnectivityModel {
     /// Latest snapshot per Host. A missing entry means "never opened", which is
     /// deliberately different from an `offline` snapshot.
     private(set) var snapshot: [String: HostConnectionSnapshot] = [:]
-
-    /// Fires with the Host id after a status transition, so the shell can
-    /// refresh derived surfaces (cached banner, visible operation results).
-    var onStatusChange: ((String) -> Void)?
 
     private var service: (any SessionService)?
     private var consumeTask: Task<Void, Never>?
@@ -141,7 +133,7 @@ final class HostConnectivityModel {
 
         for hostId in hostIds {
             if let snapshot = service.hostConnection(hostId: hostId) {
-                apply(snapshot, notify: false)
+                apply(snapshot)
             }
         }
         service.startHostMonitor(hostIds: hostIds)
@@ -162,12 +154,8 @@ final class HostConnectivityModel {
         snapshot.removeAll()
     }
 
-    private func apply(_ snapshot: HostConnectionSnapshot, notify: Bool = true) {
+    private func apply(_ snapshot: HostConnectionSnapshot) {
         guard self.snapshot[snapshot.hostId] != snapshot else { return }
-        let previous = status(for: snapshot.hostId)
         self.snapshot[snapshot.hostId] = snapshot
-        if notify, previous != status(for: snapshot.hostId) {
-            onStatusChange?(snapshot.hostId)
-        }
     }
 }

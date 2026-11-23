@@ -164,9 +164,8 @@ impl Drop for WatchGuard {
 }
 
 /// Session-side handles for the shared Host connection. Dropping the pump
-/// detaches this observer; the connection outlives it.
+/// stops the region watch; the connection outlives it.
 struct Pump {
-    connection: Option<Arc<crate::connection::HostConnection>>,
     renewal: Option<JoinHandle<()>>,
 }
 
@@ -175,7 +174,6 @@ impl Drop for Pump {
         if let Some(renewal) = self.renewal.take() {
             renewal.abort();
         }
-        self.connection = None;
     }
 }
 
@@ -184,7 +182,6 @@ impl Pump {
         if let Some(renewal) = self.renewal.take() {
             renewal.abort();
         }
-        self.connection = None;
     }
 }
 
@@ -648,10 +645,9 @@ async fn run_connection(
     // only subscribes to it; the connection keeps running for other sessions
     // and for the app-level monitor.
     let regional = core.cloud_transport().await?;
-    let connection = core.connections.connect(
-        core.connection_input(&key.host_id, regional.clone())
-            .await?,
-    );
+    let connection = core
+        .host_connection_with(&key.host_id, regional.clone())
+        .await?;
     let (subscription, detach) = connection.subscribe().into_parts();
     let interrupted = subscription.interrupted.clone();
     let overflow = subscription.overflow.clone();
@@ -691,10 +687,7 @@ async fn run_connection(
             }
         })
     });
-    let pump = Pump {
-        renewal,
-        connection: Some(connection),
-    };
+    let pump = Pump { renewal };
     // Keep the detach guard alive for the whole watch; it is dropped with the
     // pump's owner when the loop returns.
     let _detach = detach;

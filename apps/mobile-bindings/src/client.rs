@@ -1001,15 +1001,6 @@ impl MobileCore {
         let task = self.runtime.handle.spawn(async move {
             let mut changes = core.subscribe_connections();
             for host_id in &scope_hosts {
-                let connecting = core.connection_snapshot(host_id);
-                if let Some(snapshot) = connecting {
-                    events.push(ConversationEvent::HostConnection {
-                        host_id: snapshot.host_id.clone(),
-                        state: snapshot.state.as_str().to_owned(),
-                        code: snapshot.code.clone(),
-                        since_unix_ms: snapshot.since_unix_ms,
-                    });
-                }
                 let core = core.clone();
                 let host_id = host_id.clone();
                 tokio::spawn(async move {
@@ -1021,12 +1012,7 @@ impl MobileCore {
             loop {
                 match changes.recv().await {
                     Ok(snapshot) if scope_hosts.contains(&snapshot.host_id) => {
-                        events.push(ConversationEvent::HostConnection {
-                            host_id: snapshot.host_id.clone(),
-                            state: snapshot.state.as_str().to_owned(),
-                            code: snapshot.code.clone(),
-                            since_unix_ms: snapshot.since_unix_ms,
-                        });
+                        push_host_connection(&events, &snapshot);
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -2476,9 +2462,16 @@ impl Drop for MobileCore {
     }
 }
 
-/// Best-effort terminal cause after an observation stream ends. Core's public
-/// observation surface reports the end but not its error value, so the binding
-/// retains the previous watch behavior by sampling the Host connection state.
+/// Push one authoritative Host transition on the app-level queue.
+fn push_host_connection(events: &EventQueue, snapshot: &whalerein_core::api::ConnectionSnapshot) {
+    events.push(ConversationEvent::HostConnection {
+        host_id: snapshot.host_id.clone(),
+        state: snapshot.state.as_str().to_owned(),
+        code: snapshot.code.clone(),
+        since_unix_ms: snapshot.since_unix_ms,
+    });
+}
+
 fn connection_view(snapshot: whalerein_core::api::ConnectionSnapshot) -> HostConnectionView {
     HostConnectionView {
         host_id: snapshot.host_id,
@@ -2488,6 +2481,9 @@ fn connection_view(snapshot: whalerein_core::api::ConnectionSnapshot) -> HostCon
     }
 }
 
+/// Best-effort terminal cause after an observation stream ends. Core's public
+/// observation surface reports the end but not its error value, so the binding
+/// retains the previous watch behavior by sampling the Host connection state.
 fn terminal_connection_error(core: &Core, host_id: &str) -> Option<MobileError> {
     match core.connection_snapshot(host_id)?.code.as_deref() {
         Some("revoked") => Some(MobileError::revoked()),

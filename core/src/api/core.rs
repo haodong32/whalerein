@@ -2246,16 +2246,28 @@ impl Core {
         &self,
         host_id: &str,
     ) -> CoreResult<Arc<crate::connection::HostConnection>> {
+        let regional = self.cloud_transport().await?;
+        self.host_connection_with(host_id, regional).await
+    }
+
+    /// Open the connection with the already-resolved regional authority.
+    ///
+    /// The observation path resolves the region itself (it also watches it for
+    /// changes), so it must not resolve it twice.
+    pub(crate) async fn host_connection_with(
+        &self,
+        host_id: &str,
+        regional: Option<crate::account::native::RegionalSession>,
+    ) -> CoreResult<Arc<crate::connection::HostConnection>> {
         if let Some(existing) = self.connections.running(host_id) {
             return Ok(existing);
         }
-        let regional = self.cloud_transport().await?;
         let input = self.connection_input(host_id, regional).await?;
         Ok(self.connections.connect(input))
     }
 
     /// Everything a connection needs, gathered from the current authority.
-    pub(crate) async fn connection_input(
+    async fn connection_input(
         &self,
         host_id: &str,
         regional: Option<crate::account::native::RegionalSession>,

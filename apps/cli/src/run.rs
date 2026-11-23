@@ -630,50 +630,37 @@ async fn dispatch(
             crate::account::run(core, command).await
         }
         Command::HostStatus { host } => {
-            let host_id = match host.clone().or_else(|| core.default_host().ok().flatten()) {
-                Some(host_id) => host_id,
-                None => {
-                    return Ok(CliOutcome::local_failure(
-                        command,
-                        "invalid_argument",
-                        "Select a Host with --host or `whalerein host default`.",
-                        2,
-                    ))
-                }
+            let Some(host_id) = host.clone().or_else(|| core.default_host().ok().flatten()) else {
+                return Ok(CliOutcome::local_failure(
+                    command,
+                    "invalid_argument",
+                    "Select a Host with --host or `whalerein host default`.",
+                    2,
+                ));
             };
             // The probe is the point: a reported state always means "right
             // now", never a cached value from an earlier session.
-            let attempt = core.connect_host(&host_id).await;
-            let snapshot = core.connection_snapshot(&host_id).filter(|snapshot| {
-                snapshot.state != whalerein_core::api::ConnectionState::Disconnected
-            });
-            match (snapshot, attempt) {
-                (Some(snapshot), _) => Ok(CliOutcome::success(
-                    command,
-                    json!({
-                        "host_id": snapshot.host_id,
-                        "connection": {
-                            "state": snapshot.state.as_str(),
-                            "code": snapshot.code,
-                            "since_unix_ms": snapshot.since_unix_ms,
-                        }
-                    }),
-                    render_host_status(&snapshot),
-                )),
-                (None, Ok(snapshot)) => Ok(CliOutcome::success(
-                    command,
-                    json!({
-                        "host_id": snapshot.host_id,
-                        "connection": {
-                            "state": snapshot.state.as_str(),
-                            "code": snapshot.code,
-                            "since_unix_ms": snapshot.since_unix_ms,
-                        }
-                    }),
-                    render_host_status(&snapshot),
-                )),
-                (None, Err(error)) => Err(error),
-            }
+            let snapshot = match core.connect_host(&host_id).await {
+                Ok(snapshot) => snapshot,
+                // A terminal refusal still has a specific state to report; an
+                // unknown Host keeps the original error.
+                Err(error) => match core.connection_snapshot(&host_id) {
+                    Some(snapshot) => snapshot,
+                    None => return Err(error),
+                },
+            };
+            Ok(CliOutcome::success(
+                command,
+                json!({
+                    "host_id": snapshot.host_id,
+                    "connection": {
+                        "state": snapshot.state.as_str(),
+                        "code": snapshot.code,
+                        "since_unix_ms": snapshot.since_unix_ms,
+                    }
+                }),
+                render_host_status(&snapshot),
+            ))
         }
         Command::Hosts => match core.inspect_regional_hosts().await {
             Ok(hosts) => Ok(CliOutcome::success(

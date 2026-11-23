@@ -73,7 +73,6 @@ fn epoch_ms() -> u64 {
 
 /// Inputs a connection needs. Owned data only: a connection never holds the
 /// `Core` that owns the registry, so the two cannot keep each other alive.
-#[derive(Clone)]
 pub(crate) struct ConnectionInput {
     pub host_id: String,
     pub device_id: String,
@@ -473,8 +472,9 @@ impl HostConnections {
                 return existing.clone();
             }
         }
-        let connection = HostConnection::start(input.clone(), self.changes.clone());
-        entries.insert(input.host_id, connection.clone());
+        let host_id = input.host_id.clone();
+        let connection = HostConnection::start(input, self.changes.clone());
+        entries.insert(host_id, connection.clone());
         connection
     }
 
