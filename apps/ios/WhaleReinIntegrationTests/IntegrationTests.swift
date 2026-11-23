@@ -326,6 +326,15 @@ func transcript(from envelopes: [SessionEventEnvelope]) -> [ConversationMessage]
     return messages
 }
 
+/// Command identities and statuses observed on the watch, for failure
+/// diagnostics only. Identities are opaque command ids, never content.
+func commandStatusLog(_ envelopes: [SessionEventEnvelope]) -> [String] {
+    envelopes.compactMap { envelope in
+        guard case .commandStatus(let status) = envelope.event else { return nil }
+        return "\(status.commandId):\(status.status.rawValue)"
+    }
+}
+
 func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
     envelopes.map { envelope in
         switch envelope.event {
@@ -883,23 +892,39 @@ extension IntegrationTestCase {
             delivery: .send
         )
         XCTAssertFalse(receipt.commandId.isEmpty)
-        if receipt.status != .confirmed {
-            let confirmed = await watcher.wait(timeout: 15) { envelopes in
-                envelopes.contains { envelope in
-                    guard case .commandStatus(let status) = envelope.event else { return false }
-                    return status.commandId == receipt.commandId && status.status == .confirmed
+        XCTAssertTrue(
+            receipt.status == .accepted || receipt.status == .confirmed,
+            "the Host must acknowledge the idle send, got \(receipt.status.rawValue)"
+        )
+        // The fixture acknowledges an idle send as `accepted` and then runs it;
+        // it does not publish a later `confirmed` status for that command. The
+        // user-visible proof that the send was accepted once is the committed
+        // echo of the exact text, so require that instead of a status the Host
+        // is not obliged to emit.
+        let echoed = await watcher.wait(timeout: 30) { envelopes in
+            let messages = transcript(from: envelopes)
+            return messages.contains { message in
+                message.role == .user && message.blocks.contains { block in
+                    block.text.contains("integration idle send")
                 }
             }
-            let queue = (try? await live.service.pendingQueue(
-                hostId: environment.hostId,
-                sessionId: environment.sessionId
-            ))?.items.count ?? -1
-            XCTAssertTrue(
-                confirmed,
-                "the idle send never confirmed (status=\(receipt.status.rawValue), "
-                    + "queue=\(queue), events=\(eventKinds(watcher.envelopes)))"
-            )
         }
+        let echoes = transcript(from: watcher.envelopes).filter { message in
+            message.role == .user && message.blocks.contains { block in
+                block.text.contains("integration idle send")
+            }
+        }
+        let queue = (try? await live.service.pendingQueue(
+            hostId: environment.hostId,
+            sessionId: environment.sessionId
+        ))?.items.count ?? -1
+        XCTAssertTrue(
+            echoed,
+            "the idle send was never committed (status=\(receipt.status.rawValue), "
+                + "id=\(receipt.commandId), statuses=\(commandStatusLog(watcher.envelopes)), "
+                + "queue=\(queue), events=\(eventKinds(watcher.envelopes)))"
+        )
+        XCTAssertEqual(echoes.count, 1, "the idle send must be committed exactly once")
     }
 
     func testAC06_defaultQueue() async throws {
