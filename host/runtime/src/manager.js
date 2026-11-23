@@ -132,6 +132,7 @@ export class ConnectionManager {
   #disposed = false
   #lastErrorCode = null
   #metadataCache = new Map()
+  #removalTimer = null
   ready = null
 
   constructor(options = {}) {
@@ -183,6 +184,9 @@ export class ConnectionManager {
       runtimeConfig: options.runtimeConfig ?? {},
       runtimeReadyTimeoutMs: options.runtimeReadyTimeoutMs ?? 10_000,
       removalStatus: options.removalStatus ?? null,
+      removalPollMs: Number.isSafeInteger(options.removalPollMs) && options.removalPollMs > 0
+        ? options.removalPollMs
+        : 0,
       lock: options.lock,
     }
     this.#now = this.#options.now
@@ -280,7 +284,9 @@ export class ConnectionManager {
       if (record.pending?.removal === 'removing') throw this.#refuse('removal_pending', 'removal is pending; re-adding requires fresh approval')
       let readd = false
       if (record.pending?.removal === 'removed') {
-        // Re-adding always creates a fresh approval intent.
+        // A removed enrollment re-enters through a fresh approval of the same
+        // Host identity. Cloud allocates the next enrollment revision and
+        // resets the workspace removal intent when it approves that request.
         readd = true
         await this.#registry.setPending(record.id, { removal: null, paused: false })
         await this.#registry.clearPendingPhase(record.id)
@@ -294,6 +300,10 @@ export class ConnectionManager {
       // again. A removed profile must instead obtain fresh approval.
       const existing = this.#readIntent(record)
       if (!readd && this.#hasBinding(record) && record.bindings?.operationId && (!existing || existing.state === 'enrolled')) {
+        // A user-initiated connect verifies the authoritative state once before
+        // dialing. A removal that landed while the profile was idle must not be
+        // rediscovered only after another failed MQTT handshake.
+        if (await this.#checkRemovalBeforeConnect()) return this.snapshot()
         return this.#reconnect(this.#activeRecord())
       }
       this.#activation.acquire()
@@ -392,6 +402,8 @@ export class ConnectionManager {
       this.#assertUsable()
       const record = this.#activeRecord()
       if (!record) throw new PluginError('internal', 'no active profile')
+      if (record.pending?.removal === 'removing') throw this.#refuse('removal_pending', 'removal is pending')
+      if (await this.#checkRemovalBeforeConnect()) return this.snapshot()
       return this.#reconnect(record)
     })
   }
@@ -518,10 +530,14 @@ export class ConnectionManager {
     return this.#run(() => this.#syncRemoval())
   }
 
-  async #syncRemoval() {
+  async #syncRemoval({ resumeOnNone = true } = {}) {
     this.#assertUsable()
     const record = this.#activeRecord()
     if (!record || record.mode !== 'managed') return this.snapshot()
+    if (!this.#hasBinding(record)) return this.snapshot()
+    // A terminal removal is the projection until an explicit re-add starts a
+    // new identity. Re-reading it forever would only clear credentials again.
+    if (record.pending?.removal === 'removed') return this.snapshot()
     let observed
     try {
       if (typeof this.#options.removalStatus === 'function') {
@@ -533,27 +549,78 @@ export class ConnectionManager {
         observed = await client.readRemoval({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
       }
     } catch {
+      if (this.#state === 'removing') this.#scheduleRemovalPoll()
       return this.snapshot()
     }
     const state = typeof observed === 'string' ? observed : observed?.state
     if (state === 'enforced' || state === 'removed') {
+      this.#stopRemovalPoll()
       this.#generation += 1
       this.#abortPolling()
       await this.#stopRuntime()
       await this.#registry.setPending(record.id, { removal: 'removed' })
       await this.#clearTransportCredential(record)
       this.#setState('removed', null)
-    } else if (state === 'failed') {
-      await this.#registry.setPending(record.id, { removal: 'failed' })
-      this.#setState('action_required', 'unavailable')
+    } else if (state === 'failed' || state === 'rejected' || state === 'none') {
+      this.#stopRemovalPoll()
+      // A rejected or never-committed removal leaves the binding live. Stop
+      // waiting and resume only when the profile has a usable credential and
+      // the user did not pause it. `none` on a cold start must not reconnect
+      // solely because a stale local intent disappeared.
+      if (record.pending?.removal === 'removing') {
+        await this.#resumeAfterRemoval(record, {
+          resume: state === 'none' ? resumeOnNone : true,
+        })
+      }
     } else if (state === 'pending' || state === 'disabled' || state === 'removing') {
       this.#generation += 1
       this.#abortPolling()
       await this.#stopRuntime()
       await this.#registry.setPending(record.id, { removal: 'removing' })
       this.#setState('removing', null)
+      // Only an active removal is polled, and only until it becomes terminal.
+      this.#scheduleRemovalPoll()
+    } else if (state === 'unavailable' || state === 'unknown') {
+      // A transient unreadable status must not stop an active removal poll.
+      this.#scheduleRemovalPoll()
     }
     return this.snapshot()
+  }
+
+  async #resumeAfterRemoval(record, { resume = true } = {}) {
+    await this.#registry.setPending(record.id, { removal: null })
+    const current = this.#registry.get(record.id) ?? record
+    this.#refreshDerivedState()
+    if (!resume) return
+    if (this.#hasBinding(current) && current.pending?.paused !== true) {
+      try {
+        await this.#reconnect(current)
+      } catch (error) {
+        this.#handleOperationFailure(error)
+      }
+    }
+  }
+
+  #scheduleRemovalPoll() {
+    if (this.#disposed || this.#options.removalPollMs <= 0 || this.#removalTimer !== null) return
+    if (this.#state !== 'removing') return
+    this.#removalTimer = setTimeout(() => {
+      this.#removalTimer = null
+      void this.#run(() => this.#syncRemoval()).catch(() => {})
+    }, this.#options.removalPollMs)
+    this.#removalTimer.unref?.()
+  }
+
+  #stopRemovalPoll() {
+    if (this.#removalTimer === null) return
+    clearTimeout(this.#removalTimer)
+    this.#removalTimer = null
+  }
+
+  /** True when the connect attempt must stop instead of dialing MQTT. */
+  async #checkRemovalBeforeConnect() {
+    await this.#syncRemoval()
+    return this.#state === 'removed' || this.#state === 'removing' || this.#runtime !== null
   }
 
   async switchProfile(id) {
@@ -864,6 +931,7 @@ export class ConnectionManager {
     this.#disposed = true
     this.#generation += 1
     this.#abortPolling()
+    this.#stopRemovalPoll()
     const operation = this.#operation
     this.#operation = null
     try {
@@ -1084,8 +1152,12 @@ export class ConnectionManager {
       return
     }
     if (!record) return
-    if (record.pending?.removal === 'removed' || record.pending?.removal === 'removing') {
-      await this.#refreshRemovalOnStart(record)
+    if (record.pending?.removal === 'removed') return
+    if (record.pending?.removal === 'removing') {
+      // A persisted removing state must be resolved from the authority even on
+      // a cold start; do not reconnect merely because a stale local intent is
+      // gone.
+      await this.#syncRemoval({ resumeOnNone: false })
       return
     }
     const intent = this.#readIntent(record)
@@ -1119,29 +1191,14 @@ export class ConnectionManager {
           }
         })
       } else if (this.#hasBinding(record) && record.pending?.paused !== true) {
-        await this.#run(() => this.#reconnect(record))
+        // Cold start verifies the authoritative removal state once before the
+        // first managed connection attempt.
+        if (!(await this.#checkRemovalBeforeConnect())) {
+          await this.#run(() => this.#reconnect(record))
+        }
       }
     } catch (error) {
       this.#handleOperationFailure(error)
-    }
-  }
-
-  async #refreshRemovalOnStart(record) {
-    if (typeof this.#options.removalStatus !== 'function') return
-    try {
-      const observed = await this.#options.removalStatus({
-        apiOrigin: record.service?.apiOrigin,
-        hostId: record.bindings?.hostId,
-      })
-      const state = typeof observed === 'string' ? observed : observed?.state
-      if (state === 'none' || state === 'absent') {
-        // The browser confirmation never created an intent; keep the original
-        // connection policy and let the user reopen the correct confirmation.
-        await this.#registry.setPending(record.id, { removal: null })
-        this.#refreshDerivedState()
-      }
-    } catch {
-      // unavailable status preserves the original state and link
     }
   }
 
@@ -1444,6 +1501,13 @@ export class ConnectionManager {
               if (generation === this.#generation && !this.#disposed) {
                 this.#connected = false
                 this.#setState('action_required', code)
+                // Authentication refusal is an event, not a domain fact. Ask
+                // the authoritative removal state once; a rotated credential,
+                // a disabled Host and an outage must not be reported as a
+                // removal. TLS trust failures are configuration-only.
+                if (code === 'unauthorized' || code === 'forbidden') {
+                  void this.#run(() => this.#syncRemoval()).catch(() => {})
+                }
               }
               handlers.onFailure?.(code)
             },
@@ -1642,10 +1706,12 @@ export class ConnectionManager {
   }
 
   #actionFor(record, intent) {
-    if (record?.pending?.removal === 'removed') return null
+    // A removed enrollment may only move forward through a fresh approval.
+    if (record?.pending?.removal === 'removed') return { kind: 'connect' }
     if (record?.pending?.removal === 'removing') return { kind: 'verify' }
     if (this.#desiredError || this.#configError) return { kind: 'fix-config' }
-    if (record?.pending?.paused === true) {
+    if (record?.pending?.paused === true
+      && !['reconnecting', 'connected', 'removing'].includes(this.#state)) {
       return this.#hasBinding(record) ? { kind: 'resume' } : { kind: 'connect' }
     }
     if (this.#state === 'awaiting_approval' || this.#state === 'requesting') {
@@ -1797,7 +1863,6 @@ export class ConnectionManager {
       // admitted/pending/unknown: retain the original operation across restart.
       return false
     } catch (error) {
-      if (process.env.WR_DEBUG_RECONCILE) console.error('RECONCILE', error)
       return false
     }
   }

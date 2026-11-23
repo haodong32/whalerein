@@ -218,6 +218,7 @@ test('managed hosting constructs the connection manager with profile-scoped cred
     assert.equal(calls[0][1].stateRoot, dir)
     assert.equal(calls[0][1].credentials, credentials)
     assert.equal(calls[0][1].ctx.credentials.name, undefined)
+    assert.equal(calls[0][1].removalPollMs, 2_000, 'removal polling is limited to active removals')
     assert.equal(host.started, true)
     await host.stop()
     assert.deepEqual(calls.at(-1), ['dispose'])

@@ -1353,7 +1353,8 @@ test('re-adding a removed Host uses fresh approval and does not restore the old 
     assert.equal(enrollments, 2, 're-add enrolls once under the fresh approval')
     assert.equal(f.mqtts.at(-1).options.token, 'credential-2')
     assert.notEqual(f.mqtts.at(-1).options.token, oldToken, 'the replaced credential is not the old grant')
-    assert.equal(f.manager.details().hostId, oldHostId)
+    assert.equal(f.manager.details().hostId, oldHostId,
+      're-add reuses the Host identity and obtains a fresh enrollment revision')
     await f.manager.dispose()
   } finally {
     f.cleanup()
@@ -1979,7 +1980,7 @@ test('removal lifecycle is observed through the scoped Cloud removal read', asyn
     removalReply = json(200, { state: 'enforced' })
     const removed = await f.manager.reconcileRemoval()
     assert.equal(removed.state, 'removed')
-    assert.equal(removed.action, null)
+    assert.deepEqual(removed.action, { kind: 'connect' })
     assert.equal(new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).pending.removal, 'removed')
     const store = new ProfileCredentialStore({ credentials: f.credentials, profileId, installationId: 'test-install' })
     assert.equal(await store.getJson(CREDENTIAL_PURPOSES.transportCredential), null)
@@ -2040,19 +2041,183 @@ test('startup reconciles a persisted removal intent through the removal status p
   }
 })
 
-test('a failed removal observation is actionable and keeps the credential', async () => {
+test('a rejected removal leaves the binding live and keeps the credential', async () => {
   const f = fixture({ removalStatus: async () => ({ state: 'failed' }) })
   try {
     await f.manager.startConnect()
     await waitFor(() => f.manager.snapshot().state === 'connected')
     const observed = await f.manager.refreshRemoval()
-    assert.equal(observed.state, 'action_required')
-    assert.equal(observed.error.code, 'unavailable')
+    assert.equal(observed.state, 'connected')
+    assert.equal(observed.error, null)
     const profileId = observed.profileId
-    assert.equal(new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).pending.removal, 'failed')
+    assert.equal(new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).pending.removal, undefined)
     const store = new ProfileCredentialStore({ credentials: f.credentials, profileId, installationId: 'test-install' })
     assert.notEqual(await store.getJson(CREDENTIAL_PURPOSES.transportCredential), null,
       'a failed removal never clears the transport credential')
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a rejected removal resumes a connection stopped by an earlier removing observation', async () => {
+  let status = 'removing'
+  const f = fixture({ removalStatus: async () => ({ state: status }) })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const stopped = await f.manager.refreshRemoval()
+    assert.equal(stopped.state, 'removing')
+    assert.equal(stopped.connected, false)
+    status = 'failed'
+    const resumed = await f.manager.refreshRemoval()
+    await waitFor(() => resumed.state === 'connected' || f.manager.snapshot().state === 'connected')
+    assert.equal(f.manager.snapshot().state, 'connected')
+    assert.equal(new HostProfileRegistry({ stateRoot: f.stateRoot }).get(resumed.profileId).pending.removal, undefined)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a user reconnect checks the authoritative removal state before dialing', async () => {
+  let status = 'none'
+  const f = fixture({ removalStatus: async () => ({ state: status }) })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    const dials = f.mqtts.length
+    status = 'removed'
+    const snapshot = await f.manager.reconnect()
+    assert.equal(snapshot.state, 'removed')
+    assert.deepEqual(snapshot.action, { kind: 'connect' })
+    assert.equal(f.mqtts.length, dials, 'a terminal removal must not dial MQTT again')
+    const store = new ProfileCredentialStore({
+      credentials: f.credentials,
+      profileId: snapshot.profileId,
+      installationId: 'test-install',
+    })
+    assert.equal(await store.getJson(CREDENTIAL_PURPOSES.transportCredential), null)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('an authentication refusal confirms removal once before settling', async () => {
+  let handlers = null
+  const access = {
+    connected: false,
+    start(received) {
+      handlers = received
+      access.connected = true
+      return access
+    },
+    async waitForConnected() {
+      access.connected = true
+    },
+    async stop() {
+      access.connected = false
+    },
+  }
+  const runtimeFactory = ({ access: injected }) => ({
+    async start() {
+      injected.start({})
+    },
+    async stop() {},
+  })
+  const stateRoot = mkdtempSync(join(tmpdir(), 'whalerein-manager-'))
+  try {
+    const manager = createConnectionManager({
+      stateRoot,
+      configFile: ensureConfig(stateRoot),
+      credentials: new MemoryHostCredentials(),
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: createFetch().fetch,
+      mqtt: () => access,
+      runtimeFactory,
+      removalStatus: async () => ({ state: 'removed' }),
+      installationId: 'test-install',
+    })
+    await manager.startConnect()
+    await waitFor(() => manager.snapshot().state === 'connected')
+    handlers.onFailure('unauthorized')
+    await waitFor(() => manager.snapshot().state === 'removed', 2000)
+    assert.equal(manager.snapshot().error, null)
+    assert.deepEqual(manager.snapshot().action, { kind: 'connect' })
+    await manager.dispose()
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('only an active removal is polled until it becomes terminal', async () => {
+  let status = 'removing'
+  const f = fixture({
+    removalStatus: async () => ({ state: status }),
+    managerOptions: { removalPollMs: 20 },
+  })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const observed = await f.manager.refreshRemoval()
+    assert.equal(observed.state, 'removing')
+    assert.equal(observed.connected, false)
+    status = 'removed'
+    await waitFor(() => f.manager.snapshot().state === 'removed', 2000)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('an unreadable removal status keeps an active removal poll alive', async () => {
+  let status = 'removing'
+  const f = fixture({
+    removalStatus: async () => {
+      if (status === 'throw') throw new TypeError('offline')
+      return { state: status }
+    },
+    managerOptions: { removalPollMs: 20 },
+  })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.refreshRemoval()
+    assert.equal(f.manager.snapshot().state, 'removing')
+    status = 'unavailable'
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(f.manager.snapshot().state, 'removing')
+    status = 'throw'
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    assert.equal(f.manager.snapshot().state, 'removing')
+    status = 'removed'
+    await waitFor(() => f.manager.snapshot().state === 'removed', 2000)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a connected profile does not poll the removal state', async () => {
+  let calls = 0
+  const f = fixture({
+    removalStatus: async () => {
+      calls += 1
+      return { state: 'none' }
+    },
+    managerOptions: { removalPollMs: 20 },
+  })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    const settled = calls
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    assert.equal(calls, settled, 'a healthy connected profile has no removal timer')
+    assert.equal(f.manager.snapshot().state, 'connected')
     await f.manager.dispose()
   } finally {
     f.cleanup()

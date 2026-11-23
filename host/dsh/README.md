@@ -169,10 +169,15 @@ configuration edits use the existing revisioned DSH settings writer only.
 
 Disconnect is a local pause that retains the cloud registration. **Remove this
 computer** opens the verified browser confirmation without marking removal
-pending; the page polls the scoped Cloud/Access status and reports `removing`
-only after the service accepts the intent, and completion only after Access
-confirms enforcement. A blocked or abandoned browser handoff leaves the
-original connection policy intact. Inactive identity deletion is not exposed by the settings page. Managed profiles hide device invitation/revocation
+pending. The Host runtime, not the page, resolves the scoped Cloud/Access
+removal state at cold start, before a user connect/resume, and after a
+definitive authentication refusal. Only an active `removing` state is polled
+to completion; a healthy connected profile has no background removal poll.
+A blocked or abandoned browser handoff leaves the original connection policy
+intact. Once removal is terminal the page shows a fresh-approval **Reconnect**
+action; reconnecting starts a fresh browser approval for the same Host
+identity, and Cloud allocates the next enrollment revision and resets the
+removal intent on approval. A rejected removal keeps the live binding usable. Inactive identity deletion is not exposed by the settings page. Managed profiles hide device invitation/revocation
 unless the selected service advertises pairing support; Standalone profiles keep
 the existing pairing, invitation, revocation, and connection-test behavior.
 Managed settings list paired Devices and mark those with an active Session
