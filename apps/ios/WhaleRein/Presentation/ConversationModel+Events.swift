@@ -42,6 +42,17 @@ extension ConversationModel {
             pagedMessageIds.removeAll()
             historyGeneration &+= 1
             isLoadingOlderHistory = false
+            // The new snapshot replaces the transcript, so every paged row is
+            // gone. Its continuation, projection and completion flag described
+            // the old traversal and must not suppress reaching those older
+            // messages from the new snapshot.
+            historyContinuation = nil
+            historyProjection = nil
+            historySource = nil
+            historyComplete = false
+            historyNeedsFreshTraversal = false
+            historyProvenance = nil
+            historyErrorKey = nil
             liveToolActivities.removeAll()
             reasoningPreviewText = nil
             trustedPendingApprovalIds.removeAll()

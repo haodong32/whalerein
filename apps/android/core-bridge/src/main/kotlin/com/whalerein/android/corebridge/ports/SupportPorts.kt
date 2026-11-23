@@ -10,6 +10,7 @@ import com.whalerein.android.state.core.Outcome
 import com.whalerein.android.state.core.SessionId
 import com.whalerein.android.state.support.AccountConnection
 import com.whalerein.android.state.support.AccountPort
+import com.whalerein.android.state.support.AccountRevocableTargets
 import com.whalerein.android.state.support.AccountStatus
 import com.whalerein.android.state.support.AppSessionInfo
 import com.whalerein.android.state.support.CloudAccountState
@@ -100,7 +101,11 @@ internal class OperationsAdapter(private val owner: AndroidCore) : OperationsPor
     }
 }
 
-internal class AccountAdapter(private val owner: AndroidCore) : AccountPort {
+internal class AccountAdapter(
+    private val owner: AndroidCore,
+    private val revocationBackend: ScopedRevocationBackend = CoreScopedRevocationBackend(owner),
+) : AccountPort {
+    private val revoker = ScopedAccountRevoker(revocationBackend)
     override suspend fun status(instance: InstanceId): Outcome<AccountStatus> = outcomeOf {
         val status = owner.core().cloudStatus()
         val account = status.account
@@ -159,38 +164,48 @@ internal class AccountAdapter(private val owner: AndroidCore) : AccountPort {
         )
     }
 
+    override suspend fun revocableTargets(
+        instance: InstanceId,
+    ): Outcome<AccountRevocableTargets> = suspendOutcome {
+        val profile = owner.appConfig().instances.firstOrNull { it.id == instance.value }
+        val hosts = if (profile?.service == RevocableTargetPolicy.CLOUD_SERVICE) {
+            owner.core().cloudHosts().map { HostGrantCandidate(it.hostId, it.deviceAccess) }
+        } else {
+            emptyList()
+        }
+        RevocableTargetPolicy.targets(profile?.service, hosts)
+    }
+
+    override suspend fun revokeCurrentDevice(instance: InstanceId): Outcome<RevocationReport> =
+        report(RevocationScope.CurrentDevice, revoker.revoke(RevocationScope.CurrentDevice))
+
     override suspend fun revokeCloudHostGrant(
         instance: InstanceId,
         hostId: HostId,
-    ): Outcome<RevocationReport> = outcomeOf {
-        owner.core().revoke()
-        RevocationReport(
-            scope = RevocationScope.CloudHostGrant(hostId),
-            retention = RetentionCertainty.Certain,
-        )
+    ): Outcome<RevocationReport> {
+        val scope = RevocationScope.CloudHostGrant(hostId)
+        return report(scope, revoker.revoke(scope))
     }
 
     override suspend fun revokeStandaloneDevice(
         instance: InstanceId,
         deviceId: String,
-    ): Outcome<RevocationReport> = outcomeOf {
-        owner.core().revoke()
-        RevocationReport(
-            scope = RevocationScope.StandaloneDevice(deviceId),
-            retention = RetentionCertainty.Certain,
-        )
+    ): Outcome<RevocationReport> {
+        val scope = RevocationScope.StandaloneDevice(deviceId)
+        return report(scope, revoker.revoke(scope))
     }
 
     override suspend fun forget(
         instance: InstanceId,
         mode: ForgetMode,
-    ): Outcome<ForgetReport> = outcomeOf {
-        owner.core().forgetDevice()
-        ForgetReport(
-            mode = mode,
-            forgotten = true,
-            remoteAuthorityRetained = mode == ForgetMode.LocalOnly,
-        )
+    ): Outcome<ForgetReport> = revoker.forget(mode)
+
+    private fun report(
+        scope: RevocationScope,
+        outcome: Outcome<RevocationReport>,
+    ): Outcome<RevocationReport> = when (outcome) {
+        is Outcome.Success -> Outcome.Success(outcome.value.copy(scope = scope))
+        else -> outcome
     }
 }
 

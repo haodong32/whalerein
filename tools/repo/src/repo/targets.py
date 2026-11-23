@@ -32,7 +32,12 @@ IOS = (
 )
 ANDROID = (
     Target("android-ui", "android", "Compose fixture instrumentation on a device"),
-    Target("android-integration", "android", "native bridge, Keystore and TLS device checks"),
+    Target(
+        "android-integration",
+        "android",
+        "app and Core bridge instrumentation on a device",
+    ),
+    Target("android-bridge-jvm", "android", "Core bridge adapter JVM tests"),
     Target("android-performance", "android", "physical-device Macrobenchmark"),
 )
 PROTO = Target("proto", "proto", "generated Go/JS binding consistency")

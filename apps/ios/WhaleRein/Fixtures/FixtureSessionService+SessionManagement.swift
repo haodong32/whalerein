@@ -15,6 +15,11 @@ final class FixtureSessionManagementState {
     var createWarningCode: String?
     var createReasonCode = "WORKSPACE_NOT_FOUND"
     var createRetryable = true
+    /// When set, the Host confirms creation but the follow-up detail read
+    /// fails. The returned identity must survive that failure.
+    var createDetailFails = false
+    /// When set, a later retry of the follow-up detail read also fails.
+    var createdDetailsFail = false
 
     // Fork
     /// `READY`, `READY_WITH_WARNING`, `FAILED` or `UNKNOWN`.
@@ -225,8 +230,8 @@ extension FixtureSessionService: SessionManagementService {
                     : nil
             ),
             sessionId: returnedId,
-            session: detail,
-            detailError: nil
+            session: state.createDetailFails ? nil : detail,
+            detailError: state.createDetailFails ? .unavailable : nil
         )
     }
 
@@ -234,6 +239,9 @@ extension FixtureSessionService: SessionManagementService {
         if let created = managementState.createdSessions.last(where: {
             $0.hostId == hostId && $0.sessionId == sessionId
         }) {
+            if managementState.createdDetailsFail {
+                throw SessionServiceError(.unavailable)
+            }
             return created
         }
         if let row = FixtureCatalog.sessions(hostId: hostId).first(where: {

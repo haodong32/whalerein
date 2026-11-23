@@ -1,4 +1,4 @@
-"""Explicit Android device suites backed by Gradle.
+"""Explicit Android device and bridge-host suites backed by Gradle.
 
 These targets never participate in ordinary unit selection. A missing SDK,
 device or requested local stack is recorded as unavailable evidence with a
@@ -17,15 +17,25 @@ from .kotlin import parse_junit_files
 
 SUITES = {
     "android-ui": {
-        "task": ":app:connectedNoGmsDebugAndroidTest",
+        "tasks": (":app:connectedNoGmsDebugAndroidTest",),
         "description": "Compose fixture instrumentation",
     },
     "android-integration": {
-        "task": ":app:connectedNoGmsDebugAndroidTest",
+        # The app suite covers Compose/device behavior. Native bridge, Keystore
+        # and TLS cases live in the :core-bridge instrumentation source set, so
+        # both modules are part of the integration selection.
+        "tasks": (
+            ":app:connectedNoGmsDebugAndroidTest",
+            ":core-bridge:connectedDebugAndroidTest",
+        ),
         "description": "native bridge, Keystore and TLS device checks",
     },
+    "android-bridge-jvm": {
+        "tasks": (":core-bridge:testDebugUnitTest",),
+        "description": "Core bridge adapter JVM tests",
+    },
     "android-performance": {
-        "task": ":benchmark:connectedNoGmsReleaseAndroidTest",
+        "tasks": (":benchmark:connectedNoGmsReleaseAndroidTest",),
         "description": "Macrobenchmark on a physical device",
     },
 }
@@ -33,11 +43,14 @@ TASK_OVERRIDES = {
     "android-integration": "WHALEREIN_ANDROID_INTEGRATION_TASK",
     "android-performance": "WHALEREIN_ANDROID_PERFORMANCE_TASK",
 }
+BRIDGE_JVM = "android-bridge-jvm"
 
 
-def task_for(target: str) -> str:
+def tasks_for(target: str) -> tuple[str, ...]:
     override = os.environ.get(TASK_OVERRIDES.get(target, ""), "")
-    return override or SUITES[target]["task"]
+    if override:
+        return (override,)
+    return SUITES[target]["tasks"]
 
 
 def _sdk(root: Path) -> Path | None:
@@ -126,7 +139,7 @@ def _gradle_command(root: Path, target: str, *, list_only: bool) -> tuple[list[s
     wrapper = root / ("apps/android/gradlew.bat" if os.name == "nt" else "apps/android/gradlew")
     if not wrapper.exists():
         raise VerificationError("android-gradle-unavailable", 3)
-    argv = [str(wrapper), task_for(target), "--console=plain"]
+    argv = [str(wrapper), *tasks_for(target), "--console=plain"]
     if list_only:
         argv.append("-Pandroid.testInstrumentationRunnerArguments.log=true")
     return argv, root / "apps/android"
@@ -141,6 +154,41 @@ def _local_stack() -> str | None:
     return os.environ["WHALEREIN_ANDROID_ACCESS_URL"]
 
 
+def _complete_execution(ctx, target: str, result, selected: list[dict]):
+    ctx.record_collection([case["id"] for case in selected])
+    for case in selected:
+        ctx.record_case(case["id"], case["status"])
+    complete = result.returncode in (0, 1) and all(
+        case["status"] in {"passed", "failed", "skipped"} for case in selected
+    )
+    ctx.record_scope(
+        {
+            "suite_id": target,
+            "project": target,
+            "kind": "android",
+            "language": "kotlin",
+            "completeness": "complete" if complete else "incomplete",
+            "exit_code": result.returncode,
+            "tests": [
+                {
+                    "id": case["id"],
+                    "status": case["status"],
+                    **({"diagnostics": case["diagnostics"]} if case.get("diagnostics") else {}),
+                }
+                for case in selected
+            ],
+        }
+    )
+    if result.returncode == 130:
+        raise KeyboardInterrupt
+    if not complete:
+        raise VerificationError("incomplete-android-result")
+    if result.returncode != 0:
+        raise VerificationError("android-tests-failed")
+    if not any(case["status"] == "passed" for case in selected):
+        raise VerificationError("no-android-case-passed")
+
+
 def _run_platform(ctx, runner, root: Path, target: str, case_filter: str | None, list_only: bool):
     with ctx.phase("platform-preparation"):
         if _sdk(root) is None:
@@ -151,7 +199,7 @@ def _run_platform(ctx, runner, root: Path, target: str, case_filter: str | None,
             raise VerificationError("android-physical-device-required", 3)
         stack = _local_stack()
         ctx.record_artifact("android-device", facts)
-        ctx.record_artifact("android-task", {"name": task_for(target), "serial": serial})
+        ctx.record_artifact("android-task", {"names": list(tasks_for(target)), "serial": serial})
         if stack:
             ctx.record_artifact("android-local-stack", {"access_url": stack})
         argv, cwd = _gradle_command(root, target, list_only=list_only)
@@ -192,38 +240,30 @@ def _run_platform(ctx, runner, root: Path, target: str, case_filter: str | None,
             raise VerificationError("unmatched-case-filter", 2)
         if not selected:
             raise VerificationError("android-no-tests", 1)
-        ctx.record_collection([case["id"] for case in selected])
-        for case in selected:
-            ctx.record_case(case["id"], case["status"])
-        complete = result.returncode in (0, 1) and all(
-            case["status"] in {"passed", "failed", "skipped"} for case in selected
-        )
-        ctx.record_scope(
-            {
-                "suite_id": target,
-                "project": target,
-                "kind": "android",
-                "language": "kotlin",
-                "completeness": "complete" if complete else "incomplete",
-                "exit_code": result.returncode,
-                "tests": [
-                    {
-                        "id": case["id"],
-                        "status": case["status"],
-                        **({"diagnostics": case["diagnostics"]} if case.get("diagnostics") else {}),
-                    }
-                    for case in selected
-                ],
-            }
-        )
-        if result.returncode == 130:
-            raise KeyboardInterrupt
-        if not complete:
-            raise VerificationError("incomplete-android-result")
-        if result.returncode != 0:
-            raise VerificationError("android-tests-failed")
-        if not any(case["status"] == "passed" for case in selected):
-            raise VerificationError("no-android-case-passed")
+        _complete_execution(ctx, target, result, selected)
+
+
+def _run_bridge(ctx, runner, root: Path, target: str, case_filter: str | None, list_only: bool):
+    if list_only:
+        raise VerificationError("android-bridge-list-unsupported", 2)
+    results = root / "apps/android/core-bridge/build/test-results/testDebugUnitTest"
+    with ctx.phase("platform-preparation"):
+        if _sdk(root) is None:
+            raise VerificationError("android-sdk-unavailable", 3)
+        for stale in results.rglob("*.xml"):
+            stale.unlink(missing_ok=True)
+        ctx.record_artifact("android-task", {"names": list(tasks_for(target))})
+        argv, cwd = _gradle_command(root, target, list_only=False)
+    with ctx.phase("execution"):
+        result = ctx.run(runner, argv, cwd)
+        cases = parse_junit_files(results.rglob("*.xml"))
+        selected = [case for case in cases if case_filter is None or case_filter in case["id"]]
+        if case_filter is not None and not selected:
+            ctx.record_collection([])
+            raise VerificationError("unmatched-case-filter", 2)
+        if not selected:
+            raise VerificationError("android-no-tests", 1)
+        _complete_execution(ctx, target, result, selected)
 
 
 def run_android(
@@ -237,6 +277,7 @@ def run_android(
 ):
     ci = os.environ.get("GITHUB_ACTIONS") == "true"
     timeout = 5400 if target == "android-performance" else 3600
+    execute = _run_bridge if target == BRIDGE_JVM else _run_platform
     return run_suite(
         Invocation(
             "ci" if ci else "local",
@@ -245,7 +286,7 @@ def run_android(
             case_filter=case_filter,
             output=output,
             timeout=timeout,
-            configuration={"list_only": list_only, "task": task_for(target)},
+            configuration={"list_only": list_only, "tasks": list(tasks_for(target))},
         ),
-        lambda ctx: _run_platform(ctx, runner, root, target, case_filter, list_only),
+        lambda ctx: execute(ctx, runner, root, target, case_filter, list_only),
     )

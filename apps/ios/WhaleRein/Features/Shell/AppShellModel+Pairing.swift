@@ -25,6 +25,9 @@ extension AppShellModel {
                 Task { await self.refreshVisibleOperationResults() }
             }
         )
+        // Staged attachments belong to the active instance's data directory,
+        // never to a process-wide root keyed only by Host and session.
+        model.attachments.dataDirectory = activeInstance?.dataDirectory ?? dataDirectory
         conversation = model
         selectedHostId = hostId
         hostList.select(hostId)
@@ -90,15 +93,35 @@ extension AppShellModel {
     func handleOpenURL(_ url: URL) async {
         guard !isRevoked else { return }
         // The Cloud authorization callback is consumed by the Cloud model and
-        // must never be offered to the self-hosted invitation parser.
+        // must never be offered to the self-hosted invitation parser. It is
+        // fenced independently and must not wait for launch restore.
         if CloudSignInModel.isCloudCallback(url) {
             await cloudSignIn?.receiveCallback(url)
             return
         }
+        // A system-delivered link can arrive before `launchRestore` finishes.
+        // Queue it until the root exists; otherwise a restore that opens the
+        // conversation could dismiss the pairing sheet and silently drop it.
+        guard isLaunched else {
+            pendingInvitationLink = url
+            return
+        }
+        pendingInvitationLink = nil
         if isPaired {
             present(.invitation)
         }
         await pairing.handleOpenURL(url)
+    }
+
+    /// Marks the first launch restore complete and replays a system link that
+    /// arrived during it. Safe to call from every restore/bootstrap exit.
+    func finishLaunch() {
+        isLaunched = true
+        guard let url = pendingInvitationLink else { return }
+        pendingInvitationLink = nil
+        Task { [weak self] in
+            await self?.handleOpenURL(url)
+        }
     }
 
     /// Local Cloud sign-out from Settings. Core keeps a scoped pending remote

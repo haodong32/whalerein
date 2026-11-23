@@ -91,6 +91,74 @@ struct DeepLinkQueueTests {
 
         #expect(app.showInvitationSheet)
         #expect(app.pairing.prompt != nil)
+        #expect(app.isLaunched)
+    }
+
+    @Test("a system link arriving during a paired cold launch is replayed, not dropped")
+    func coldLaunchLinkIsReplayed() async {
+        let service = StubSessionService()
+        service.pairingStartHandler = { _ in fixturePrompt() }
+        service.pairingDecideHandler = { _, _ in }
+        let hostsGate = SuspendedResponse<[HostSummary]>()
+        service.hostsHandler = { try await hostsGate.wait() }
+        let directory = makeTempDirectory()
+        let preferences = PreferencesStore(directory: directory)
+        preferences.update { $0.paired = true }
+        let app = AppShellModel(
+            service: service,
+            preferences: preferences,
+            dataDirectory: directory,
+            options: testLaunchOptions()
+        )
+        app.router = AppRouter()
+        #expect(!app.isLaunched)
+
+        let launch = Task { await app.bootstrapConversation() }
+        await hostsGate.waitUntilStarted()
+        let link = FixtureCatalog.invitationURL(hostId: "studio-mac")
+        await app.handleOpenURL(link)
+
+        // The restore is still in flight, so the link is held instead of
+        // starting a flow that the restore would dismiss.
+        #expect(app.pendingInvitationLink == link)
+        #expect(app.pairing.prompt == nil)
+
+        hostsGate.resume(with: FixtureCatalog.hosts)
+        await launch.value
+        await waitUntil { app.pairing.prompt != nil }
+
+        #expect(app.isLaunched)
+        #expect(app.pendingInvitationLink == nil)
+        #expect(app.pairing.prompt?.hostId == "studio-mac")
+        #expect(app.showInvitationSheet)
+    }
+
+    @Test("an unpaired cold-launch link starts pairing after restore completes")
+    func unpairedColdLaunchLinkIsReplayed() async {
+        let service = StubSessionService()
+        service.pairingStartHandler = { _ in fixturePrompt() }
+        service.pairingDecideHandler = { _, _ in }
+        service.hostsHandler = { throw SessionServiceError(.notPaired) }
+        let directory = makeTempDirectory()
+        let app = AppShellModel(
+            service: service,
+            preferences: PreferencesStore(directory: directory),
+            dataDirectory: directory,
+            options: testLaunchOptions()
+        )
+        app.router = AppRouter()
+        let link = FixtureCatalog.invitationURL(hostId: "studio-mac")
+
+        await app.handleOpenURL(link)
+        #expect(app.pendingInvitationLink == link)
+        #expect(app.pairing.prompt == nil)
+
+        await app.launchRestore()
+        await waitUntil { app.pairing.prompt != nil }
+
+        #expect(app.pendingInvitationLink == nil)
+        #expect(app.pairing.prompt?.hostId == "studio-mac")
+        #expect(app.pairing.invitationText == link.absoluteString)
     }
 
     @Test("an unpaired app starts pairing directly from an incoming link")
@@ -105,6 +173,7 @@ struct DeepLinkQueueTests {
             dataDirectory: directory,
             options: testLaunchOptions()
         )
+        app.finishLaunch()
 
         await app.handleOpenURL(FixtureCatalog.invitationURL(hostId: "studio-mac"))
 

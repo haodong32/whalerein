@@ -77,6 +77,38 @@ fun DirectoryScreen(
                 Text(text = stringResource(R.string.access_continue))
             }
         }
+        // The signed-out path lands here, not on Welcome, so Standalone setup
+        // and the support surfaces must be reachable from this screen.
+        Text(
+            text = stringResource(R.string.access_directory_more),
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = { onNavigate(Route.StandaloneSetup) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(text = stringResource(R.string.access_directory_standalone_entry))
+            }
+            OutlinedButton(
+                onClick = { onNavigate(Route.Account) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(text = stringResource(R.string.access_directory_account_entry))
+            }
+            OutlinedButton(
+                onClick = { onNavigate(Route.Operations) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(text = stringResource(R.string.access_directory_operations_entry))
+            }
+            OutlinedButton(
+                onClick = { onNavigate(Route.Diagnostics) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(text = stringResource(R.string.access_directory_diagnostics_entry))
+            }
+        }
         state.error?.let { failure ->
             Text(
                 text = failure.message,

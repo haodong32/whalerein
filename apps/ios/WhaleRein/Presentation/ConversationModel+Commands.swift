@@ -39,7 +39,10 @@ extension ConversationModel {
                 receipt.status = preferredStatus(early, over: receipt.status)
             }
             state.lastCommandKind = command.kind
-            lastSendOperationId = receipt.requestId
+            // A rejected send was definitively not accepted, so it has no
+            // retained operation to recover and must not become the identity a
+            // later relaunch tries to resolve.
+            lastSendOperationId = receipt.status == .rejected ? nil : receipt.requestId
             operationResult = nil
             operationErrorKey = nil
             operationReadErrorKey = nil

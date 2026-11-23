@@ -350,9 +350,24 @@ struct ModelSelectionOutcome: Hashable, Sendable {
         receipt.status == .confirmed || receipt.status == .accepted
     }
 
-    /// Core says the source default may not have changed.
+    /// True only when Core explicitly reports that the source default was
+    /// persisted. Any other value, including a rejected or uncertain write, is
+    /// not success and must stay visible as unconfirmed.
+    var defaultPersistenceConfirmed: Bool {
+        switch defaultPersistence?.lowercased() {
+        case "persisted", "confirmed", "succeeded":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Core says the source default may not have changed. A selection the
+    /// session itself rejected has no default write to qualify; every accepted
+    /// selection without an explicit persisted receipt is unconfirmed.
     var defaultPersistenceUnconfirmed: Bool {
-        defaultPersistence?.lowercased() == "unconfirmed"
+        guard sessionAccepted else { return false }
+        return !defaultPersistenceConfirmed
     }
 
     /// False when Core treated the selection as a no-op, so no command was

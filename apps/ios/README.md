@@ -365,6 +365,12 @@ point.
   Each case skips with an explicit reason when the stack environment is absent.
   The recorded run passed 21/21 with 0 skipped; the bundle is
   `.local-docs/acceptance/add-ios-client/xcode/Integration.result`.
+  CI owns this plan through the nightly schedule and the `integration` manual
+  dispatch suite. Hosted macOS runners have no Docker daemon, so the job reads
+  `vars.WHALEREIN_IOS_STACK_RUNNER` for a self-hosted macOS runner with Docker
+  and Xcode. The Unit plan's `ContractParityTests/testLocalStackParity` remains
+  an explicit skip; the live contract comparison is this stack-backed plan, not
+  the placeholder.
 
 ## Known limitations
 

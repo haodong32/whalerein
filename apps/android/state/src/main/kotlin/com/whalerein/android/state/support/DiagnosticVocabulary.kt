@@ -76,6 +76,7 @@ object DiagnosticEvents {
     const val ACCOUNT_SESSIONS_REVOKED_ALL = "login.app_sessions_revoked_all"
     const val ACCOUNT_GRANT_REVOKED = "login.cloud_grant_revoked"
     const val ACCOUNT_DEVICE_REVOKED = "login.standalone_device_revoked"
+    const val ACCOUNT_CURRENT_DEVICE_REVOKED = "login.current_device_revoked"
     const val TRANSFER_STARTED = "transfer.started"
     const val TRANSFER_COMPLETED = "transfer.completed"
     const val TRANSFER_FAILED = "transfer.failed"

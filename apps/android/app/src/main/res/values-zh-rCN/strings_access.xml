@@ -36,6 +36,11 @@
     <string name="access_directory_default">默认</string>
     <string name="access_directory_current">当前</string>
     <string name="access_directory_denied">访问此 Host 被拒绝。</string>
+    <string name="access_directory_more">更多</string>
+    <string name="access_directory_standalone_entry">设置独立 Host</string>
+    <string name="access_directory_account_entry">账号与设备</string>
+    <string name="access_directory_operations_entry">保留的操作</string>
+    <string name="access_directory_diagnostics_entry">诊断</string>
 
     <string name="access_standalone_title">独立 Host 设置</string>
     <string name="access_standalone_body">配对前请检查 Host 身份、信任和本地网络访问权限。</string>

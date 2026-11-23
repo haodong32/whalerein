@@ -123,8 +123,9 @@ fun CloudSignInRoute(
     onRestartGraph: () -> Unit,
 ) {
     val debug = dependencies as? DebugEnvironmentAware
-    // The environment decides the installed App Link callback, so the screen
-    // validates against the same value Core registered for this profile.
+    // The active profile owns the Cloud environment. The native attempt, the
+    // installed App Link callback and the returned session must all use that
+    // same value, so resolve it once for this screen.
     val cloudEnvironment = remember {
         runCatching { debug?.debugCloudEnvironment?.current() }.getOrNull() ?: "production"
     }

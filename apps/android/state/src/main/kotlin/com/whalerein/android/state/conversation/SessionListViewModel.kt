@@ -196,7 +196,8 @@ class SessionListViewModel(
                             code = SessionListFailureCodes.FOREIGN_HOST,
                         )
                     } else {
-                        val summary = created.details.toSummary(created.session.sessionId)
+                        val summary = created.details?.toSummary(created.session.sessionId)
+                            ?: SessionSummary(sessionId = created.session.sessionId)
                         edit {
                             copy(
                                 create = CreateSessionUiState.Created(created.session),
@@ -206,7 +207,11 @@ class SessionListViewModel(
                                     it.sessionId == created.session.sessionId
                                 },
                                 selectedSessionId = created.session.sessionId,
-                                details = SessionDetailsUiState.Loaded(created.details),
+                                // The created identity is already confirmed. A
+                                // failed details read is retried on its own and
+                                // must never trigger a second create.
+                                details = created.details?.let(SessionDetailsUiState::Loaded)
+                                    ?: SessionDetailsUiState.Unavailable(detailsRetryFailure()),
                             )
                         }
                         diag.info(
@@ -507,6 +512,12 @@ class SessionListViewModel(
         SessionListFailureCodes.FOREIGN_HOST,
         "The result belongs to another Host.",
         false,
+    )
+
+    private fun detailsRetryFailure(): CoreFailure = CoreFailure(
+        SessionListFailureCodes.DETAILS_REQUIRED,
+        "The created session details could not be read; retry the details read.",
+        retryable = true,
     )
 
     private fun unexpectedFailure(): CoreFailure =
