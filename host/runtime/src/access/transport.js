@@ -337,6 +337,10 @@ export class RelayTransport {
       throw new PluginError('invalid_argument', 'oversized envelope carries no inline body')
     }
     if (!this.relay) {
+      this.logger?.warn('relay_route_missing', {
+        code: 'payload_too_large', scope: 'transport', bytes: body.length,
+        envelope_bytes: envelopeBytes.length, envelope_limit: envelopeLimit, packet_limit: limit,
+      })
       throw new PluginError('payload_too_large', 'no relay object route is configured for an oversized message')
     }
     const scope = this.#scopeFor(options, envelope)

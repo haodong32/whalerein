@@ -705,7 +705,9 @@ export class HostRuntime {
     } catch (error) {
       if (error?.code !== 'payload_too_large') throw error
       this.#logger?.warn('host_result_unrepresentable', {
-        code: 'payload_too_large', kind: request.kind, bytes: encoded.length, layer: 'host',
+        code: 'payload_too_large', kind: request.kind, bytes: encoded.length,
+        reason: typeof error.message === 'string' ? error.message.slice(0, 160) : '',
+        layer: 'host',
       })
       result.status = 'failed'
       result.result_body = EMPTY
