@@ -301,6 +301,12 @@ test('startConnect runs create, poll, proof-bound enrollment and real readiness 
     assert.equal(details.environment, 'production')
     assert.equal(f.mqtts.length, 1)
     assert.equal(f.mqtts[0].options.token, 'broker-password')
+    // The managed route must give the transport the relay route: an Access
+    // origin plus the signing key let an oversized result travel by reference
+    // instead of failing above the broker packet limit.
+    assert.equal(f.mqtts[0].options.accessOrigin, 'https://access.example')
+    assert.ok(f.mqtts[0].options.authorizationPrivateKey instanceof Uint8Array)
+    assert.equal(f.mqtts[0].options.authorizationPublicKey?.length, 32)
     assert.equal(f.runtimes.length, 1)
     assert.equal(f.runtimes[0].started, true)
     // Secrets never appear in snapshots or details.

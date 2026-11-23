@@ -1272,6 +1272,11 @@ export class ConnectionManager {
       hostId: prepared.hostId,
       token: credential.password,
       authorizationPublicKey: prepared.identity.signingPublicKey,
+      // The managed route is the only place that knows the Access origin and
+      // the signing key, and the Host-authority relay needs both: without them
+      // no message above the broker packet limit can be delivered at all.
+      authorizationPrivateKey: prepared.identity.signingPrivateKey,
+      accessOrigin: credential.accessOrigin,
       caFile: this.#trustFor(record)?.caFile ?? '',
       reconnectMinMs: config.reconnectMinMs,
       reconnectMaxMs: config.reconnectMaxMs,
