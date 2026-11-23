@@ -20,6 +20,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.whalerein.android.AppDependencies
 import com.whalerein.android.state.conversation.ConversationFocusDispatch
 import com.whalerein.android.state.conversation.ConversationViewModel
+import com.whalerein.android.state.conversation.DraftStore
 import com.whalerein.android.state.conversation.PendingEntryUiState
 import com.whalerein.android.state.conversation.dispatchConversationFocus
 import com.whalerein.android.state.conversation.PendingInputViewModel
@@ -39,6 +40,7 @@ fun ConversationRoute(
     onOpenTools: () -> Unit,
     onSaveAttachment: (String) -> Unit,
 ) {
+    val draftStore = remember(dependencies.drafts) { DraftStore(dependencies.drafts) }
     val conversation: ConversationViewModel = viewModel(
         factory = viewModelFactory {
             initializer {
@@ -54,6 +56,7 @@ fun ConversationRoute(
                     ids = dependencies.ids,
                     diagnostics = dependencies.diagnosticSink,
                     queue = dependencies.modelsQueue,
+                    draftStore = draftStore,
                 )
             }
         },

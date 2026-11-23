@@ -340,6 +340,7 @@ class FakePendingInputPort : PendingInputPort {
     var answerOutcome: PendingActionOutcome = PendingActionOutcome.Applied("")
     var cancelOutcome: PendingActionOutcome = PendingActionOutcome.Applied("")
     var answerGate: CompletableDeferred<Unit>? = null
+    var resolveGate: CompletableDeferred<Unit>? = null
     var listThrowable: Throwable? = null
     var getThrowable: Throwable? = null
     var resolveThrowable: Throwable? = null
@@ -371,6 +372,7 @@ class FakePendingInputPort : PendingInputPort {
         guard: Guard,
     ): PendingActionOutcome {
         resolveCalls += Triple(approvalId, decision, guard)
+        resolveGate?.await()
         resolveThrowable?.let { throw it }
         return approvalOutcome
     }
@@ -401,6 +403,8 @@ class FakePendingInputPort : PendingInputPort {
 class FakeDraftPort : DraftPort {
     val drafts = mutableMapOf<SessionRef, String>()
     val pendingSends = mutableMapOf<SessionRef, PendingSendRecord>()
+    var saveGate: CompletableDeferred<Unit>? = null
+    val writeOrder = mutableListOf<String>()
     var loadFailure: CoreFailure? = null
     var pendingSendSaveGate: CompletableDeferred<Unit>? = null
     var pendingSendSaveFailure: CoreFailure? = null
@@ -411,11 +415,15 @@ class FakeDraftPort : DraftPort {
     }
 
     override suspend fun save(scope: SessionRef, text: String): Outcome<Unit> {
+        writeOrder += "save-start"
+        saveGate?.await()
+        writeOrder += "save-finish"
         drafts[scope] = text
         return Outcome.Success(Unit)
     }
 
     override suspend fun clear(scope: SessionRef): Outcome<Unit> {
+        writeOrder += "clear"
         drafts.remove(scope)
         return Outcome.Success(Unit)
     }

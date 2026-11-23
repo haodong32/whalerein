@@ -9,9 +9,14 @@ import com.whalerein.android.state.core.ScreenModel
 import com.whalerein.android.state.core.SendId
 import com.whalerein.android.state.core.SessionRef
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Foreground conversation screen model.
@@ -40,6 +45,7 @@ class ConversationViewModel(
     diagnostics: DiagnosticSink,
     private val queue: ModelsQueuePort? = null,
     private val projection: String = CONVERSATION_PROJECTION_ANDROID_V1,
+    draftStore: DraftStore? = null,
 ) : ScreenModel<ConversationUiState>(ConversationUiState()) {
     private val diag = ConversationDiagnostics(diagnostics)
 
@@ -63,6 +69,9 @@ class ConversationViewModel(
      * revision is unchanged, so a newer edit is never erased by an older send.
      */
     private val draftRevisions = mutableMapOf<SessionRef, Long>()
+    private val draftStore: DraftStore = draftStore ?: DraftStore(drafts)
+    private var draftLease: DraftStore.Lease? = null
+    private var draftSaveJob: Job? = null
 
     /**
      * Opens [session]. Re-opening the same session is a no-op, so rotation and
@@ -312,7 +321,24 @@ class ConversationViewModel(
         draftsBySession[session] = text
         draftRevisions[session] = (draftRevisions[session] ?: 0L) + 1
         edit { copy(composer = composer.copy(text = text)) }
-        scope.launch { drafts.save(session, text) }
+        val lease = draftLease ?: return
+        val revision = draftStore.update(lease, text)
+        draftSaveJob?.cancel()
+        draftSaveJob = scope.launch {
+            delay(DRAFT_DEBOUNCE_MILLIS)
+            when (val saved = draftStore.setAndFlush(lease, text, revision)) {
+                is Outcome.Success -> Unit
+                is Outcome.Failure -> diag.warn(
+                    ConversationDiagnosticStage.COMMAND,
+                    ConversationDiagnosticEventName.SEND_FAILED,
+                    code = saved.failure.code,
+                    fields = mapOf("operation" to "draft_save"),
+                )
+
+                is Outcome.Unconfirmed -> Unit
+                Outcome.Cancelled -> Unit
+            }
+        }
     }
 
     fun selectDeliveryMode(mode: DeliveryMode) {
@@ -652,12 +678,18 @@ class ConversationViewModel(
     ) {
         val currentRevision = draftRevisions[session] ?: 0L
         val currentText = draftsBySession[session] ?: state.value.composer.text
+        val lease = draftLease ?: return
         if (currentRevision == submittedRevision && currentText == submittedText) {
             draftsBySession[session] = ""
-            scope.launch { drafts.clear(session) }
+            scope.launch {
+                draftStore.clearIfCurrent(lease, submittedText)
+            }
         } else {
             draftsBySession[session] = currentText
-            scope.launch { drafts.save(session, currentText) }
+            val revision = draftStore.update(lease, currentText)
+            scope.launch {
+                draftStore.setAndFlush(lease, currentText, revision)
+            }
         }
     }
 
@@ -679,7 +711,11 @@ class ConversationViewModel(
             return
         }
         draftsBySession[session] = submittedText
-        scope.launch { drafts.save(session, submittedText) }
+        val lease = draftLease ?: return
+        val revision = draftStore.update(lease, submittedText)
+        scope.launch {
+            draftStore.setAndFlush(lease, submittedText, revision)
+        }
         edit {
             if (composer.text.isEmpty()) {
                 copy(composer = composer.copy(text = submittedText))
@@ -768,7 +804,11 @@ class ConversationViewModel(
             return
         }
         draftsBySession[session] = record.text
-        scope.launch { drafts.save(session, record.text) }
+        val lease = draftLease ?: return
+        val revision = draftStore.update(lease, record.text)
+        scope.launch {
+            draftStore.setAndFlush(lease, record.text, revision)
+        }
         edit { copy(composer = composer.copy(text = record.text)) }
     }
 
@@ -1509,9 +1549,10 @@ class ConversationViewModel(
 
     private fun loadDraft(session: SessionRef) {
         scope.launch {
-            when (val result = drafts.load(session)) {
+            when (val result = draftStore.claim(session)) {
                 is Outcome.Success -> {
-                    val loaded = result.value ?: return@launch
+                    draftLease = result.value.lease
+                    val loaded = result.value.text ?: return@launch
                     if (loadedSession == session && state.value.composer.text.isEmpty()) {
                         edit { copy(composer = composer.copy(text = loaded)) }
                     }
@@ -1559,11 +1600,21 @@ class ConversationViewModel(
     override fun onCleared() {
         watchJob?.cancel()
         waitJob?.cancel()
+        draftSaveJob?.cancel()
+        val lease = draftLease
+        val session = loadedSession
+        if (lease != null && session != null) {
+            val text = draftsBySession[session] ?: state.value.composer.text
+            CoroutineScope(Dispatchers.Main.immediate).launch {
+                draftStore.release(lease, text)
+            }
+        }
         super.onCleared()
     }
 
     private companion object {
         const val REPLY_FOLLOW_TIMEOUT_MILLIS = 60_000L
+        const val DRAFT_DEBOUNCE_MILLIS = 120L
         const val WAIT_TIMEOUT_MILLIS = 120_000L
     }
 

@@ -181,6 +181,33 @@ class ConversationCommandAcceptanceTest : ConversationTestBase() {
     }
 
     @Test
+    @DisplayName("AC-27.draft-clear-order an accepted send clears only after the pending save settles")
+    fun acceptedSendWaitsForDraftSave() = runTest(dispatcher) {
+        val h = Harness()
+        h.model.open(ConversationFixtures.session())
+        advanceUntilIdle()
+        val gate = CompletableDeferred<Unit>()
+        h.drafts.saveGate = gate
+        h.model.updateDraft("send immediately")
+        advanceUntilIdle()
+        assertEquals(listOf("save-start"), h.drafts.writeOrder)
+
+        h.model.submit()
+        advanceUntilIdle()
+        assertEquals(
+            listOf("save-start"),
+            h.drafts.writeOrder,
+            "the clear must wait for the in-flight save",
+        )
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(listOf("save-start", "save-finish", "clear"), h.drafts.writeOrder)
+        assertTrue(h.drafts.drafts.isEmpty())
+        cleanup(h)
+    }
+
+    @Test
     @DisplayName("AC-27.send-restart an unknown send restores its exact operation after restart")
     fun unknownSendRestoresAfterRestart() = runTest(dispatcher) {
         val drafts = FakeDraftPort()

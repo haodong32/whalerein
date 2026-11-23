@@ -91,12 +91,20 @@ class PendingInputViewModel(
 ) : ScreenModel<PendingInputUiState>(PendingInputUiState()) {
     private val diag = ConversationDiagnostics(diagnostics)
     private var loadedSession: SessionRef? = null
+    /**
+     * Items this client has already answered or resolved. A live collection can
+     * briefly contain them before the Host observation catches up; hiding them
+     * locally prevents an answered card from reappearing until the authoritative
+     * list drops the item once.
+     */
+    private val locallyResolvedItemIds = mutableSetOf<String>()
 
     fun open(session: SessionRef) {
         if (loadedSession == session) {
             return
         }
         loadedSession = session
+        locallyResolvedItemIds.clear()
         setState(PendingInputUiState(session = session))
         refresh()
     }
@@ -140,6 +148,21 @@ class PendingInputViewModel(
 
     fun openItem(itemId: String, origin: PendingFocusOrigin = PendingFocusOrigin.Historical) {
         val session = loadedSession ?: return
+        if (itemId in locallyResolvedItemIds) {
+            // A historical or deep-link entry can point at an item this client
+            // has already answered. Do not reopen a stale actionable sheet
+            // while the authoritative list is still catching up.
+            edit {
+                copy(
+                    focusedItemId = null,
+                    detail = PendingDetailUiState.Missing,
+                    sheetRequested = false,
+                    reviewedGuard = null,
+                    answers = emptyMap(),
+                )
+            }
+            return
+        }
         edit {
             copy(
                 focusedItemId = itemId,
@@ -213,6 +236,7 @@ class PendingInputViewModel(
     fun reject() = decide(ApprovalDecision.Reject)
 
     private fun decide(decision: ApprovalDecision) {
+        if (state.value.action is PendingActionUiState.InFlight) return
         val item = currentItem() as? PendingItem.Approval ?: return
         val reviewed = state.value.reviewedGuard ?: return
         if (reviewed != item.guard) {
@@ -246,6 +270,9 @@ class PendingInputViewModel(
     }
 
     fun submitAnswers() {
+        // A second tap while the first answer is in flight must not issue a
+        // duplicate command or clear the reviewed draft.
+        if (state.value.answerInFlight || state.value.action is PendingActionUiState.InFlight) return
         val item = currentItem() as? PendingItem.Questions ?: return
         val reviewed = state.value.reviewedGuard ?: return
         if (reviewed != item.guard) {
@@ -317,11 +344,19 @@ class PendingInputViewModel(
     fun currentItem(): PendingItem? = (state.value.detail as? PendingDetailUiState.Loaded)?.item
 
     private fun applyCollection(result: PendingListResult) {
+        val visibleItems = when (result) {
+            is PendingListResult.Current -> {
+                val liveIds = result.items.mapTo(mutableSetOf()) { it.itemId }
+                locallyResolvedItemIds.retainAll(liveIds)
+                result.items.filterNot { it.itemId in locallyResolvedItemIds }
+            }
+            else -> emptyList()
+        }
         val entry = when (result) {
-            is PendingListResult.Current -> if (result.items.isEmpty()) {
+            is PendingListResult.Current -> if (visibleItems.isEmpty()) {
                 PendingEntryUiState.CurrentEmpty
             } else {
-                PendingEntryUiState.Current(result.items)
+                PendingEntryUiState.Current(visibleItems)
             }
 
             PendingListResult.Unsupported -> PendingEntryUiState.Unsupported
@@ -333,7 +368,7 @@ class PendingInputViewModel(
             // must not leave a stale detail, guard or answer draft behind.
             val focusLost = result is PendingListResult.Current &&
                 focusedItemId != null &&
-                result.items.none { it.itemId == focusedItemId }
+                visibleItems.none { it.itemId == focusedItemId }
             copy(
                 entry = entry,
                 focusedItemId = if (focusLost) null else focusedItemId,
@@ -360,6 +395,7 @@ class PendingInputViewModel(
                     )
                 }
                 if (itemId != null) {
+                    locallyResolvedItemIds += itemId
                     removeItemLocally(itemId)
                 }
                 diag.info(
@@ -400,6 +436,7 @@ class PendingInputViewModel(
                     )
                 }
                 if (itemId != null) {
+                    locallyResolvedItemIds += itemId
                     removeItemLocally(itemId)
                 }
             }
