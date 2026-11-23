@@ -159,6 +159,9 @@ pub struct SessionSummaryView {
     pub cwd: String,
     /// True while the Source reports an active turn.
     pub running: bool,
+    /// The source's own default listing hides this Session. Clients hide
+    /// archived rows by default and may offer an archived view.
+    pub archived: bool,
     /// Source capabilities, when the Host reported them for this session.
     pub capabilities: Option<SessionCapabilitiesView>,
 }
@@ -171,6 +174,7 @@ impl From<SessionSummary> for SessionSummaryView {
             updated_at_unix_ms: value.updated_at_unix_ms,
             cwd: value.cwd,
             running: value.running,
+            archived: value.archived,
             capabilities: value.source_capabilities.map(SessionCapabilitiesView::from),
         }
     }
@@ -2083,8 +2087,10 @@ mod tests {
                 session_fork: true,
             }),
             queued_prompts: 0,
+            archived: true,
         });
         assert_eq!(session.updated_at_unix_ms, 2);
+        assert!(session.archived);
         assert_eq!(session.session_id, "s");
         assert!(session.running);
         let capabilities = session.capabilities.expect("capabilities");

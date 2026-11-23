@@ -55,6 +55,8 @@ enum L10nKey: String, CaseIterable, Sendable {
     case sessionsCached = "sessions.cached"
     case sessionsStatusIdle = "sessions.status.idle"
     case sessionsWorkspaceOther = "sessions.workspace.other"
+    case sessionsShowArchived = "sessions.showArchived"
+    case sessionsArchived = "sessions.archived"
     case hostsPicker = "hosts.picker"
     case sessionsUpdatedMinutes = "sessions.updatedMinutes"
     case sessionsUpdatedHours = "sessions.updatedHours"
@@ -525,6 +527,8 @@ enum L10n {
     static let sessionsCached = L10nKey.sessionsCached
     static let sessionsStatusIdle = L10nKey.sessionsStatusIdle
     static let sessionsWorkspaceOther = L10nKey.sessionsWorkspaceOther
+    static let sessionsShowArchived = L10nKey.sessionsShowArchived
+    static let sessionsArchived = L10nKey.sessionsArchived
     static let hostsPicker = L10nKey.hostsPicker
     static let sessionsUpdatedMinutes = L10nKey.sessionsUpdatedMinutes
     static let sessionsUpdatedHours = L10nKey.sessionsUpdatedHours

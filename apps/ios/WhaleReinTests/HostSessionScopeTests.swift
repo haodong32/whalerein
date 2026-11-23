@@ -49,6 +49,44 @@ struct HostSessionScopeTests {
         #expect(model.continueSession == nil)
     }
 
+    @Test("archived sessions stay hidden until the archived view is requested")
+    func archivedSessions() async {
+        let service = StubSessionService()
+        service.sessionsHandler = { _ in [
+            SessionSummary(sessionId: "live", title: "Live", updatedAtUnixMs: 300, cwd: "/work/a"),
+            SessionSummary(
+                sessionId: "archived",
+                title: "Archived",
+                updatedAtUnixMs: 200,
+                cwd: "/work/a",
+                archived: true
+            ),
+        ] }
+        let preferences = makePreferences()
+        preferences.update {
+            $0.lastHostId = "studio-mac"
+            $0.lastSessionId = "archived"
+        }
+        let model = SessionListModel(service: service, preferences: preferences)
+        await model.load(hostId: "studio-mac")
+
+        #expect(model.archivedCount == 1)
+        #expect(model.workspaceGroups.flatMap(\.sessions).map(\.sessionId) == ["live"])
+        // An archived last session is not offered for continuation while hidden.
+        #expect(model.continueSession == nil)
+
+        model.setShowsArchived(true)
+        #expect(model.workspaceGroups.flatMap(\.sessions).map(\.sessionId) == ["live", "archived"])
+        #expect(model.continueSession?.sessionId == "archived")
+        #expect(preferences.value.showsArchivedSessions)
+
+        // The choice survives a fresh model over the same preferences.
+        let restored = SessionListModel(service: service, preferences: preferences)
+        #expect(restored.showsArchived)
+        restored.setShowsArchived(false)
+        #expect(!preferences.value.showsArchivedSessions)
+    }
+
     @Test("an offline Host lists cached sessions with an explicit indicator")
     func cachedSessions() async {
         let service = StubSessionService()

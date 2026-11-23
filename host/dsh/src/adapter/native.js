@@ -100,6 +100,7 @@ export function normalizeSummary(summary) {
     origin: summary.origin ?? '',
     cursor: Number(summary.cursor ?? 0),
     queuedPrompts: Number(summary.queuedPrompts ?? 0),
+    archived: summary.archived === true,
   }
 }
 

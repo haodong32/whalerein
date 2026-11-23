@@ -88,7 +88,9 @@ extension AppShellModel {
             return
         }
 
-        let sessions = sessionList.sessions
+        // Launch restoration follows the switcher's visibility rule: an
+        // archived Session is not reopened unless the archived view is on.
+        let sessions = sessionList.visibleSessions
         guard !sessions.isEmpty else {
             rootState = .empty(.noSessions)
             return

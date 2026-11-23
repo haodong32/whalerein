@@ -8456,6 +8456,7 @@ type SessionSummary struct {
 	QueuedPrompts      uint32                 `protobuf:"varint,12,opt,name=queued_prompts,json=queuedPrompts,proto3" json:"queued_prompts,omitempty"`
 	HistoryCursor      string                 `protobuf:"bytes,13,opt,name=history_cursor,json=historyCursor,proto3" json:"history_cursor,omitempty"`
 	SourceCapabilities *SourceCapabilities    `protobuf:"bytes,14,opt,name=source_capabilities,json=sourceCapabilities,proto3" json:"source_capabilities,omitempty"`
+	Archived           bool                   `protobuf:"varint,11,opt,name=archived,proto3" json:"archived,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -8579,6 +8580,13 @@ func (x *SessionSummary) GetSourceCapabilities() *SourceCapabilities {
 		return x.SourceCapabilities
 	}
 	return nil
+}
+
+func (x *SessionSummary) GetArchived() bool {
+	if x != nil {
+		return x.Archived
+	}
+	return false
 }
 
 type SessionList struct {
@@ -14187,7 +14195,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x04Ping\x12-\n" +
 	"\x13client_time_unix_ms\x18\x01 \x01(\x03R\x10clientTimeUnixMs\"1\n" +
 	"\x04Pong\x12)\n" +
-	"\x11host_time_unix_ms\x18\x01 \x01(\x03R\x0ehostTimeUnixMs\"\xef\x03\n" +
+	"\x11host_time_unix_ms\x18\x01 \x01(\x03R\x0ehostTimeUnixMs\"\x8b\x04\n" +
 	"\x0eSessionSummary\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
@@ -14203,7 +14211,8 @@ const file_whalerein_proto_rawDesc = "" +
 	" \x01(\tR\x06origin\x12%\n" +
 	"\x0equeued_prompts\x18\f \x01(\rR\rqueuedPrompts\x12%\n" +
 	"\x0ehistory_cursor\x18\r \x01(\tR\rhistoryCursor\x12Q\n" +
-	"\x13source_capabilities\x18\x0e \x01(\v2 .whalerein.v1.SourceCapabilitiesR\x12sourceCapabilities\"G\n" +
+	"\x13source_capabilities\x18\x0e \x01(\v2 .whalerein.v1.SourceCapabilitiesR\x12sourceCapabilities\x12\x1a\n" +
+	"\barchived\x18\v \x01(\bR\barchived\"G\n" +
 	"\vSessionList\x128\n" +
 	"\bsessions\x18\x01 \x03(\v2\x1c.whalerein.v1.SessionSummaryR\bsessions\"R\n" +
 	"\x0fCommandAccepted\x12\x1d\n" +

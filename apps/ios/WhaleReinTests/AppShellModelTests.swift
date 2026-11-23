@@ -80,6 +80,43 @@ struct AppShellModelTests {
         #expect(preferences.value.lastSessionId == "s-002")
     }
 
+    @Test("launch skips an archived last session unless archived sessions are shown")
+    func archivedLastSessionIsSkipped() async {
+        let service = StubSessionService()
+        service.sessionsHandler = { _ in
+            [
+                SessionSummary(sessionId: "s-live", title: "Live", updatedAtUnixMs: 100, cwd: "/work/a"),
+                SessionSummary(
+                    sessionId: "s-archived",
+                    title: "Archived",
+                    updatedAtUnixMs: 200,
+                    cwd: "/work/a",
+                    archived: true
+                ),
+            ]
+        }
+        let (app, preferences) = makeApp(service: service) {
+            $0.paired = true
+            $0.lastHostId = "studio-mac"
+            $0.lastSessionId = "s-archived"
+        }
+
+        await app.bootstrapConversation()
+        #expect(app.conversation?.sessionId == "s-live")
+        #expect(!app.sessionList.showsArchived)
+
+        // The archived view makes the remembered Session eligible again.
+        let (restoredApp, restoredPreferences) = makeApp(service: service) {
+            $0.paired = true
+            $0.lastHostId = "studio-mac"
+            $0.lastSessionId = "s-archived"
+            $0.showsArchivedSessions = true
+        }
+        await restoredApp.bootstrapConversation()
+        #expect(restoredApp.conversation?.sessionId == "s-archived")
+        #expect(restoredPreferences.value.lastSessionId == "s-archived")
+    }
+
     @Test("a missing last session falls back to the most recent session and persists it")
     func missingLastSessionFallsBack() async {
         let service = StubSessionService()

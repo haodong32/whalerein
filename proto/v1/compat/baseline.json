@@ -5832,6 +5832,13 @@
           "type": "TYPE_STRING"
         },
         {
+          "json_name": "archived",
+          "name": "archived",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
           "json_name": "queuedPrompts",
           "name": "queued_prompts",
           "number": 12,
