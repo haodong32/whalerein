@@ -62,14 +62,6 @@ actor DraftService {
         )
     }
 
-    func update(_ lease: Lease, text: String) {
-        guard var session = sessions[lease.key],
-              session.generation == lease.generation else { return }
-        session.text = text
-        session.revision &+= 1
-        sessions[lease.key] = session
-    }
-
     func setAndFlush(_ lease: Lease, text: String) async throws {
         guard var session = sessions[lease.key],
               session.generation == lease.generation else { return }
@@ -136,12 +128,7 @@ actor DraftService {
     /// Final save for a closing model. If a replacement has claimed the same
     /// session, the generation check makes this a no-op.
     func release(_ lease: Lease, text: String) async throws {
-        guard var session = sessions[lease.key],
-              session.generation == lease.generation else { return }
-        session.text = text
-        session.revision &+= 1
-        sessions[lease.key] = session
-        try await flush(lease)
+        try await setAndFlush(lease, text: text)
     }
 
     private func persist(_ lease: Lease, text: String, revision: UInt64) async throws {

@@ -24,10 +24,6 @@ struct QuestionCardView: View {
         activeReview ?? settledReview
     }
 
-    private var isReviewing: Bool {
-        effectiveReview != nil
-    }
-
     /// The reviewed snapshot stays visible after submission. Its inputs and
     /// actions are frozen until the Host observation removes or replaces the
     /// batch, so the answered card cannot fall back to an editable blank state.
@@ -50,14 +46,7 @@ struct QuestionCardView: View {
                 return nil
             }
         }
-        switch model.questionAnswerState {
-        case .submitted:
-            return .questionsAnswerSubmitted
-        case .uncertain:
-            return .questionsAnswerUncertain
-        case .idle, .submitting, .failed:
-            return nil
-        }
+        return nil
     }
 
     var body: some View {

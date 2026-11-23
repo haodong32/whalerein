@@ -50,8 +50,7 @@ struct DraftOrderingTests {
         let claim = try await drafts.claim(hostId: "studio-mac", sessionId: "s-001")
         #expect(claim.text == "existing")
 
-        await drafts.update(claim.lease, text: "new text")
-        try await drafts.flush(claim.lease)
+        try await drafts.setAndFlush(claim.lease, text: "new text")
         #expect(await loadDraft(service) == "new text")
     }
 
@@ -61,9 +60,8 @@ struct DraftOrderingTests {
         let drafts = DraftService(service: service)
         let claim = try await drafts.claim(hostId: "studio-mac", sessionId: "s-001")
 
-        await drafts.update(claim.lease, text: "first")
-        await drafts.update(claim.lease, text: "latest")
-        try await drafts.flush(claim.lease)
+        try await drafts.setAndFlush(claim.lease, text: "first")
+        try await drafts.setAndFlush(claim.lease, text: "latest")
         #expect(await loadDraft(service) == "latest")
     }
 
@@ -73,8 +71,7 @@ struct DraftOrderingTests {
         let drafts = DraftService(service: service)
         let claim = try await drafts.claim(hostId: "studio-mac", sessionId: "s-001")
 
-        await drafts.update(claim.lease, text: "newer")
-        try await drafts.flush(claim.lease)
+        try await drafts.setAndFlush(claim.lease, text: "newer")
         try await drafts.clearIfCurrent(claim.lease, matching: "submitted")
         #expect(await loadDraft(service) == "newer")
     }
@@ -84,8 +81,7 @@ struct DraftOrderingTests {
         let service = StubSessionService()
         let drafts = DraftService(service: service)
         let first = try await drafts.claim(hostId: "studio-mac", sessionId: "s-001")
-        await drafts.update(first.lease, text: "first draft")
-        try await drafts.flush(first.lease)
+        try await drafts.setAndFlush(first.lease, text: "first draft")
 
         let second = try await drafts.claim(hostId: "studio-mac", sessionId: "s-001")
         #expect(second.text == "first draft")
@@ -93,8 +89,7 @@ struct DraftOrderingTests {
         try? await drafts.release(first.lease, text: "stale overwrite")
         #expect(await loadDraft(service) == "first draft")
 
-        await drafts.update(second.lease, text: "second draft")
-        try await drafts.flush(second.lease)
+        try await drafts.setAndFlush(second.lease, text: "second draft")
         #expect(await loadDraft(service) == "second draft")
     }
 
@@ -105,8 +100,7 @@ struct DraftOrderingTests {
         let claim = try? await drafts.claim(hostId: "studio-mac", sessionId: "s-001")
         guard let claim else { return }
 
-        await drafts.update(claim.lease, text: "submitted")
-        let save = Task { try? await drafts.flush(claim.lease) }
+        let save = Task { try? await drafts.setAndFlush(claim.lease, text: "submitted") }
         await service.saveGate.waitUntilStarted()
         let clear = Task { try? await drafts.clearIfCurrent(claim.lease, matching: "submitted") }
         await pump(20)

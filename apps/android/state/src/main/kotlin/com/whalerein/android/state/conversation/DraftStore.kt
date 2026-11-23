@@ -22,13 +22,13 @@ class DraftStore(private val port: DraftPort) {
         var generation: Long = 0,
         var text: String = "",
         var revision: Long = 0,
-        var persisted: String? = null,
         val mutex: Mutex = Mutex(),
     )
 
     private val entries = mutableMapOf<SessionRef, Entry>()
 
-    private fun entry(session: SessionRef): Entry = entries.getOrPut(session) { Entry() }
+    private fun entry(session: SessionRef): Entry =
+        synchronized(entries) { entries.getOrPut(session) { Entry() } }
 
     suspend fun claim(session: SessionRef): Outcome<Claim> {
         val entry = entry(session)
@@ -39,7 +39,6 @@ class DraftStore(private val port: DraftPort) {
                 is Outcome.Success -> {
                     val text = loaded.value.orEmpty()
                     entry.text = text
-                    entry.persisted = loaded.value
                     Outcome.Success(Claim(Lease(session, entry.generation), loaded.value))
                 }
 
@@ -66,10 +65,7 @@ class DraftStore(private val port: DraftPort) {
             }
             entry.text = text
             when (val saved = port.save(lease.session, text)) {
-                is Outcome.Success -> {
-                    entry.persisted = text
-                    Outcome.Success(Unit)
-                }
+                is Outcome.Success -> Outcome.Success(Unit)
 
                 is Outcome.Failure -> saved
                 is Outcome.Unconfirmed -> saved
@@ -88,7 +84,6 @@ class DraftStore(private val port: DraftPort) {
             when (val cleared = port.clear(lease.session)) {
                 is Outcome.Success -> {
                     entry.text = ""
-                    entry.persisted = null
                     Outcome.Success(Unit)
                 }
 
