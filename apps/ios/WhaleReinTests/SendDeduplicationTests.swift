@@ -76,6 +76,121 @@ struct SendDeduplicationTests {
         #expect(model.messages[0].messageId == "msg-core-2")
     }
 
+    @Test("a reconnect reset keeps an accepted optimistic row until its echo")
+    func resetKeepsAcceptedOptimisticRow() async {
+        let service = StubSessionService()
+        service.sendHandler = { _, _, _, delivery in
+            CommandReceipt(
+                commandId: "cmd-reset-keep",
+                requestId: "req-reset-keep",
+                status: .accepted,
+                delivery: delivery
+            )
+        }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "still pending"
+        await model.send()
+        #expect(model.messages.last?.messageId == "local-cmd-reset-keep")
+
+        model.handle(
+            envelope(
+                .reset(messages: [userMessage(id: "old-1", text: "earlier")], approvals: []),
+                sequence: 2
+            )
+        )
+        #expect(model.messages.map(\.messageId) == ["old-1", "local-cmd-reset-keep"])
+    }
+
+    @Test("a reset snapshot that already contains the committed echo does not duplicate it")
+    func resetDropsOptimisticWhenEchoIsInSnapshot() async {
+        let service = StubSessionService()
+        service.sendHandler = { _, _, _, delivery in
+            CommandReceipt(
+                commandId: "cmd-reset-echo",
+                requestId: "req-reset-echo",
+                status: .accepted,
+                delivery: delivery
+            )
+        }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "already committed"
+        await model.send()
+
+        model.handle(
+            envelope(
+                .reset(messages: [userMessage(id: "msg-committed", text: "already committed")], approvals: []),
+                sequence: 2
+            )
+        )
+        #expect(model.messages.map(\.messageId) == ["msg-committed"])
+    }
+
+    @Test("a reset with an older identical text keeps a second distinct optimistic send")
+    func resetKeepsRepeatedTextOptimisticRow() async {
+        let service = StubSessionService()
+        service.sendHandler = { _, _, _, delivery in
+            CommandReceipt(
+                commandId: "cmd-same-text",
+                requestId: "req-same-text",
+                status: .accepted,
+                delivery: delivery
+            )
+        }
+        let model = await makeStartedConversation(service: service)
+        model.handle(
+            envelope(
+                .reset(messages: [userMessage(id: "old-same", text: "same")], approvals: []),
+                sequence: 1
+            )
+        )
+        model.draft = "same"
+        await model.send()
+
+        model.handle(
+            envelope(
+                .reset(messages: [userMessage(id: "old-same", text: "same")], approvals: []),
+                sequence: 2
+            )
+        )
+        #expect(model.messages.map(\.messageId) == ["old-same", "local-cmd-same-text"])
+    }
+
+    @Test("a reset whose snapshot adds the committed identical text drops the optimistic row")
+    func resetDropsRepeatedTextWhenEchoCountGrows() async {
+        let service = StubSessionService()
+        service.sendHandler = { _, _, _, delivery in
+            CommandReceipt(
+                commandId: "cmd-same-echo",
+                requestId: "req-same-echo",
+                status: .accepted,
+                delivery: delivery
+            )
+        }
+        let model = await makeStartedConversation(service: service)
+        model.handle(
+            envelope(
+                .reset(messages: [userMessage(id: "old-same", text: "same")], approvals: []),
+                sequence: 1
+            )
+        )
+        model.draft = "same"
+        await model.send()
+
+        model.handle(
+            envelope(
+                .reset(
+                    messages: [
+                        userMessage(id: "old-same", text: "same"),
+                        userMessage(id: "new-same", text: "same")
+                    ],
+                    approvals: []
+                ),
+                sequence: 2
+            )
+        )
+        #expect(model.messages.map(\.messageId) == ["old-same", "new-same"])
+    }
+
     @Test("a duplicate echo cannot add a second committed row")
     func duplicateEchoIgnored() async {
         let service = StubSessionService()

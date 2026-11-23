@@ -602,14 +602,16 @@ func makeStartedConversation(
     hostId: String = "studio-mac",
     sessionId: String = "s-001",
     title: String = "Release checklist",
-    connectivity: HostConnectivityModel? = nil
+    connectivity: HostConnectivityModel? = nil,
+    drafts: DraftService? = nil
 ) async -> ConversationModel {
     let model = ConversationModel(
         hostId: hostId,
         sessionId: sessionId,
         sessionTitle: title,
         service: service,
-        connectivity: connectivity ?? makeTestConnectivity(hostIds: [hostId])
+        connectivity: connectivity ?? makeTestConnectivity(hostIds: [hostId]),
+        drafts: drafts
     )
     await model.start()
     await pump(160)

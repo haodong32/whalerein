@@ -60,6 +60,7 @@ struct LaunchOptions: Sendable {
     var keychainLocked = false
     /// Deliver a deterministic pending question with the first watch.
     var questionsOnOpen = false
+    var delayQuestionRemoval = false
     /// Select deterministic Cloud sign-in and directory fixtures.
     var seedCloudSignedIn = false
     /// Return a different account after a sign-out so a UI test can prove a
@@ -128,6 +129,7 @@ struct LaunchOptions: Sendable {
         self.diagnosticsFailure = fixture.diagnosticsFailure
         self.keychainLocked = launch.keychainLocked
         self.questionsOnOpen = fixture.questionsOnOpen
+        self.delayQuestionRemoval = fixture.delayQuestionRemoval
         self.seedCloudSignedIn = fixture.cloudSignedIn
         self.cloudSwitchAccounts = fixture.cloudSwitchAccounts
         self.cloudStartFailure = fixture.cloudStartFailure

@@ -89,6 +89,9 @@ struct FixtureScenario: Equatable, Sendable {
     var diagnosticsFailure = false
     /// Deliver a deterministic pending question with the first watch.
     var questionsOnOpen = false
+    /// Keep an answered question batch observable for a moment so the UI test
+    /// can assert the submitted card stays read-only until the Host removes it.
+    var delayQuestionRemoval = false
     /// Select deterministic Cloud sign-in and directory fixtures.
     var cloudSignedIn = false
     /// Return a different account after a sign-out so a UI test can prove a

@@ -80,6 +80,7 @@ struct QueueWaitInputTests {
         await model.queue.refresh()
         #expect(model.queue.freshness == .stale)
         #expect(model.queue.items == [item])
+        #expect(model.queue.running, "an unavailable read must not prove the run stopped")
 
         // An unsupported Source is explicit and never an authoritative empty.
         service.pendingQueueHandler = { _, _ in

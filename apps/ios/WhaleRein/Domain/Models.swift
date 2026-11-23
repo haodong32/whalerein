@@ -550,7 +550,11 @@ enum AttemptOutcome: String, Codable, Sendable {
 }
 
 enum MessageEvent: Sendable {
+    /// A replaced local cache snapshot. The questions facet remains valid.
     case reset(messages: [ConversationMessage], approvals: [Approval])
+    /// A fresh Core watch baseline. Cached history is only a seed; the old
+    /// question observation is no longer authoritative.
+    case watchReset(messages: [ConversationMessage], approvals: [Approval])
     case message(ConversationMessage)
     case replace(message: ConversationMessage)
     case preview(attemptId: String, text: String, replace: Bool, incomplete: Bool)

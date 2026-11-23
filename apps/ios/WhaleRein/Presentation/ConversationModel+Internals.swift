@@ -20,30 +20,31 @@ extension ConversationModel {
     }
 
     func draftChanged() {
+        guard let lease = draftLease else { return }
         draftSaveTask?.cancel()
         let text = draft
-        let hostId = hostId
-        let sessionId = sessionId
-        let service = service
         draftSaveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, let self else { return }
             do {
-                try await service.saveDraft(hostId: hostId, sessionId: sessionId, text: text)
+                try await self.drafts.setAndFlush(lease, text: text)
                 guard !Task.isCancelled else { return }
-                self?.draftPersistenceErrorKey = nil
+                self.draftPersistenceErrorKey = nil
             } catch {
                 guard !Task.isCancelled else { return }
-                self?.draftPersistenceErrorKey = .errorDraftUnavailable
+                self.draftPersistenceErrorKey = .errorDraftUnavailable
             }
         }
     }
 
     func persistDraftNow() async {
-        draftSaveTask?.cancel()
+        let pending = draftSaveTask
+        pending?.cancel()
         draftSaveTask = nil
+        _ = await pending?.value
+        guard let lease = draftLease else { return }
         do {
-            try await service.saveDraft(hostId: hostId, sessionId: sessionId, text: draft)
+            try await drafts.setAndFlush(lease, text: draft)
             draftPersistenceErrorKey = nil
         } catch {
             // The typed text stays in memory; only its restart durability is
@@ -147,7 +148,7 @@ extension ConversationModel {
                 if receipt.status == .confirmed || receipt.status == .accepted {
                     let submitted = inFlightSendText
                     if let submitted, draftMatchesSubmission(submitted) {
-                        clearDraftAfterSubmission()
+                        clearDraftAfterSubmission(matching: submitted)
                     }
                 }
                 inFlightSendText = nil
@@ -214,16 +215,13 @@ extension ConversationModel {
         return earlyCommandStatuses.removeValue(forKey: commandId)
     }
 
-    func clearDraftAfterSubmission() {
+    func clearDraftAfterSubmission(matching submittedText: String) {
         draft = ""
-        draftSaveTask?.cancel()
-        draftSaveTask = nil
-        let hostId = hostId
-        let sessionId = sessionId
-        let service = service
+        guard let lease = draftLease else { return }
         Task { [weak self] in
             do {
-                try await service.clearDraft(hostId: hostId, sessionId: sessionId)
+                try await self?.drafts.setAndFlush(lease, text: submittedText)
+                try await self?.drafts.clearIfCurrent(lease, matching: submittedText)
                 self?.draftPersistenceErrorKey = nil
             } catch {
                 self?.draftPersistenceErrorKey = .errorDraftUnavailable
@@ -232,11 +230,16 @@ extension ConversationModel {
     }
 
     func clearDraftNow() async {
+        let submittedDraft = draft
         draft = ""
-        draftSaveTask?.cancel()
+        let pending = draftSaveTask
+        pending?.cancel()
         draftSaveTask = nil
+        _ = await pending?.value
+        guard let lease = draftLease else { return }
         do {
-            try await service.clearDraft(hostId: hostId, sessionId: sessionId)
+            try await drafts.setAndFlush(lease, text: submittedDraft)
+            try await drafts.clearIfCurrent(lease, matching: submittedDraft)
             draftPersistenceErrorKey = nil
         } catch {
             draftPersistenceErrorKey = .errorDraftUnavailable

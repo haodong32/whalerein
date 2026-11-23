@@ -64,11 +64,10 @@ struct ConversationDraftStorageFailureTests {
         await model.restartWatch()
 
         #expect(service.startWatchCalls.count == 2)
-        #expect(model.draftLoadErrorKey == .errorDraftUnavailable)
-        #expect(model.draftStorageWarningKey == .conversationDraftStorageWarning)
-        // The in-memory text survives because the read failure is not treated
-        // as authoritative empty content.
+        // The draft belongs to the model/coordinator; a watch restart never
+        // rereads and overwrites the in-memory text.
         #expect(model.draft == "typed before restart")
+        #expect(model.draftLoadErrorKey == nil)
     }
 
     @Test("an explicit save failure keeps the text and reports restart risk")

@@ -77,9 +77,10 @@ final class ConversationQueueController {
             let snapshot = try await service.pendingQueue(hostId: hostId, sessionId: sessionId)
             lastRefreshError = nil
             guard snapshot.available else {
-                // An unavailable answer never establishes an empty queue.
+                // An unavailable answer never establishes an empty queue and
+                // never proves the turn stopped; keep the last known running
+                // state with the last known list.
                 freshness = items.isEmpty ? .unavailable : .stale
-                running = false
                 return
             }
             items = snapshot.items
@@ -93,7 +94,7 @@ final class ConversationQueueController {
             } else {
                 freshness = items.isEmpty ? .unavailable : .stale
             }
-            running = false
+            // A failed read is not evidence that the run ended.
         }
     }
 

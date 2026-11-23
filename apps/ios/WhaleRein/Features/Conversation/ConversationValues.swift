@@ -121,7 +121,14 @@ enum ContentProvenance: Equatable, Sendable {
 /// draft, the answer submission and the truncated-page indicator.
 struct QuestionFacet: Equatable, Sendable {
     var questions: QuestionsState = .loading
+    /// The review the user is currently editing.
     var review: QuestionReview?
+    /// Reviews already submitted for a batch but not yet removed by the Host.
+    var settledReviews: [String: QuestionReview] = [:]
+    /// Terminal answer state per settled batch, so several cards can stay
+    /// truthful while the observation catches up.
+    var settledAnswers: [String: QuestionAnswerState] = [:]
+    var answeredBatchId: String?
     var answer: QuestionAnswerState = .idle
     var cancelReceipt: QuestionCancelReceipt?
     var errorKey: L10nKey?

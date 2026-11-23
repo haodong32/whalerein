@@ -6,6 +6,89 @@ import Foundation
 extension ConversationModel {
     // MARK: - Events
 
+    /// Replaces the transcript from a cache snapshot or a fresh watch baseline.
+    /// A watch baseline also invalidates the old question observation, while a
+    /// cache-only replacement leaves the live question stream in place.
+    private func applyReset(
+        messages: [ConversationMessage],
+        approvals: [Approval],
+        resetQuestions: Bool
+    ) {
+        let carriedOptimistic = optimisticMessages
+        let optimisticRows = state.messages.filter {
+            optimisticMessages[$0.messageId] != nil
+        }
+        var previousUserTextCounts: [String: Int] = [:]
+        for message in state.messages
+        where message.role == .user && optimisticMessages[message.messageId] == nil {
+            let text = normalizedText(message.plainText)
+            previousUserTextCounts[text, default: 0] += 1
+        }
+        state.messages = messages
+        liveMessageIds = Set(messages.map(\.messageId))
+        pagedMessageIds.removeAll()
+        historyGeneration &+= 1
+        isLoadingOlderHistory = false
+        // The new snapshot replaces the transcript, so every paged row is
+        // gone. Its continuation, projection and completion flag described
+        // the old traversal and must not suppress reaching those older
+        // messages from the new snapshot.
+        historyContinuation = nil
+        historyProjection = nil
+        historySource = nil
+        historyComplete = false
+        historyNeedsFreshTraversal = false
+        historyProvenance = nil
+        historyErrorKey = nil
+        liveToolActivities.removeAll()
+        reasoningPreviewText = nil
+        trustedPendingApprovalIds.removeAll()
+        approvalStatusRefresh.removeAll()
+        mergeApprovals(approvals, missingPendingState: .resolvedElsewhere)
+        // A reconnect reset can arrive after an accepted send but before
+        // its committed echo. Re-attach those optimistic rows instead of
+        // making the user's message vanish, unless the snapshot already
+        // contains the committed identity/text.
+        optimisticMessages = carriedOptimistic.filter { _, pending in
+            if let committed = pending.committedMessageId,
+               messages.contains(where: { $0.messageId == committed }) {
+                return false
+            }
+            let text = normalizedText(pending.text)
+            // Count identical committed user messages: one more than the
+            // previous transcript proves this send was already committed.
+            // An older message with the same text must not hide a second,
+            // distinct send.
+            let committedCount = messages.filter {
+                $0.role == .user && normalizedText($0.plainText) == text
+            }.count
+            return committedCount <= (previousUserTextCounts[text] ?? 0)
+        }
+        for row in optimisticRows where optimisticMessages[row.messageId] != nil {
+            if !state.messages.contains(where: { $0.messageId == row.messageId }) {
+                state.messages.append(row)
+            }
+        }
+        previewText = nil
+        previewAttemptId = nil
+        authoritativeRunEpoch += 1
+        state = ConversationReduce.reduce(state, .contentLoaded)
+        approvalClock = now()
+        scroll.reset()
+        restartApprovalTimer()
+
+        if resetQuestions {
+            questions = .loading
+            questionReview = nil
+            settledQuestionReviews.removeAll()
+            settledQuestionAnswers.removeAll()
+            questionErrorKey = nil
+            if case .submitted = questionAnswerState {
+                questionAnswerState = .idle
+            }
+        }
+    }
+
     func ensureSubscription() {
         guard consumeTask == nil else { return }
         consumeEvents()
@@ -37,35 +120,10 @@ extension ConversationModel {
 
         switch envelope.event {
         case .reset(let messages, let approvals):
-            state.messages = messages
-            liveMessageIds = Set(messages.map(\.messageId))
-            pagedMessageIds.removeAll()
-            historyGeneration &+= 1
-            isLoadingOlderHistory = false
-            // The new snapshot replaces the transcript, so every paged row is
-            // gone. Its continuation, projection and completion flag described
-            // the old traversal and must not suppress reaching those older
-            // messages from the new snapshot.
-            historyContinuation = nil
-            historyProjection = nil
-            historySource = nil
-            historyComplete = false
-            historyNeedsFreshTraversal = false
-            historyProvenance = nil
-            historyErrorKey = nil
-            liveToolActivities.removeAll()
-            reasoningPreviewText = nil
-            trustedPendingApprovalIds.removeAll()
-            approvalStatusRefresh.removeAll()
-            mergeApprovals(approvals, missingPendingState: .resolvedElsewhere)
-            optimisticMessages.removeAll()
-            previewText = nil
-            previewAttemptId = nil
-            authoritativeRunEpoch += 1
-            state = ConversationReduce.reduce(state, .contentLoaded)
-            approvalClock = now()
-            scroll.reset()
-            restartApprovalTimer()
+            applyReset(messages: messages, approvals: approvals, resetQuestions: false)
+
+        case .watchReset(let messages, let approvals):
+            applyReset(messages: messages, approvals: approvals, resetQuestions: true)
 
         case .message(let message):
             liveMessageIds.insert(message.messageId)
@@ -218,13 +276,89 @@ extension ConversationModel {
         questionDrafts = questionDrafts.filter { batchId, draft in
             guards[batchId] == draft.guardValue
         }
+        // Settled cards belong to one observed guard. A new guard or a removed
+        // batch releases its read-only snapshot; the global answer status is
+        // kept as the submission confirmation.
+        let settledBefore = settledQuestionReviews
+        let observedSettled = settledBefore.filter { batchId, review in
+            guards[batchId] == review.guardValue
+        }
+        settledQuestionReviews = observedSettled
+        settledQuestionAnswers = settledQuestionAnswers.filter { batchId, _ in
+            observedSettled[batchId] != nil
+        }
+        if let answered = answeredQuestionBatchId,
+           settledBefore[answered] != nil,
+           observedSettled[answered] == nil {
+            if guards[answered] == nil {
+                // The answered batch is gone. An uncertain command can no
+                // longer target a pending card and must not block new ones;
+                // a submitted banner stays as the confirmation.
+                switch questionAnswerState {
+                case .uncertain:
+                    questionAnswerState = .idle
+                    answeredQuestionBatchId = nil
+                case .submitted:
+                    answeredQuestionBatchId = nil
+                default:
+                    break
+                }
+            } else {
+                // The guard changed, not the batch. An uncertain command still
+                // owns its original cancel identity; a submitted receipt no
+                // longer describes the new question.
+                switch questionAnswerState {
+                case .submitted:
+                    questionAnswerState = .idle
+                    answeredQuestionBatchId = nil
+                default:
+                    break
+                }
+            }
+        }
         var reviewInvalidated = false
-        if let review = questionReview, guards[review.guardValue.batchID] != review.guardValue {
-            questionReview = nil
-            questionErrorKey = .questionsGuardChanged
-            reviewInvalidated = true
+        if let review = questionReview {
+            let batchID = review.guardValue.batchID
+            switch guards[batchID] {
+            case let observed? where observed != review.guardValue:
+                questionReview = nil
+                questionDrafts[batchID] = nil
+                switch questionAnswerState {
+                case .submitted:
+                    // A newer guard is a different question; return to an
+                    // answerable state instead of showing the old receipt.
+                    questionAnswerState = .idle
+                case .uncertain:
+                    // The original answer may still complete; keep its cancel
+                    // affordance and let recovery settle it.
+                    break
+                default:
+                    questionErrorKey = .questionsGuardChanged
+                    reviewInvalidated = true
+                }
+            case nil:
+                // The Host removed the answered batch. The card is gone, but
+                // keep the submitted banner as the answer confirmation.
+                questionReview = nil
+                questionDrafts[batchID] = nil
+                switch questionAnswerState {
+                case .submitted, .uncertain:
+                    break
+                default:
+                    questionErrorKey = .questionsGuardChanged
+                    reviewInvalidated = true
+                }
+            default:
+                break
+            }
         }
         questions = state
+        // An answered batch left and a different one is now pending. Do not
+        // label the new card with the previous answer's confirmation.
+        if questionReview == nil, settledQuestionReviews.isEmpty,
+           !state.batches.isEmpty, case .submitted = questionAnswerState {
+            questionAnswerState = .idle
+        }
         if state.freshness == .current && !reviewInvalidated {
             questionErrorKey = nil
         }

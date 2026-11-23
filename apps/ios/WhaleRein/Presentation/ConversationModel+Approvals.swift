@@ -156,10 +156,20 @@ extension ConversationModel {
 
     /// A decided local card must never be downgraded back to pending by an
     /// older pending-only refresh. A server terminal state with a newer
-    /// version still wins.
+    /// version still wins; a locally unavailable or expired card may recover
+    /// when the Host reports it pending again.
     func shouldAccept(_ server: Approval, over local: Approval) -> Bool {
         guard local.state.isTerminal else { return true }
-        if server.state == .pending { return false }
+        if server.state == .pending {
+            switch local.state {
+            case .unavailable, .expired:
+                return true
+            case .changed:
+                return server.version > local.version
+            default:
+                return false
+            }
+        }
         return server.version >= local.version
     }
 
@@ -192,17 +202,9 @@ extension ConversationModel {
         isReconnecting = true
         defer { isReconnecting = false }
         do {
-            // A draft read failure must not prevent the watch from restarting;
-            // the previous in-memory text remains authoritative for this run.
-            do {
-                let loadedDraft = try await service.loadDraft(hostId: hostId, sessionId: sessionId) ?? ""
-                draftLoadErrorKey = nil
-                if draft.isEmpty, !loadedDraft.isEmpty {
-                    draft = loadedDraft
-                }
-            } catch {
-                draftLoadErrorKey = .errorDraftUnavailable
-            }
+            // The draft is owned by this model and its DraftService lease.
+            // Restarting the watch must not re-read and overwrite in-memory
+            // text with a stale persisted value.
             let loaded = try await service.capabilities(hostId: hostId, sessionId: sessionId)
             state = ConversationReduce.reduce(state, .capabilitiesLoaded(loaded))
             try await service.startWatch(hostId: hostId, sessionId: sessionId)
