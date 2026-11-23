@@ -67,18 +67,42 @@ extension L10nKey {
         }
     }
 
-    static func connectionKey(for status: ConnectionStatus) -> L10nKey {
+    /// Conversation chrome label for the authoritative Host connection.
+    /// `unknown` is "connecting" because the monitor is about to open it; it
+    /// must never be shown as offline just because no state arrived yet.
+    static func connectionKey(for status: HostConnectionStatus) -> L10nKey {
         switch status {
-        case .offline:
-            return .conversationConnectionOffline
-        case .connecting:
+        case .unknown, .connecting:
             return .conversationConnectionConnecting
-        case .online:
+        case .connected:
             return .conversationConnectionOnline
         case .degraded:
             return .conversationConnectionDegraded
         case .reconnecting:
             return .conversationConnectionReconnecting
+        case .disconnected, .offline:
+            return .conversationConnectionOffline
+        case .unavailable(let code):
+            return hostConnectionErrorKey(for: code)
+        }
+    }
+
+    /// Host list row label. Rows keep the shorter presence wording while they
+    /// derive from the same Host status; terminal failures keep the actionable
+    /// error instead of collapsing to "offline".
+    /// Actionable text for a terminal Host connection failure.
+    static func hostConnectionErrorKey(for code: String) -> L10nKey {
+        switch code.lowercased() {
+        case "revoked":
+            return .errorRevoked
+        case "unauthorized":
+            return .errorUnauthorized
+        case "not_paired":
+            return .errorNotPaired
+        case "protocol_version_incompatible":
+            return .errorProtocolIncompatible
+        default:
+            return .errorUnavailable
         }
     }
 

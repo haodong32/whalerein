@@ -3078,6 +3078,23 @@
         }
       }
     },
+    "error.unauthorized": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This iPhone is not authorized for this Host. Pair again to continue."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此 iPhone 未获此 Host 授权。请重新配对以继续。"
+          }
+        }
+      }
+    },
     "error.revoked": {
       "extractionState": "manual",
       "localizations": {

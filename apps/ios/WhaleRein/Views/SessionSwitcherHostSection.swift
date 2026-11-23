@@ -96,7 +96,7 @@ struct SessionSwitcherHostSection: View {
             }
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: currentHost?.online == true ? "desktopcomputer" : "wifi.slash")
+                Image(systemName: currentHostSymbol)
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
@@ -123,18 +123,29 @@ struct SessionSwitcherHostSection: View {
 
     private var currentHost: HostSummary? {
         models.hosts.hosts.first { $0.hostId == models.hosts.selectedHostId }
-            ?? models.hosts.hosts.first(where: \.online)
+            ?? models.hosts.hosts.first { hostStatus($0).isOnline }
             ?? models.hosts.hosts.first
+    }
+
+    /// One authoritative status: the Host connection once a snapshot exists,
+    /// then the discovery presence hint only before the first snapshot.
+    private func hostStatus(_ host: HostSummary) -> HostConnectionStatus {
+        models.connectivity.status(for: host.hostId, fallbackOnline: host.online)
+    }
+
+    private var currentHostSymbol: String {
+        guard let host = currentHost else { return "wifi.slash" }
+        return hostStatus(host).symbol
     }
 
     private var hostStatusText: String {
         guard let host = currentHost else { return "" }
-        return host.online ? L10n.hostsOnline.string : L10n.hostsOffline.string
+        return hostStatus(host).presenceKey.string
     }
 
     private var hostPickerAccessibilityValue: String {
         guard let host = currentHost else { return "" }
-        var parts = [host.hostId, host.online ? L10n.hostsOnline.string : L10n.hostsOffline.string]
+        var parts = [host.hostId, hostStatus(host).presenceKey.string]
         if models.hosts.selectedHostId == host.hostId {
             parts.append(L10n.hostsSelected.string)
         }

@@ -115,7 +115,7 @@ extension SessionSwitcherModels {
     /// first online Host, then the first Host.
     var currentHost: HostSummary? {
         hosts.hosts.first { $0.hostId == hosts.selectedHostId }
-            ?? hosts.hosts.first(where: \.online)
+            ?? hosts.hosts.first { connectivity.status(for: $0.hostId, fallbackOnline: $0.online).isOnline }
             ?? hosts.hosts.first
     }
 }

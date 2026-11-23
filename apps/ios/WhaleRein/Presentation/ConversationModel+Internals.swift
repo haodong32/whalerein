@@ -279,7 +279,7 @@ extension ConversationModel {
         let delay: Duration
         if remaining > 0 {
             delay = .milliseconds(max(50, Int(remaining * 1000)))
-        } else if fastVerification && connection.isOnline && !allTrusted {
+        } else if fastVerification && connectivity.isOnline(hostId) && !allTrusted {
             delay = .milliseconds(250)
         } else {
             delay = .seconds(30)

@@ -55,6 +55,7 @@ pub use crate::account::{
 pub use crate::attachments::{
     AttachmentLimits, AttachmentReference, DownloadOutcome, DownloadProgress, DownloadRequest,
 };
+pub use crate::connection::ConnectionSnapshot;
 pub use crate::diagnostics::journal::{
     DiagnosticContext, DiagnosticEvent, DiagnosticKind, DiagnosticLevel, DiagnosticSink,
 };

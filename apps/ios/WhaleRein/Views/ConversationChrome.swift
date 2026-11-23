@@ -38,3 +38,37 @@ struct TopTitlebarWash: View {
         .accessibilityHidden(true)
     }
 }
+
+/// One authoritative Host connection, shown once next to the session title.
+/// The composer keeps only session-scoped exceptions (watch ended, cached
+/// transcript), so this is the single place the conversation reports Host
+/// status.
+struct HostConnectionStatusChrome: View {
+    let status: HostConnectionStatus
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.caption2)
+                .accessibilityHidden(true)
+            Text(L10nKey.connectionKey(for: status).key)
+                .font(.caption2)
+        }
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("host.connectionStatus")
+        .accessibilityLabel(Text(L10n.conversationTitle.key))
+        .accessibilityValue(Text(L10nKey.connectionKey(for: status).string))
+    }
+
+    private var symbol: String {
+        switch status {
+        case .connected:
+            "checkmark.circle"
+        case .unknown, .connecting, .degraded, .reconnecting:
+            "arrow.triangle.2.circlepath"
+        case .disconnected, .offline, .unavailable:
+            status.symbol
+        }
+    }
+}

@@ -22,6 +22,20 @@ struct ConversationRecoveryTests {
         SessionEventEnvelope(hostId: "studio-mac", sessionId: "s-001", sequence: sequence, event: event)
     }
 
+    private func hostEnvelope(state: String, code: String? = nil) -> SessionEventEnvelope {
+        SessionEventEnvelope(
+            hostId: "studio-mac",
+            sessionId: "",
+            sequence: 1,
+            event: .hostConnection(
+                hostId: "studio-mac",
+                state: state,
+                code: code,
+                sinceUnixMs: 0
+            )
+        )
+    }
+
     // MARK: - IOS-07 watch recovery
 
     @Test("a watch-ended conversation disables Send and reconnects on demand")
@@ -35,17 +49,20 @@ struct ConversationRecoveryTests {
         model.handle(envelope(.watchEnded(reason: "ended"), sequence: 2))
         #expect(model.watchEnded)
         #expect(!model.canSend, "Send must be disabled while the watch has ended")
-        #expect(model.connection == .offline)
+        // A session watch ending does not make the Host connection offline.
+        #expect(model.connectivity.status(for: "studio-mac") == .connected)
 
         await model.reconnectWatch()
 
         #expect(!model.watchEnded)
         #expect(service.startWatchCalls.count == 2)
         #expect(model.lastAppliedSequence == -1)
+        // Reconnecting a watch does not fabricate a Host status either.
+        #expect(model.connectivity.status(for: "studio-mac") == .connected)
 
         model.handle(envelope(.reset(messages: [], approvals: []), sequence: 1))
         #expect(model.loadState == .loaded)
-        #expect(model.connection == .online)
+        #expect(model.canSend)
     }
 
     // MARK: - IOS-08 / APPR-16 approval expiry
@@ -75,6 +92,7 @@ struct ConversationRecoveryTests {
             sessionId: "s-001",
             sessionTitle: "Release checklist",
             service: service,
+            connectivity: makeTestConnectivity(),
             now: { clock.date }
         )
         await model.start()
@@ -111,7 +129,7 @@ struct ConversationRecoveryTests {
         model.handle(envelope(.reset(messages: [], approvals: [approval]), sequence: 1))
         #expect(model.isApprovalActionable(approval))
 
-        model.handle(envelope(.connection(hostId: "studio-mac", status: .offline), sequence: 2))
+        model.connectivity.handle(hostEnvelope(state: "offline"))
         #expect(!model.isApprovalActionable(approval))
         #expect(model.approvalActionDisabledReasonKey == .approvalOffline)
 
@@ -119,7 +137,7 @@ struct ConversationRecoveryTests {
         #expect(service.resolveCalls.isEmpty, "An offline decision must not be sent")
         #expect(model.approvalErrorKey == .approvalOffline)
 
-        model.handle(envelope(.connection(hostId: "studio-mac", status: .online), sequence: 3))
+        model.connectivity.handle(hostEnvelope(state: "connected"))
         #expect(model.isApprovalActionable(approval))
     }
 

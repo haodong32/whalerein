@@ -16,6 +16,7 @@ extension AppShellModel {
             sessionId: session.sessionId,
             sessionTitle: session.title,
             service: service,
+            connectivity: connectivity,
             onFatalError: { [weak self] code in
                 guard let self, self.isCurrentActivation(generation) else { return }
                 self.handleConversationFatal(code)
@@ -146,6 +147,7 @@ extension AppShellModel {
         isOfflineCached = false
         resumeMarker = nil
         didBootstrap = false
+        connectivity.reset()
         hostList.reset()
         sessionList.reset()
         pairing.reset()

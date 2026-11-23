@@ -12,7 +12,6 @@ import Foundation
 /// The one state value of the conversation screen. Supporting dimensions live
 /// in `ConversationValues.swift`.
 struct ConversationState: Equatable, Sendable {
-    var connection: ConnectionStatus = .offline
     var capabilities: SessionCapabilities = .idle
     var lifecycle: CommandLifecycle = .idle
     var queue: QueueState = .unavailable

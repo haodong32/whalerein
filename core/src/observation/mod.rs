@@ -20,13 +20,13 @@ use whalerein_proto::{
     RefreshWatches, UnwatchSession, WatchSession,
 };
 
-use crate::access::{DeliveryClass, DeviceMqttClient, MqttConnectionEvent};
+use crate::access::DeliveryClass;
 use crate::api::core::watch::{SinkFuture, UpdateSink};
 use crate::api::{Cancellation, ObservationInterests, SessionEvent, SessionEventPayload};
 use crate::api::{Core, CoreError, CoreResult, QuestionView};
+use crate::connection::SubscriptionGuard;
 use crate::conversation::{Conversation, ViewUpdate};
 use crate::runtime::ConnectionState;
-use crate::security::load_device_token;
 use crate::session::SessionKey;
 use crate::sync::BatchOutcome;
 use crate::util::random_id;
@@ -164,31 +164,26 @@ impl Drop for WatchGuard {
     }
 }
 
+/// Session-side handles for the shared Host connection. Dropping the pump
+/// stops the region watch; the connection outlives it.
 struct Pump {
-    stop: Arc<AtomicBool>,
-    task: Option<JoinHandle<()>>,
+    renewal: Option<JoinHandle<()>>,
+    /// Keeps this observer registered with the shared connection.
+    _detach: SubscriptionGuard,
 }
 
 impl Drop for Pump {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(task) = self.task.take() {
-            task.abort();
+        if let Some(renewal) = self.renewal.take() {
+            renewal.abort();
         }
     }
 }
 
 impl Pump {
     async fn finish(mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(mut task) = self.task.take() {
-            if tokio::time::timeout(Duration::from_millis(500), &mut task)
-                .await
-                .is_err()
-            {
-                task.abort();
-                let _ = task.await;
-            }
+        if let Some(renewal) = self.renewal.take() {
+            renewal.abort();
         }
     }
 }
@@ -644,162 +639,56 @@ async fn run_connection(
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
 ) -> CoreResult<End> {
     let channel = core.ensure_channel(&key.host_id, fresh).await?;
-    let config = core.require_config()?;
-    // The secure channel is only one part of observation. Until the device MQTT
-    // subscription and baseline are ready, report reconnecting rather than
-    // online, so a broker outage cannot look healthy through HTTPS alone.
-    if fresh {
-        let _ = core
-            .runtime
-            .set_state(&key.host_id, ConnectionState::Reconnecting);
-    }
+    // The transport belongs to the Host, not to this session. Attaching here
+    // only subscribes to it; the connection keeps running for other sessions
+    // and for the app-level monitor.
     let regional = core.cloud_transport().await?;
-    let token = match &regional {
-        Some(session) => session.token.clone(),
-        None => load_device_token(core.secret_store(), &config.device_id)?
-            .ok_or(CoreError::NotPaired)?,
-    };
-    let mut client = DeviceMqttClient::with_diagnostics(
-        core.mqtt_settings(&config)?,
-        &key.host_id,
-        &config.device_id,
-        token,
-        core.diagnostics.clone(),
-    );
-    let session_id = regional.map(|session| session.id);
-    if let Some(id) = &session_id {
-        client = client.with_cloud_session(id.clone());
-    }
-    // Snapshot attach can take several pages; the control buffer must absorb
-    // the committed frames that arrive meanwhile. Live previews use their own
-    // bounded queue so a preview burst or drop can never displace control.
-    let (control_tx, control_rx) = mpsc::channel(1024);
-    let (live_tx, live_rx) = mpsc::channel(1024);
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let mut ready_tx = Some(ready_tx);
-    let stop = Arc::new(AtomicBool::new(false));
-    let task_stop = stop.clone();
-    let runtime = core.runtime.clone();
-    let state_host = key.host_id.clone();
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let task_interrupted = interrupted.clone();
-    let queued = Arc::new(AtomicUsize::new(0));
-    let task_queued = queued.clone();
-    let live_queued = Arc::new(AtomicUsize::new(0));
-    let task_live_queued = live_queued.clone();
-    let error = Arc::new(Mutex::new(None));
-    let task_error = error.clone();
-    let overflow = Arc::new(AtomicBool::new(false));
-    let task_overflow = overflow.clone();
-    let live_overflow = Arc::new(AtomicBool::new(false));
-    let task_live_overflow = live_overflow.clone();
-    let transport_core = core.clone();
-    let event_queue_bytes = core.transport_budget().reserved_bytes as usize;
-    // Live is derived state: bound it independently of control. A full live
-    // queue drops the newest preview and only marks the preview incomplete.
-    let live_queue_bytes = event_queue_bytes.min(256 * 1024);
-    let task = tokio::spawn(async move {
-        let stop_requested = || {
-            task_stop.load(Ordering::SeqCst)
-                || runtime.is_revoked()
-                || session_id.as_ref().is_some_and(|id| {
-                    transport_core.cloud_session_id().ok().flatten().as_ref() != Some(id)
-                })
-        };
-        let mqtt = client.run(
-            stop_requested,
-            |envelope| {
-                let bytes = envelope.encoded_len();
-                if task_queued.fetch_add(bytes, Ordering::SeqCst) + bytes > event_queue_bytes {
-                    task_queued.fetch_sub(bytes, Ordering::SeqCst);
-                    task_overflow.store(true, Ordering::SeqCst);
-                    return true;
-                }
-                if control_tx
-                    .try_send((DeliveryClass::Control, envelope.clone()))
-                    .is_err()
-                {
-                    task_queued.fetch_sub(bytes, Ordering::SeqCst);
-                    task_overflow.store(true, Ordering::SeqCst);
-                }
-                true
-            },
-            |envelope| {
-                let bytes = envelope.encoded_len();
-                if task_live_queued.fetch_add(bytes, Ordering::SeqCst) + bytes > live_queue_bytes {
-                    task_live_queued.fetch_sub(bytes, Ordering::SeqCst);
-                    task_live_overflow.store(true, Ordering::SeqCst);
-                    return true;
-                }
-                if live_tx
-                    .try_send((DeliveryClass::Live, envelope.clone()))
-                    .is_err()
-                {
-                    task_live_queued.fetch_sub(bytes, Ordering::SeqCst);
-                    task_live_overflow.store(true, Ordering::SeqCst);
-                }
-                true
-            },
-            // Result notices are command-scoped; the observation receiver
-            // ignores them instead of printing or fetching anything.
-            |_| true,
-            |state| match state {
-                MqttConnectionEvent::Subscribed => {
-                    if let Some(sender) = ready_tx.take() {
-                        let _ = sender.send(());
-                    }
-                }
-                MqttConnectionEvent::Disconnected => {
-                    task_interrupted.store(true, Ordering::SeqCst);
-                    // The transport is down now, not when the reconnect
-                    // loop happens to wake. Publish that immediately so a
-                    // connection poller cannot keep reporting online.
-                    let _ = runtime.set_state(&state_host, ConnectionState::Reconnecting);
-                }
-                _ => {}
-            },
-        );
-        let result = if let Some(id) = &session_id {
-            let renew = async {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    if stop_requested() {
+    let connection = core
+        .host_connection_with(&key.host_id, regional.clone())
+        .await?;
+    let (subscription, detach) = connection.subscribe();
+    let interrupted = subscription.interrupted.clone();
+    let overflow = subscription.overflow.clone();
+    let live_overflow = subscription.live_overflow.clone();
+    let error = subscription.error.clone();
+    let queued = subscription.queued.clone();
+    let live_queued = subscription.live_queued.clone();
+    let control_rx = subscription.control;
+    let live_rx = subscription.live;
+    connection.wait_ready(cancellation).await?;
+    // A cloud region change invalidates the token this transport connected
+    // with. The watch notices it and closes the shared connection; the
+    // binding re-attaches when the session settles.
+    let renewal = regional.map(|session| {
+        let core = core.clone();
+        let host_id = key.host_id.clone();
+        let expected = session.id;
+        let access_url = core
+            .require_config()
+            .map(|config| config.access_url)
+            .unwrap_or_default();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                match core.cloud_transport().await {
+                    Ok(Some(active))
+                        if active.id == expected
+                            && active.permission.as_ref().is_some_and(|permit| {
+                                permit.access_origin.as_str() == access_url
+                            }) => {}
+                    Err(CoreError::Unavailable(_) | CoreError::Timeout) => {}
+                    _ => {
+                        core.disconnect_host(&host_id);
                         return;
                     }
-                    match transport_core.cloud_transport().await {
-                        Ok(Some(active))
-                            if active.id == *id
-                                && active.permission.as_ref().is_some_and(|permit| {
-                                    permit.access_origin.as_str() == config.access_url
-                                }) => {}
-                        Err(CoreError::Unavailable(_) | CoreError::Timeout) => {}
-                        _ => return,
-                    }
                 }
-            };
-            tokio::select! {
-                result = mqtt => result,
-                () = renew => Ok(()),
             }
-        } else {
-            mqtt.await
-        };
-        if let Err(failure) = result {
-            *task_error.lock().expect("watch error mutex") = Some(CoreError::from(failure));
-        }
-        task_interrupted.store(true, Ordering::SeqCst);
+        })
     });
     let pump = Pump {
-        stop,
-        task: Some(task),
+        renewal,
+        _detach: detach,
     };
-    if ready_rx.await.is_err() {
-        return Err(error
-            .lock()
-            .expect("watch error mutex")
-            .take()
-            .unwrap_or_else(|| CoreError::Unavailable("subscription unavailable".into())));
-    }
     let response = core
         .query(
             &key.host_id,

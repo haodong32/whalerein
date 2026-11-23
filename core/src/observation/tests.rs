@@ -494,7 +494,9 @@ async fn session_observation_ac_02_questions_only_never_reads_history() {
         ));
     let peer = tokio::spawn(async move {
         let _stream = subscribe(&listener).await;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Outlive the lease tick: this case is about a deterministic refusal,
+        // not about a transport loss competing with it.
+        tokio::time::sleep(Duration::from_secs(15)).await;
     });
     let mut observation = core
         .observe_session(&key, ObservationInterests::questions(), Cancellation::new())
@@ -566,7 +568,9 @@ async fn session_observation_ac_03_unavailable_questions_are_not_empty_current()
     let key = core.session_key("session-1").await.unwrap();
     let peer = tokio::spawn(async move {
         let _stream = subscribe(&listener).await;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Outlive the lease tick: this case is about a deterministic refusal,
+        // not about a transport loss competing with it.
+        tokio::time::sleep(Duration::from_secs(15)).await;
     });
     let mut observation = core
         .observe_session(&key, ObservationInterests::both(), Cancellation::new())
@@ -868,7 +872,9 @@ async fn session_observation_ac_18_terminal_error_preserves_the_fatal_code() {
     core.runtime.clear_channel("host-1");
     let peer = tokio::spawn(async move {
         let _stream = subscribe(&listener).await;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Outlive the lease tick: this case is about a deterministic refusal,
+        // not about a transport loss competing with it.
+        tokio::time::sleep(Duration::from_secs(15)).await;
     });
     let key = core.session_key("session-1").await.unwrap();
     let mut observation = core
@@ -891,6 +897,59 @@ async fn session_observation_ac_18_terminal_error_preserves_the_fatal_code() {
 }
 
 #[tokio::test]
+async fn a_host_connection_reports_connected_without_any_session() {
+    // The app-level probe: no watch, no session, just the device transport.
+    let (_dir, core, _access, listener) = setup(false).await;
+    let peer = tokio::spawn(async move {
+        let _stream = subscribe(&listener).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let snapshot = core.connect_host("host-1").await.unwrap();
+    assert_eq!(snapshot.state, crate::runtime::ConnectionState::Connected);
+    assert_eq!(snapshot.code, None);
+    core.disconnect_host("host-1");
+    assert_eq!(
+        core.connection_snapshot("host-1")
+            .map(|snapshot| snapshot.state),
+        Some(crate::runtime::ConnectionState::Disconnected)
+    );
+    peer.abort();
+}
+
+#[tokio::test]
+async fn a_deterministic_watch_failure_keeps_the_host_connection() {
+    // A session-scoped refusal is not a transport outage: the Host connection
+    // must still report Connected so the app can explain the session instead of
+    // claiming the network is down.
+    let (_dir, core, access, listener) = setup(false).await;
+    access.host.lock().unwrap().refresh_error = Some(whalerein_proto::ErrorCode::PayloadTooLarge);
+    let key = core.session_key("session-1").await.unwrap();
+    let peer = tokio::spawn(async move {
+        let _stream = subscribe(&listener).await;
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(20), async {
+        while observation.next_event().await.is_some() {}
+    })
+    .await;
+    assert_eq!(
+        core.connection_snapshot(&key.host_id)
+            .map(|snapshot| snapshot.state),
+        Some(crate::runtime::ConnectionState::Connected),
+        "the Host connection outlives a session-scoped watch failure"
+    );
+    peer.abort();
+}
+
+#[tokio::test]
 async fn session_observation_ac_25_mqtt_loss_reports_reconnecting() {
     use crate::runtime::ConnectionState;
     let (_dir, core, _access, listener) = setup(true).await;
@@ -909,14 +968,30 @@ async fn session_observation_ac_25_mqtt_loss_reports_reconnecting() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        core.get_connection_state(&key.host_id),
-        ConnectionState::Connected
-    );
+    // The watch attaches asynchronously; the connection reports Connected only
+    // after the broker acknowledged its subscriptions.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while core
+        .connection_snapshot(&key.host_id)
+        .map(|snapshot| snapshot.state)
+        .unwrap_or(ConnectionState::Disconnected)
+        != ConnectionState::Connected
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the host connection never became usable"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     drop_tx.send(()).unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        if core.get_connection_state(&key.host_id) != ConnectionState::Connected {
+        if core
+            .connection_snapshot(&key.host_id)
+            .map(|snapshot| snapshot.state)
+            .unwrap_or(ConnectionState::Disconnected)
+            != ConnectionState::Connected
+        {
             break;
         }
         assert!(
@@ -1271,7 +1346,9 @@ async fn a_deterministic_lease_failure_ends_the_watch_instead_of_reconnecting() 
     let key = core.session_key("session-1").await.unwrap();
     let peer = tokio::spawn(async move {
         let _stream = subscribe(&listener).await;
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Outlive the lease tick: this case is about a deterministic refusal,
+        // not about a transport loss competing with it.
+        tokio::time::sleep(Duration::from_secs(15)).await;
     });
     let mut observation = core
         .observe_session(
@@ -1328,7 +1405,9 @@ async fn a_transient_lease_failure_keeps_the_stream_open() {
     // the connection stays connected instead of reconnecting.
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert_eq!(
-        core.get_connection_state(&key.host_id),
+        core.connection_snapshot(&key.host_id)
+            .map(|snapshot| snapshot.state)
+            .unwrap_or(ConnectionState::Disconnected),
         crate::runtime::ConnectionState::Connected,
         "a transient renewal failure must not mark the host as reconnecting"
     );

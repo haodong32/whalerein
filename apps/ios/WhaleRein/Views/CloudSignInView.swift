@@ -28,6 +28,9 @@ struct CloudSignInProgressView: View {
 struct CloudSignInRootView: View {
     let cloud: CloudSignInModel
     let serviceSelection: ServiceSelectionContext
+    /// Authoritative Host status. Before the first snapshot exists the Cloud
+    /// directory's own presence hint is the only available signal.
+    let connectivity: HostConnectivityModel
     /// Injected by the shell so this screen never reads the app environment.
     var onPairSelfHosted: () -> Void = {}
 
@@ -35,7 +38,7 @@ struct CloudSignInRootView: View {
         NavigationStack {
             Group {
                 if let account = cloud.account {
-                    CloudDirectoryView(cloud: cloud, account: account)
+                    CloudDirectoryView(cloud: cloud, account: account, connectivity: connectivity)
                 } else {
                     CloudWelcomeView(cloud: cloud, serviceSelection: serviceSelection, onPairSelfHosted: onPairSelfHosted)
                 }
@@ -133,6 +136,7 @@ struct CloudWelcomeView: View {
 struct CloudDirectoryView: View {
     let cloud: CloudSignInModel
     let account: CloudAccount
+    let connectivity: HostConnectivityModel
 
     var body: some View {
         List {
@@ -225,73 +229,8 @@ struct CloudDirectoryView: View {
             }
         case .loaded(let hosts):
             ForEach(hosts) { host in
-                CloudDirectoryHostRow(cloud: cloud, host: host)
+                CloudDirectoryHostRow(cloud: cloud, host: host, connectivity: connectivity)
             }
-        }
-    }
-}
-
-private struct CloudDirectoryHostRow: View {
-    let cloud: CloudSignInModel
-    let host: CloudDirectoryHost
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: "desktopcomputer")
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(host.displayName)
-                    .font(.body.weight(.medium))
-                Text(stateKey.key)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            action
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("cloud.host.\(host.hostId)")
-    }
-
-    @ViewBuilder
-    private var action: some View {
-        switch host.access {
-        case .authorized:
-            Button(L10n.cloudHostOpen.key) {
-                cloud.openHost(host)
-            }
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier("cloud.host.open.\(host.hostId)")
-        case .eligible:
-            Button {
-                Task { await cloud.connect(host) }
-            } label: {
-                if cloud.isConnectingHostId == host.hostId {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Text(L10n.cloudHostConnect.key)
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(cloud.isConnectingHostId != nil)
-            .accessibilityIdentifier("cloud.host.connect.\(host.hostId)")
-        case .unavailable:
-            Text(L10n.cloudHostUnavailable.key)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("cloud.host.unavailable.\(host.hostId)")
-        }
-    }
-
-    private var stateKey: L10nKey {
-        switch host.access {
-        case .authorized(let online):
-            return online ? .cloudHostOnline : .cloudHostOffline
-        case .eligible:
-            return .cloudHostEligible
-        case .unavailable:
-            return .cloudHostUnavailable
         }
     }
 }

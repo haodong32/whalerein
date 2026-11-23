@@ -457,6 +457,13 @@ body could not be admitted; the recorded outcome, error code and command
 identity are unchanged, and the client reports confirmed completion with scoped
 recovery.
 
+The device transport is Host-scoped, not session-scoped. The device
+subscribes to one topic per Host (`whalerein/v1/h/<host>/d/<device>/event`);
+every watch reads that one subscription and filters by session. A Host
+connection is therefore opened by the client, may outlive any watch, and
+reports `connecting`, `connected`, `reconnecting` or a terminal `offline` with
+a code. A session ending never implies the Host is offline.
+
 Results are read only by `request_id`. The result body stays encrypted for the
 channel that produced it; after a reconnect the client reuses the same
 `command_id` (host dedupe) or queries `GetCommandResult` to obtain the terminal

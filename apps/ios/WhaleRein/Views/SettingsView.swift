@@ -11,6 +11,8 @@ struct SettingsView: View {
     let cloud: CloudSignInModel?
     let dataPath: String
     let serviceSelection: ServiceSelectionContext
+    /// Authoritative Host status for the default-computer list.
+    let hostConnectivity: HostConnectivityModel
     let reasoningVisible: Bool
     /// Returns a typed error when the preference could not be saved.
     let setReasoningVisible: (Bool) -> AppErrorCode?
@@ -190,7 +192,11 @@ struct SettingsView: View {
                     }
                 }
 
-                SettingsAccountView(account: account, showDiagnostics: $showDiagnostics)
+                SettingsAccountView(
+                    account: account,
+                    hostConnectivity: hostConnectivity,
+                    showDiagnostics: $showDiagnostics
+                )
 
                 Section(L10n.hostsTitle.key) {
                     Button {
@@ -249,46 +255,3 @@ struct SettingsView: View {
         }
     }
 }
-
-
-#if DEBUG
-#Preview("Settings fixture") {
-    if let scenario = ScenarioCatalog.scenario(id: "settings.baseline") {
-        let directory = ScenarioBuilder.temporaryDirectory()
-        let service = ScenarioBuilder.service(for: scenario, directory: directory)
-        SettingsView(
-            settings: SettingsModel(
-                service: service,
-                preferences: PreferencesStore(directory: directory),
-                dataDirectory: directory,
-                isStaging: false,
-                isFixtureBacked: true,
-                onDeviceReset: {}
-            ),
-            diagnostics: DiagnosticsModel(
-                service: service,
-                stagingDirectory: directory
-            ),
-            account: nil,
-            operations: nil,
-            cloud: nil,
-            dataPath: directory.path,
-            serviceSelection: ServiceSelectionContext(
-                configuration: nil,
-                activeInstance: nil,
-                actions: ServiceSelectionActions(
-                    switchToService: { _ in nil },
-                    enableLocal: { _ in nil },
-                    removeLocalCA: { nil },
-                    importStandaloneCA: { _ in nil },
-                    removeStandaloneCA: { nil }
-                )
-            ),
-            reasoningVisible: false,
-            setReasoningVisible: { _ in nil },
-            onSignOutCloud: {},
-            onAddHost: {}
-        )
-    }
-}
-#endif

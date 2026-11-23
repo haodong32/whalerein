@@ -30,7 +30,7 @@ struct AppLifecycleTests {
         let service = StubSessionService()
         let (app, _) = makeApp(service: service) { $0.paired = true }
         await app.bootstrapConversation()
-        await waitUntil { service.activeStreamCount == 1 }
+        await waitUntil { app.conversation?.eventSubscriptionCount == 1 }
         service.emit(.reset(messages: [], approvals: []), sequence: 1)
         await waitUntil { app.conversation?.loadState == .loaded }
         #expect(app.conversation?.sessionId == "s-001")

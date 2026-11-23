@@ -71,6 +71,9 @@ extension AppShellModel {
             rootState = .empty(.noHosts)
             return
         }
+        // One app-level probe for every Host the user can see. This also seeds
+        // the initial snapshot before the conversation renders its chrome.
+        connectivity.startMonitoring(service: service, hostIds: hosts.map(\.hostId))
 
         let host = chooseHost(from: hosts)
         if let version = ProtocolCompatibility.incompatibility(for: host.protocolVersion) {
@@ -163,6 +166,7 @@ extension AppShellModel {
         if let conversation {
             await conversation.suspendForBackground()
         }
+        connectivity.stopMonitoring()
     }
 
     /// Reconnects the visible session with a fresh watch instead of leaving a
@@ -187,6 +191,16 @@ extension AppShellModel {
         guard isCurrentActivation(generation) else { return }
         await refreshSwitcher()
         updateCachedBanner()
+        startHostMonitoringIfNeeded()
         await refreshVisibleOperationResults()
+    }
+
+    /// Starts (or restarts) the app-level Host probe for every visible Host.
+    /// Called after launch restore and on every foreground return.
+    func startHostMonitoringIfNeeded() {
+        guard isPaired, !isRevoked, !isInBackground else { return }
+        let hostIds = hostList.hosts.map(\.hostId)
+        guard !hostIds.isEmpty else { return }
+        connectivity.startMonitoring(service: service, hostIds: hostIds)
     }
 }

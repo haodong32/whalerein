@@ -12,7 +12,7 @@ struct ComposerView: View {
         VStack(spacing: 6) {
             QueueSurfaceView(model: model)
             WaitControlView(model: model)
-            connectionLine
+            sessionStatusLine
             statusLines
 
             HStack(alignment: .bottom, spacing: 8) {
@@ -51,20 +51,10 @@ struct ComposerView: View {
         .padding(.bottom, 8)
     }
 
-    /// Connection, running and watch-ended state sit with the composer instead
-    /// of occupying a header row under the navigation title.
-    private var connectionLine: some View {
+    /// Session-scoped exceptions only. The authoritative Host connection lives
+    /// in the chrome next to the session title, not in the composer.
+    private var sessionStatusLine: some View {
         HStack(spacing: 6) {
-            Image(systemName: connectionSymbol)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            Text(connectionText)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("conversation.connectionStatus")
-                .accessibilityLabel(L10n.conversationTitle.key)
-                .accessibilityValue(connectionText)
             if isCached {
                 Label(L10n.conversationCached.key, systemImage: "internaldrive")
                     .font(.caption2)
@@ -98,18 +88,6 @@ struct ComposerView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var connectionText: String {
-        L10nKey.connectionKey(for: model.connection).string
-    }
-
-    private var connectionSymbol: String {
-        switch model.connection {
-        case .online: return "checkmark.circle"
-        case .degraded, .reconnecting, .connecting: return "arrow.triangle.2.circlepath"
-        case .offline: return "wifi.slash"
-        }
     }
 
     private var statusLines: some View {

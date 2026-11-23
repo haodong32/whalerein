@@ -85,7 +85,6 @@ final class ConversationReduceTests: XCTestCase {
         )
         XCTAssertTrue(loaded.isLoaded)
         XCTAssertNil(loaded.loadError)
-        XCTAssertEqual(loaded.connection, .online)
         XCTAssertEqual(loaded.messages.map(\.messageId), ["m1"])
     }
 
@@ -96,13 +95,12 @@ final class ConversationReduceTests: XCTestCase {
         XCTAssertEqual(loaded.approval, .none)
     }
 
-    func testWatchEndedIsClearedByOnlineConnection() {
+    func testSnapshotClearsAnEndedWatch() {
         var state = ConversationState()
         state.watch.ended = true
-        state.connection = .offline
-        let reconnected = ConversationReduce.reduce(state, .connectionChanged(.online))
+        let reconnected = ConversationReduce.reduce(state, .snapshot(messages: [], approvals: []))
         XCTAssertFalse(reconnected.watch.ended)
-        XCTAssertEqual(reconnected.connection, .online)
+        XCTAssertTrue(reconnected.isLoaded)
     }
 
     func testCapabilitiesRemoveUnsupportedQueueAndHistory() {

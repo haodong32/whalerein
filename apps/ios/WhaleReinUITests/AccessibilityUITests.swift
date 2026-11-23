@@ -11,7 +11,7 @@ final class AccessibilityUITests: WhaleReinUITestCase {
         completePairing()
         openConversation()
 
-        let connection = waitFor("conversation.connectionStatus")
+        let connection = waitFor("host.connectionStatus")
         XCTAssertEqual(connection.value as? String, "已连接")
         XCTAssertEqual(waitFor("composer.send").label, "发送")
         XCTAssertEqual(waitFor("approval.allowOnce").label, "允许一次")
@@ -29,7 +29,7 @@ final class AccessibilityUITests: WhaleReinUITestCase {
         let allow = waitFor("approval.allowOnce")
         XCTAssertEqual(allow.label, "Allow Once")
         XCTAssertEqual(allow.value as? String, "bash")
-        let connection = waitFor("conversation.connectionStatus")
+        let connection = waitFor("host.connectionStatus")
         XCTAssertFalse((connection.value as? String ?? "").isEmpty)
 
         scrollConversationUp(times: 3)

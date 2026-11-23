@@ -6,7 +6,7 @@ use whalerein_proto::{
     RequestKind, RequestPayload,
 };
 
-use super::{ConnectionState, HandshakePhase, Runtime};
+use super::{HandshakePhase, Runtime};
 use crate::access::AccessClient;
 use crate::api::{CoreError, CoreResult, OnlineStatus};
 use crate::diagnostics::journal::{DiagnosticKind, Diagnostics};
@@ -102,27 +102,11 @@ async fn ensure_channel_guarded(
     }
 
     if runtime.channel(host_id).is_some() {
-        runtime.set_state(host_id, ConnectionState::Reconnecting)?;
         runtime.clear_channel(host_id);
     }
-    let current = runtime.state(host_id);
-    if matches!(
-        current,
-        ConnectionState::Connected
-            | ConnectionState::Reconnecting
-            | ConnectionState::Syncing
-            | ConnectionState::Handshaking
-    ) {
-        if current == ConnectionState::Connected {
-            runtime.set_state(host_id, ConnectionState::Reconnecting)?;
-        }
-        if runtime.state(host_id) == ConnectionState::Reconnecting {
-            runtime.set_state(host_id, ConnectionState::Connecting)?;
-        }
-    } else {
-        runtime.set_state(host_id, ConnectionState::Connecting)?;
-    }
-    runtime.set_state(host_id, ConnectionState::Handshaking)?;
+    // The channel owns its handshake phase only. Transport reachability is the
+    // Host connection's state; two producers of one state machine could only
+    // race each other.
     runtime.set_handshake_phase(host_id, HandshakePhase::Msg1Sent);
 
     let receive_generation = runtime.next_receive_generation();
@@ -137,6 +121,12 @@ async fn ensure_channel_guarded(
     .await
     {
         Ok(established) => {
+            // A revocation during the handshake must not install a channel: the
+            // caller has to observe the refusal, not a working channel.
+            if runtime.is_revoked() {
+                runtime.set_handshake_phase(host_id, HandshakePhase::Failed);
+                return Err(CoreError::Revoked);
+            }
             runtime.set_channel(host_id, established.channel.clone());
             // The capability set is read from `ChannelReady` once, next to the
             // channel it belongs to; gating reads it back from the Runtime.
@@ -147,24 +137,13 @@ async fn ensure_channel_guarded(
                 established.receive_generation,
             );
             runtime.set_handshake_phase(host_id, HandshakePhase::Complete);
-            runtime.set_state(host_id, ConnectionState::Syncing)?;
             runtime.set_sync_state(host_id, SyncState::Idle);
-            runtime.set_state(host_id, ConnectionState::Connected)?;
             runtime.reset_reconnect(host_id);
             Ok(established.channel)
         }
         Err(error) => {
             runtime.set_handshake_phase(host_id, HandshakePhase::Failed);
             runtime.record_error(error.code());
-            let target = if matches!(
-                error,
-                CoreError::HostOffline | CoreError::Unavailable(_) | CoreError::Timeout
-            ) {
-                ConnectionState::Offline
-            } else {
-                ConnectionState::Failed
-            };
-            let _ = runtime.set_state(host_id, target);
             Err(error)
         }
     }
@@ -423,7 +402,7 @@ mod fake_host_tests {
         let first = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
             .await
             .unwrap();
-        assert_eq!(runtime.state("host-1"), ConnectionState::Connected);
+        assert_eq!(runtime.handshake_phase("host-1"), HandshakePhase::Complete);
         let second = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", true, None)
             .await
             .unwrap();
@@ -797,7 +776,6 @@ mod fake_host_tests {
             .await
             .unwrap_err();
         assert!(matches!(error, CoreError::HostOffline));
-        assert_eq!(runtime.state("host-1"), ConnectionState::Offline);
         assert_eq!(runtime.handshake_phase("host-1"), HandshakePhase::Failed);
         assert_eq!(runtime.recent_errors(), vec!["host_offline".to_owned()]);
     }

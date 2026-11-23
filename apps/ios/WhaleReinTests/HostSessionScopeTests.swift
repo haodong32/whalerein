@@ -12,6 +12,20 @@ struct HostSessionScopeTests {
         PreferencesStore(directory: makeTempDirectory())
     }
 
+    private func hostEnvelope(hostId: String, state: String) -> SessionEventEnvelope {
+        SessionEventEnvelope(
+            hostId: hostId,
+            sessionId: "",
+            sequence: 1,
+            event: .hostConnection(
+                hostId: hostId,
+                state: state,
+                code: nil,
+                sinceUnixMs: 0
+            )
+        )
+    }
+
     @Test("host list loads authorized Hosts and remembers selection")
     func loadsHosts() async {
         let service = StubSessionService()
@@ -199,37 +213,32 @@ struct HostSessionScopeTests {
         #expect(model.messages.count == 1)
     }
 
-    @Test("connection events are scoped to the watched Host")
+    @Test("Host connection is Host-scoped and independent of the watched session")
     func connectionScoping() async throws {
         let service = StubSessionService()
-        let model = await makeStartedConversation(service: service)
-        model.handle(
-            SessionEventEnvelope(
-                hostId: "studio-mac",
-                sessionId: "s-001",
-                sequence: 11,
-                event: .state(.online)
-            )
-        )
-        #expect(model.connection == .online)
-        model.handle(
-            SessionEventEnvelope(
-                hostId: "travel-laptop",
-                sessionId: "s-101",
-                sequence: 12,
-                event: .connection(hostId: "travel-laptop", status: .offline)
-            )
-        )
-        #expect(model.connection == .online)
+        // Start from "never opened": no snapshot exists yet, so Send is gated
+        // even though a watch is active. It must not be treated as offline.
+        let connectivity = HostConnectivityModel()
+        let model = await makeStartedConversation(service: service, connectivity: connectivity)
+        model.draft = "hello"
+        #expect(connectivity.status(for: "studio-mac") == .unknown)
+        #expect(!model.canSend, "Send needs the authoritative Host connection")
 
-        model.handle(
-            SessionEventEnvelope(
-                hostId: "studio-mac",
-                sessionId: "s-001",
-                sequence: 13,
-                event: .connection(hostId: "studio-mac", status: .offline)
-            )
-        )
-        #expect(model.connection == .offline)
+        connectivity.handle(hostEnvelope(hostId: "travel-laptop", state: "offline"))
+        #expect(connectivity.status(for: "studio-mac") == .unknown)
+        #expect(!model.canSend)
+
+        connectivity.handle(hostEnvelope(hostId: "studio-mac", state: "connected"))
+        #expect(connectivity.status(for: "studio-mac") == .connected)
+        #expect(model.canSend)
+
+        // A different Host going offline never changes this conversation's Host.
+        connectivity.handle(hostEnvelope(hostId: "travel-laptop", state: "offline"))
+        #expect(connectivity.status(for: "studio-mac") == .connected)
+        #expect(model.canSend)
+
+        connectivity.handle(hostEnvelope(hostId: "studio-mac", state: "offline"))
+        #expect(connectivity.status(for: "studio-mac") == .offline)
+        #expect(!model.canSend)
     }
 }

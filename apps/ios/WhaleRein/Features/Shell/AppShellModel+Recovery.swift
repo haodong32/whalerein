@@ -12,6 +12,7 @@ extension AppShellModel {
     func enterRevoked() {
         conversation?.close()
         conversation = nil
+        connectivity.stopMonitoring()
         isRevoked = true
         isPrivacyShieldVisible = false
         dismissSheet()
@@ -72,6 +73,7 @@ extension AppShellModel {
         isOfflineCached = false
         resumeMarker = nil
         didBootstrap = false
+        connectivity.reset()
         hostList.reset()
         sessionList.reset()
         pairing.reset()
@@ -136,6 +138,7 @@ extension AppShellModel {
         isOfflineCached = false
         resumeMarker = nil
         didBootstrap = false
+        connectivity.reset()
         hostList.reset()
         sessionList.reset()
         pairing.reset()

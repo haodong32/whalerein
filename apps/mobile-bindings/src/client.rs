@@ -35,10 +35,10 @@ use crate::types::{
     AttachmentDownloadRequestView, AttachmentDownloadView, AttachmentProgressView,
     AttachmentTransferView, CloudAccountSessionView, CloudAccountStatusView, CloudAccountView,
     CloudAuthAttemptView, CloudConnectResultView, CloudDirectoryHostView, CommandView,
-    ConversationEvent, DeliveryChoice, DiagnosticsReportView, HistoryPageView, HostSummary,
-    MessageReferenceView, MessageView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
-    QuestionCancelReceiptView, QuestionPageView, RetainedOperationView, SendOperationView,
-    SessionCapabilitiesView, SessionSummaryView,
+    ConversationEvent, DeliveryChoice, DiagnosticsReportView, HistoryPageView, HostConnectionView,
+    HostSummary, MessageReferenceView, MessageView, PairingPromptView, QuestionAnswerView,
+    QuestionBatchView, QuestionCancelReceiptView, QuestionPageView, RetainedOperationView,
+    SendOperationView, SessionCapabilitiesView, SessionSummaryView,
 };
 use crate::wait::{WaitAttempts, WaitResultView, MAX_WAIT_TIMEOUT_MS};
 
@@ -54,9 +54,6 @@ const PAIRING_PROMPT_TIMEOUT: Duration = Duration::from_secs(20);
 const PAIRING_DECISION_TIMEOUT: Duration = Duration::from_secs(120);
 /// Upper bound for one `pollEvents` call; callers poll repeatedly.
 const MAX_POLL_TIMEOUT: Duration = Duration::from_secs(30);
-/// Connection state is sampled while a watch is active.
-const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(500);
-
 const EVENT_QUEUE_CAPACITY: usize = 512;
 const MAX_ID_BYTES: usize = 512;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
@@ -545,7 +542,7 @@ struct PairingState {
     abort: Option<AbortHandle>,
 }
 
-/// The currently active watch and its connection poller.
+/// The currently active watch.
 #[derive(Default)]
 struct WatchState {
     generation: u64,
@@ -553,7 +550,6 @@ struct WatchState {
     session_id: String,
     active: bool,
     watch: Option<AbortHandle>,
-    poller: Option<AbortHandle>,
     /// Dropped with the watch task. Waiting for disconnect before starting the
     /// replacement prevents two Core observations from racing the profile
     /// lease and the one-observation constraint.
@@ -606,6 +602,8 @@ fn open_mobile_core(
         watch_generation: Arc::new(AtomicU64::new(0)),
         wait_attempts: WaitAttempts::default(),
         attachment_transfers: Arc::new(AttachmentTransfers::default()),
+        monitor: Arc::new(Mutex::new(None)),
+        monitored: Arc::new(Mutex::new(Vec::new())),
         _diagnostics: dispatcher,
     }))
 }
@@ -623,6 +621,10 @@ pub struct MobileCore {
     watch_generation: Arc<AtomicU64>,
     wait_attempts: WaitAttempts,
     attachment_transfers: Arc<AttachmentTransfers>,
+    /// The app-level Host connection probe. Host-scoped, independent of any
+    /// watch.
+    monitor: Arc<Mutex<Option<AbortHandle>>>,
+    monitored: Arc<Mutex<Vec<String>>>,
     /// Keeps the diagnostic dispatcher alive for the lifetime of the handle.
     _diagnostics: Option<Arc<DiagnosticDispatcher>>,
 }
@@ -964,11 +966,70 @@ impl MobileCore {
         Ok(sessions.into_iter().map(Into::into).collect())
     }
 
-    /// Current in-memory connection state: `disconnected`, `pairing`,
-    /// `connecting`, `handshaking`, `syncing`, `connected`, `reconnecting`,
-    /// `offline`, `revoked` or `failed`.
-    pub fn connection_state(&self, host_id: String) -> String {
-        self.core.get_connection_state(&host_id).as_str().to_owned()
+    /// The authoritative device connection for one Host.
+    ///
+    /// `None` means it was never opened; that is different from `offline`.
+    pub fn host_connection(&self, host_id: String) -> Option<HostConnectionView> {
+        validate_id(&host_id).ok()?;
+        self.core.connection_snapshot(&host_id).map(connection_view)
+    }
+
+    /// Start the app-level probe: connect every Host and stream transitions.
+    ///
+    /// The connection is Host-scoped and survives session switches. Events are
+    /// unscoped, so they are delivered with no session open and are not dropped
+    /// when a watch is replaced.
+    pub fn start_host_monitor(&self, host_ids: Vec<String>) {
+        let mut hosts = Vec::new();
+        for host_id in host_ids {
+            if validate_id(&host_id).is_ok() && !hosts.contains(&host_id) {
+                hosts.push(host_id);
+            }
+        }
+        if let Some(abort) = self.monitor.lock().expect("monitor").take() {
+            abort.abort();
+        }
+        if hosts.is_empty() {
+            return;
+        }
+        let core = self.core.clone();
+        let events = self.events.clone();
+        let scope_hosts = hosts.clone();
+        let task = self.runtime.handle.spawn(async move {
+            let mut changes = core.subscribe_connections();
+            for host_id in &scope_hosts {
+                let core = core.clone();
+                let host_id = host_id.clone();
+                tokio::spawn(async move {
+                    // A failure is reported through the snapshot; the probe
+                    // itself must not abort the monitor.
+                    let _ = core.connect_host(&host_id).await;
+                });
+            }
+            loop {
+                match changes.recv().await {
+                    Ok(snapshot) if scope_hosts.contains(&snapshot.host_id) => {
+                        push_host_connection(&events, &snapshot);
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+        *self.monitor.lock().expect("monitor") = Some(task.abort_handle());
+        *self.monitored.lock().expect("monitored") = hosts;
+    }
+
+    /// Stop the probe and close the Host connections it opened.
+    pub fn stop_host_monitor(&self) {
+        if let Some(abort) = self.monitor.lock().expect("monitor").take() {
+            abort.abort();
+        }
+        let hosts = std::mem::take(&mut *self.monitored.lock().expect("monitored"));
+        for host_id in hosts {
+            self.core.disconnect_host(&host_id);
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1107,23 +1168,16 @@ impl MobileCore {
             state.host_id = host_id.clone();
             state.session_id = session_id.clone();
             state.active = true;
-            let previous = (
-                state.watch.take(),
-                state.poller.take(),
-                state.watch_stopped.take(),
-            );
+            let previous = (state.watch.take(), state.watch_stopped.take());
             (generation, previous)
         };
         let (generation, previous) = previous;
         if let Some(abort) = previous.0 {
             abort.abort();
         }
-        if let Some(abort) = previous.1 {
-            abort.abort();
-        }
         // Wait briefly for the replaced Core observation to release its profile
         // lease and one-observation slot before attaching the replacement.
-        if let Some(stopped) = previous.2 {
+        if let Some(stopped) = previous.1 {
             let _ = stopped.recv_timeout(Duration::from_secs(2));
         }
 
@@ -1131,16 +1185,8 @@ impl MobileCore {
         // Drop every event still queued for a replaced watch before this new
         // watch can publish anything. Pairing and command events stay queued.
         self.events.begin_watch(&scope);
-        self.events.push_watch(
-            &scope,
-            ConversationEvent::Connection {
-                host_id: host_id.clone(),
-                status: self.core.get_connection_state(&host_id).as_str().to_owned(),
-            },
-        );
 
         let (stopped_tx, stopped_rx) = std::sync::mpsc::channel();
-        let poller_host_id = host_id.clone();
         let core = self.core.clone();
         let events = self.events.clone();
         let generations = self.watch_generation.clone();
@@ -1226,41 +1272,9 @@ impl MobileCore {
             }
         });
 
-        let core = self.core.clone();
-        let events = self.events.clone();
-        let generations = self.watch_generation.clone();
-        let poller_scope = scope.clone();
-        let poller = self.runtime.handle.spawn(async move {
-            let mut last = core
-                .get_connection_state(&poller_host_id)
-                .as_str()
-                .to_owned();
-            loop {
-                tokio::time::sleep(CONNECTION_POLL_INTERVAL).await;
-                if generations.load(Ordering::SeqCst) != generation {
-                    return;
-                }
-                let next = core
-                    .get_connection_state(&poller_host_id)
-                    .as_str()
-                    .to_owned();
-                if next != last {
-                    last = next.clone();
-                    events.push_watch(
-                        &poller_scope,
-                        ConversationEvent::Connection {
-                            host_id: poller_host_id.clone(),
-                            status: next,
-                        },
-                    );
-                }
-            }
-        });
-
         let mut state = self.lock_watch();
         if state.generation == generation {
             state.watch = Some(task.abort_handle());
-            state.poller = Some(poller.abort_handle());
             state.watch_stopped = Some(stopped_rx);
         }
         Ok(())
@@ -1280,12 +1294,9 @@ impl MobileCore {
                 state.host_id.clone(),
                 state.session_id.clone(),
             );
-            (scope, (state.watch.take(), state.poller.take()))
+            (scope, state.watch.take())
         };
-        if let Some(abort) = abort.0 {
-            abort.abort();
-        }
-        if let Some(abort) = abort.1 {
+        if let Some(abort) = abort {
             abort.abort();
         }
         self.events
@@ -2431,9 +2442,9 @@ impl Drop for MobileCore {
             if let Some(abort) = state.watch.take() {
                 abort.abort();
             }
-            if let Some(abort) = state.poller.take() {
-                abort.abort();
-            }
+        }
+        if let Some(abort) = self.monitor.lock().expect("monitor").take() {
+            abort.abort();
         }
         self.pairing_generation.fetch_add(1, Ordering::SeqCst);
         {
@@ -2448,14 +2459,33 @@ impl Drop for MobileCore {
     }
 }
 
+/// Push one authoritative Host transition on the app-level queue.
+fn push_host_connection(events: &EventQueue, snapshot: &whalerein_core::api::ConnectionSnapshot) {
+    events.push(ConversationEvent::HostConnection {
+        host_id: snapshot.host_id.clone(),
+        state: snapshot.state.as_str().to_owned(),
+        code: snapshot.code.clone(),
+        since_unix_ms: snapshot.since_unix_ms,
+    });
+}
+
+fn connection_view(snapshot: whalerein_core::api::ConnectionSnapshot) -> HostConnectionView {
+    HostConnectionView {
+        host_id: snapshot.host_id,
+        state: snapshot.state.as_str().to_owned(),
+        code: snapshot.code,
+        since_unix_ms: snapshot.since_unix_ms,
+    }
+}
+
 /// Best-effort terminal cause after an observation stream ends. Core's public
 /// observation surface reports the end but not its error value, so the binding
 /// retains the previous watch behavior by sampling the Host connection state.
 fn terminal_connection_error(core: &Core, host_id: &str) -> Option<MobileError> {
-    match core.get_connection_state(host_id).as_str() {
-        "revoked" => Some(MobileError::revoked()),
-        "failed" => Some(MobileError::unavailable()),
-        _ => None,
+    match core.connection_snapshot(host_id)?.code.as_deref() {
+        Some("revoked") => Some(MobileError::revoked()),
+        Some(_) => Some(MobileError::unavailable()),
+        None => None,
     }
 }
 
@@ -2547,9 +2577,11 @@ mod tests {
             for index in 0..capacity {
                 state
                     .events
-                    .push_back(QueuedEvent::unscoped(ConversationEvent::Connection {
+                    .push_back(QueuedEvent::unscoped(ConversationEvent::HostConnection {
                         host_id: format!("h{index}"),
-                        status: "connected".into(),
+                        state: "connected".into(),
+                        code: None,
+                        since_unix_ms: 0,
                     }));
             }
         }
@@ -2581,9 +2613,11 @@ mod tests {
     fn overflow_drops_oldest_and_reports_the_count() {
         let queue = queue_with(EVENT_QUEUE_CAPACITY);
         for index in 0..3 {
-            queue.push(ConversationEvent::Connection {
+            queue.push(ConversationEvent::HostConnection {
                 host_id: format!("new{index}"),
-                status: "connected".into(),
+                state: "connected".into(),
+                code: None,
+                since_unix_ms: 0,
             });
         }
         let events = queue.poll(Duration::ZERO);
@@ -2593,11 +2627,11 @@ mod tests {
         );
         assert_eq!(events.len(), EVENT_QUEUE_CAPACITY + 1);
         match events.get(1) {
-            Some(ConversationEvent::Connection { host_id, .. }) => assert_eq!(host_id, "h3"),
+            Some(ConversationEvent::HostConnection { host_id, .. }) => assert_eq!(host_id, "h3"),
             other => panic!("unexpected first retained event: {other:?}"),
         }
         match events.last() {
-            Some(ConversationEvent::Connection { host_id, .. }) => assert_eq!(host_id, "new2"),
+            Some(ConversationEvent::HostConnection { host_id, .. }) => assert_eq!(host_id, "new2"),
             other => panic!("unexpected last event: {other:?}"),
         }
         // The loss counter is reported once.
@@ -2737,9 +2771,11 @@ mod tests {
         queue.begin_watch(&pending);
         queue.push_watch(
             &pending,
-            ConversationEvent::Connection {
+            ConversationEvent::HostConnection {
                 host_id: "host-1".into(),
-                status: "connected".into(),
+                state: "connected".into(),
+                code: None,
+                since_unix_ms: 0,
             },
         );
         let observed = pending.with_observation("obs-42".into());

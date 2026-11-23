@@ -190,7 +190,9 @@ struct HostSessionIsolationTests {
         #expect(current.messages.map(\.messageId) == ["new-1"])
         #expect(current.approvals.isEmpty)
         #expect(!current.watchEnded)
-        #expect(current.connection != .offline)
+        // A late watch end for another Host/session does not change the Host
+        // connection owned by the connectivity model.
+        #expect(current.connectivity.status(for: "travel-laptop") == .connected)
     }
 
     @Test("drafts are scoped by Host and session, so equal session IDs keep separate text")

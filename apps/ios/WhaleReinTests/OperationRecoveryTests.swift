@@ -340,7 +340,8 @@ struct OperationRecoveryTests {
             hostId: scope.hostId,
             sessionId: scope.sessionId,
             sessionTitle: "Recovery",
-            service: service
+            service: service,
+            connectivity: makeTestConnectivity(hostIds: [scope.hostId])
         )
         await model.start()
         service.emit(.reset(messages: [], approvals: []), hostId: scope.hostId, sessionId: scope.sessionId, sequence: 1)

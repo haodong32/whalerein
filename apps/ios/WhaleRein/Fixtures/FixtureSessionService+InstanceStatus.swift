@@ -27,7 +27,7 @@ extension FixtureSessionService: InstanceStatusService {
             deviceAccess = .revoked
         } else if !paired {
             deviceAccess = .unpaired
-        } else if options.offlineOnOpen || connectionStatus == .offline {
+        } else if options.offlineOnOpen || hasOfflineHostConnection {
             deviceAccess = .unavailable
         } else {
             deviceAccess = .ready

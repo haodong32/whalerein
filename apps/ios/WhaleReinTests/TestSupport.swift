@@ -183,7 +183,6 @@ final class SuspendedResponse<Value: Sendable> {
 
 @MainActor
 class StubSessionService: SessionService {
-    var connectionStatus: ConnectionStatus = .online
     var instanceId = "test"
     var coreRevision = "stub-add-ios-client-1"
     var appVersion = "0.1.0"
@@ -243,8 +242,59 @@ class StubSessionService: SessionService {
     private(set) var cancelQuestionCalls: [(String, String, String)] = []
     private(set) var requestQuestionCancelCalls: [(String, String, String)] = []
     private(set) var approvalCalls: [(String, String)] = []
+    /// Host-scoped snapshots served to the app-level monitor.
+    var hostConnections: [String: HostConnectionSnapshot] = [:]
+    private(set) var startHostMonitorCalls: [[String]] = []
+    private(set) var stopHostMonitorCount = 0
 
     var activeStreamCount: Int { continuations.count }
+
+    func hostConnection(hostId: String) -> HostConnectionSnapshot? {
+        hostConnections[hostId]
+    }
+
+    func startHostMonitor(hostIds: [String]) {
+        startHostMonitorCalls.append(hostIds)
+        for hostId in hostIds where hostConnections[hostId] == nil {
+            setHostConnection(hostId: hostId, state: "connected")
+        }
+        for hostId in hostIds {
+            guard let snapshot = hostConnections[hostId] else { continue }
+            emitHostConnection(
+                hostId: snapshot.hostId,
+                state: snapshot.state,
+                code: snapshot.code
+            )
+        }
+    }
+
+    func stopHostMonitor() {
+        stopHostMonitorCount += 1
+    }
+
+    func setHostConnection(hostId: String, state: String, code: String? = nil, sinceUnixMs: UInt64 = 0) {
+        hostConnections[hostId] = HostConnectionSnapshot(
+            hostId: hostId,
+            state: state,
+            code: code,
+            sinceUnixMs: sinceUnixMs
+        )
+    }
+
+    func emitHostConnection(hostId: String, state: String, code: String? = nil) {
+        setHostConnection(hostId: hostId, state: state, code: code)
+        let snapshot = hostConnections[hostId]
+        emit(
+            .hostConnection(
+                hostId: hostId,
+                state: state,
+                code: code,
+                sinceUnixMs: snapshot?.sinceUnixMs ?? 0
+            ),
+            hostId: hostId,
+            sessionId: ""
+        )
+    }
 
     func makeEventStream() -> AsyncStream<SessionEventEnvelope> {
         eventStreamCount += 1
@@ -530,13 +580,37 @@ class StubSessionService: SessionService {
 }
 
 @MainActor
+func makeTestConnectivity(
+    hostIds: [String] = ["studio-mac"],
+    status: String = "connected"
+) -> HostConnectivityModel {
+    var seeded: [String: HostConnectionSnapshot] = [:]
+    for hostId in hostIds {
+        seeded[hostId] = HostConnectionSnapshot(
+            hostId: hostId,
+            state: status,
+            code: nil,
+            sinceUnixMs: 0
+        )
+    }
+    return HostConnectivityModel(snapshot: seeded)
+}
+
+@MainActor
 func makeStartedConversation(
     service: any SessionService,
     hostId: String = "studio-mac",
     sessionId: String = "s-001",
-    title: String = "Release checklist"
+    title: String = "Release checklist",
+    connectivity: HostConnectivityModel? = nil
 ) async -> ConversationModel {
-    let model = ConversationModel(hostId: hostId, sessionId: sessionId, sessionTitle: title, service: service)
+    let model = ConversationModel(
+        hostId: hostId,
+        sessionId: sessionId,
+        sessionTitle: title,
+        service: service,
+        connectivity: connectivity ?? makeTestConnectivity(hostIds: [hostId])
+    )
     await model.start()
     await pump(160)
     return model

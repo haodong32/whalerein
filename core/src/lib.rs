@@ -10,6 +10,7 @@ pub mod api;
 mod cache;
 mod commands;
 mod configuration;
+mod connection;
 mod diagnostics;
 mod drafts;
 mod observation;
