@@ -135,11 +135,11 @@ pub fn android_redirect_uri(environment: String) -> String {
 
 /// Install an explicit PEM bundle as the process native-root source.
 ///
-/// Core's MQTT path loads native roots through `rustls-native-certs`, which on
-/// Android cannot discover the platform store by itself. The app extracts the
-/// system CA certificates into a private PEM file and calls this before opening
-/// Core. HTTPS keeps WebPKI public roots plus the instance-scoped private CA,
-/// so this path is limited to the native-root consumer.
+/// Core's system-trust path loads native roots through `rustls-native-certs`,
+/// which on Android cannot discover the platform store by itself. The app
+/// extracts the system CA certificates into a private PEM file and calls this
+/// before opening Core. HTTPS and MQTT share that system trust; custom CA
+/// instances replace it with their own bundle instead.
 ///
 /// On non-Android hosts the call validates the path but leaves process trust
 /// unchanged, because the host store is already discoverable.

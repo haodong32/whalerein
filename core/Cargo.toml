@@ -45,6 +45,10 @@ rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
+webpki-roots = "1"
+
+[target.'cfg(any(target_vendor = "apple", windows))'.dependencies]
+rustls-platform-verifier = "0.7"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

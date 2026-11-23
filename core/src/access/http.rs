@@ -171,7 +171,7 @@ impl AccessClient {
         Self::with_ca(base, token, None, Arc::default())
     }
 
-    /// `ca_pem` adds a private CA on top of the platform trust roots.
+    /// `ca_pem` selects custom mode: the bundle replaces the platform roots.
     pub fn with_ca(
         base: Url,
         token: Option<String>,
@@ -186,27 +186,13 @@ impl AccessClient {
         {
             return Err(AccessError::protocol("invalid Access URL"));
         }
-        let mut builder = Client::builder()
+        // One trust decision for both transports: platform verification by
+        // default, or exactly the supplied CA bundle.
+        let tls = super::tls::client_config(ca_pem, &[])?;
+        let http = Client::builder()
             .timeout(DEFAULT_TIMEOUT)
-            .user_agent(concat!("whalerein-core/", env!("CARGO_PKG_VERSION")));
-        if let Some(ca) = ca_pem {
-            if !ca
-                .windows(27)
-                .any(|window| window == b"-----BEGIN CERTIFICATE-----")
-            {
-                return Err(AccessError::protocol("invalid CA certificate"));
-            }
-            let parsed: Vec<_> = rustls_pemfile::certs(&mut &ca[..])
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| AccessError::protocol("invalid CA certificate"))?;
-            if parsed.is_empty() {
-                return Err(AccessError::protocol("invalid CA certificate"));
-            }
-            let certificate = reqwest::Certificate::from_pem(ca)
-                .map_err(|_| AccessError::protocol("invalid CA certificate"))?;
-            builder = builder.add_root_certificate(certificate);
-        }
-        let http = builder
+            .user_agent(concat!("whalerein-core/", env!("CARGO_PKG_VERSION")))
+            .use_preconfigured_tls((*tls).clone())
             .build()
             .map_err(|_| AccessError::transport("HTTP client initialization failed"))?;
         let transport = TransportBudget::default();

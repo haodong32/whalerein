@@ -329,16 +329,14 @@ impl AccountClient {
         } else if instance.manifest()?.is_none() || secrets.load(ACCOUNT_SESSION)?.is_none() {
             return Err(CoreError::Unauthorized);
         }
-        let mut builder = Client::builder()
+        // The account endpoints follow the same two trust modes as Access:
+        // platform verification by default, or exactly the configured CA.
+        let tls = crate::access::tls::client_config(instance.ca_pem.as_deref(), &[])
+            .map_err(CoreError::from)?;
+        let builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(15));
-        if let Some(pem) = &instance.ca_pem {
-            for ca in reqwest::Certificate::from_pem_bundle(pem)
-                .map_err(|_| CoreError::Config("account CA bundle is invalid".into()))?
-            {
-                builder = builder.add_root_certificate(ca);
-            }
-        }
+            .timeout(Duration::from_secs(15))
+            .use_preconfigured_tls((*tls).clone());
         Ok(Self {
             http: builder.build().map_err(|_| unavailable())?,
             api,

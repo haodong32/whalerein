@@ -16,7 +16,7 @@ use rumqttc::v5::{AsyncClient, ConnectionError, Event, MqttOptions, StateError};
 use rumqttc::{TlsConfiguration, Transport};
 #[cfg(test)]
 use rustls::pki_types::CertificateDer;
-use rustls::{ClientConfig, RootCertStore};
+use rustls::ClientConfig;
 use url::Url;
 use whalerein_proto::{EventEnvelope, RequestStateNotice};
 
@@ -121,39 +121,9 @@ impl MqttSettings {
     }
 
     fn tls_config(&self) -> Result<Arc<ClientConfig>, AccessError> {
-        // Keep MQTT on the same ring provider as HTTPS. A host application
-        // may already have installed its own process-wide provider.
-        if rustls::crypto::CryptoProvider::get_default().is_none() {
-            let _ = rustls::crypto::ring::default_provider().install_default();
-        }
-        let mut roots = RootCertStore::empty();
-        let native = rustls_native_certs::load_native_certs();
-        for certificate in native.certs {
-            let _ = roots.add(certificate);
-        }
-        if let Some(ca) = &self.ca_pem {
-            let mut loaded = 0usize;
-            for certificate in rustls_pemfile::certs(&mut ca.as_slice()) {
-                let certificate = certificate
-                    .map_err(|_| AccessError::protocol("invalid MQTT CA certificate"))?;
-                roots
-                    .add(certificate)
-                    .map_err(|_| AccessError::protocol("invalid MQTT CA certificate"))?;
-                loaded += 1;
-            }
-            if loaded == 0 {
-                return Err(AccessError::protocol("invalid MQTT CA certificate"));
-            }
-        }
-        let mut config = ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        config.alpn_protocols = self
-            .alpn
-            .iter()
-            .map(|protocol| protocol.as_bytes().to_vec())
-            .collect();
-        Ok(Arc::new(config))
+        // HTTPS and MQTT share one trust decision: platform roots by default,
+        // or exactly the configured CA bundle.
+        super::tls::client_config(self.ca_pem.as_deref(), &self.alpn)
     }
 
     #[cfg(test)]
@@ -749,7 +719,8 @@ mod tests {
         let settings = MqttSettings::parse("mqtts://broker.test").unwrap();
         let error = settings.options("d-1", "token").err();
         // No CA is configured, so options construction only fails on TLS
-        // initialization; a valid platform trust store yields Ok.
+        // initialization; system mode falls back to portable roots when the
+        // platform exposes no store, so it does not depend on a local bundle.
         assert!(error.is_none());
         let settings = settings.with_ca(Some(b"not a pem".to_vec()));
         assert!(settings.options("d-1", "token").is_err());

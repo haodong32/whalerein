@@ -8,13 +8,14 @@ import java.security.cert.X509Certificate
 import java.util.Base64
 
 /**
- * Android platform trust for Core's native-root consumer (MQTT TLS).
+ * Android platform trust for Core's system-trust consumer (HTTPS and MQTT).
  *
- * Core's HTTPS path uses WebPKI public roots plus the instance-scoped private
- * CA, while its MQTT path loads `rustls-native-certs`. Android has no OpenSSL
- * certificate directory, so this helper materializes `AndroidCAStore` into a
- * private PEM bundle and installs it before Core opens. The bundle contains
- * only public certificates; it is never logged and never exported.
+ * Core's system-trust path uses `rustls-native-certs` for HTTPS and MQTT.
+ * Android has no OpenSSL certificate directory, so this helper materializes
+ * `AndroidCAStore` into a private PEM bundle and installs it before Core opens.
+ * Custom-CA instances replace the system roots with their own bundle instead.
+ * The bundle contains only public certificates; it is never logged and never
+ * exported.
  *
  * Device-only: Android's system trust store is not available to JVM tests.
  */
