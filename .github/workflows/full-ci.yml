@@ -241,7 +241,7 @@ jobs:
     name: Android device suite (${{ matrix.target }})
     needs: changes
     if: needs.changes.outputs.android_matrix != '{"include":[]}'
-    runs-on: macos-26
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -259,7 +259,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-37.0 build-tools;37.0.0'
+          packages: 'platforms;android-37.0 build-tools;37.0.0 ndk;28.2.13676358'
 
       - name: Cache Gradle
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -279,12 +279,34 @@ jobs:
           enable-cache: true
           cache-dependency-glob: tools/repo/uv.lock
 
+      - name: Add Android Rust targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
+
+      - name: Build the Android test APK
+        run: |
+          cd apps/android
+          ./gradlew :app:assembleNoGmsDebugAndroidTest --console=plain --stacktrace
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - name: Run Android device suite on a managed emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 36
           target: default
-          arch: arm64-v8a
+          arch: x86_64
           profile: pixel_6
           disable-animations: true
           script: ./repo test ${{ matrix.target }} --json
@@ -557,9 +579,9 @@ jobs:
         if: always()
         run: |
           set +e
-          mkdir -p .data/runs/deployment || true
-          docker compose -f deploy/compose/stack.yaml ps > .data/runs/deployment/ps.txt 2>&1 || true
-          docker compose -f deploy/compose/stack.yaml logs --no-color > .data/runs/deployment/stack.log 2>&1 || true
+          mkdir -p "${RUNNER_TEMP}/deployment"
+          docker compose -f deploy/compose/stack.yaml ps > "${RUNNER_TEMP}/deployment/ps.txt" 2>&1 || true
+          docker compose -f deploy/compose/stack.yaml logs --no-color > "${RUNNER_TEMP}/deployment/stack.log" 2>&1 || true
           exit 0
 
       - name: Upload deployment acceptance evidence
@@ -568,8 +590,8 @@ jobs:
         with:
           name: deployment-acceptance-${{ github.sha }}-${{ github.run_attempt }}
           path: |
-            .data/runs/deployment/stack.log
-            .data/runs/deployment/ps.txt
+            ${{ runner.temp }}/deployment/stack.log
+            ${{ runner.temp }}/deployment/ps.txt
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 7
