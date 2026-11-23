@@ -48,6 +48,7 @@ export const Config = z.object({
   mqtt_port: z.string().default('').volatile(),
   mqtt_url: z.string().default('').volatile(),
   host_id: z.string().default('').volatile(),
+  host_label: z.string().default('').volatile(),
   host_token: z.string().role('secret').volatile(),
   ca_file: z.string().default('').volatile(),
   state_dir: z.string().default('').volatile(),
@@ -87,6 +88,7 @@ export function materializeConfig(raw) {
     'mqtt_port',
     'mqtt_url',
     'host_id',
+    'host_label',
     'host_token',
     'ca_file',
     'state_dir',
@@ -220,7 +222,7 @@ export function configFailure(error) {
     ? error.message.replace(`${error.code}: `, '')
     : undefined
   const names = ['service', 'cloud_environment', 'custom', 'state_root', 'enrollment_issuer_public_key', 'enrollment_issuer',
-    'server', 'access_port', 'mqtt_port', 'mqtt_url', 'access_url', 'host_id',
+    'server', 'access_port', 'mqtt_port', 'mqtt_url', 'access_url', 'host_id', 'host_label',
     'host_token', 'adapter', 'approval_mode', 'approval_ttl_ms', 'event_batch_ms',
     'outbox_per_device_limit', 'outbox_total_limit', 'snapshot_max_events',
     'reconnect_min_ms', 'reconnect_max_ms', 'shutdown_timeout_ms', 'ca_file', 'state_dir']
@@ -297,6 +299,7 @@ export async function createManagedHost(rawConfig = {}, options = {}) {
       profileConfiguration: true,
       configSnapshot: configurationSnapshot,
       stateRoot: config.stateRoot,
+      instanceLabel: config.instanceLabel,
       now: options.now,
       fetch: options.fetch,
       mqtt: options.mqtt,

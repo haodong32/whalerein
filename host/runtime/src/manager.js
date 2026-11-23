@@ -10,7 +10,6 @@ import { createHash, randomBytes } from 'node:crypto'
 import { HostRuntime } from './host.js'
 import { MqttAccess } from './access/mqtt.js'
 import { PluginError } from './errors.js'
-import { generateHostId } from './host-id.js'
 import { ActivationOwner } from './activation.js'
 import { HostProfileRegistry, RegistryError, hasLegacyMarkers } from './registry.js'
 import {
@@ -175,6 +174,7 @@ export class ConnectionManager {
       random: options.random ?? randomBytes,
       locale: options.locale ?? 'en',
       displayName: options.displayName,
+      instanceLabel: options.instanceLabel,
       allowLoopback: Boolean(options.allowLoopback),
       verifyAuthorization: options.verifyAuthorization ?? null,
       expectedIssuer: options.expectedIssuer ?? '',
@@ -282,19 +282,26 @@ export class ConnectionManager {
     return this.#run(async () => {
       this.#assertUsable()
       if (source) this.#source = source
-      const record = this.#activeRecord()
+      let record = this.#activeRecord()
       if (!record) throw new PluginError('internal', 'no active profile')
+      record = await this.#migrateStableIdentity(record)
       if (record.pending?.removal === 'removing') throw this.#refuse('removal_pending', 'removal is pending; re-adding requires fresh approval')
       let readd = false
       if (record.pending?.removal === 'removed') {
-        // A removed enrollment re-enters through a fresh approval of the same
-        // Host identity. Cloud allocates the next enrollment revision and
-        // resets the workspace removal intent when it approves that request.
+        // Re-add the same Host identity through a fresh approval. Access
+        // re-enables the enrollment for the new generation; the Host id and
+        // keys never change.
         readd = true
         await this.#registry.setPending(record.id, { removal: null, removalUrl: null, paused: false })
         await this.#registry.clearPendingPhase(record.id)
         await this.#clearPollCredential(record)
         this.#intentJournal(record)?.clear()
+        await this.#registry.setBindings(record.id, {
+          operationId: null,
+          enrollmentRevision: null,
+          accessOrigin: null,
+          region: null,
+        })
       }
       if (record.mode === 'standalone') return this.#startStandalone(record, { resume: true })
       if (this.#runtime !== null) return this.snapshot()
@@ -302,7 +309,7 @@ export class ConnectionManager {
       // Connect resumes an established binding instead of requesting approval
       // again. A removed profile must instead obtain fresh approval.
       const existing = this.#readIntent(record)
-      if (!readd && this.#hasBinding(record) && record.bindings?.operationId && (!existing || existing.state === 'enrolled')) {
+      if (!readd && this.#hasEnrollment(record) && record.bindings?.operationId && (!existing || existing.state === 'enrolled')) {
         // A user-initiated connect verifies the authoritative state once before
         // dialing. A removal that landed while the profile was idle must not be
         // rediscovered only after another failed MQTT handshake.
@@ -363,8 +370,15 @@ export class ConnectionManager {
       if (['denied', 'expired', 'action_required'].includes(this.#state) || record.pending?.phase === undefined) {
         if (record.pending?.uncertain) {
           const reconciled = await this.#reconcileUncertain(record)
-          if (reconciled === false) throw this.#failFast('recovery_required', 'the previous operation remains unresolved')
-          if (this.#hasBinding(record)) return this.#reconnect(record)
+          if (reconciled === 'restart') return this.#restartApproval(record)
+          if (reconciled === false) {
+            // A committed enrollment without its one-time credential must move
+            // to the browser-authorized recovery action instead of failing the
+            // retry with a generic error.
+            if (this.#registry.get(record.id)?.pending?.phase === 'credential') return this.snapshot()
+            throw this.#failFast('recovery_required', 'the previous operation remains unresolved')
+          }
+          if (this.#hasEnrollment(record)) return this.#reconnect(record)
         }
         if (this.#state === 'disconnected') return this.#reconnect(record)
         return this.#restartApproval(record)
@@ -435,7 +449,7 @@ export class ConnectionManager {
         const generation = this.#generation
         this.#setState('recovering', null)
         try {
-          const prepared = await this.#prepareProfile(record, { allowCreate: false })
+          const prepared = await this.#prepareProfile(record)
           const metadata = await this.#metadataFor(record)
           const client = this.#createClient(record, prepared, metadata)
           const intent = await client.createRecoveryIntent({ apiOrigin })
@@ -451,7 +465,7 @@ export class ConnectionManager {
       const generation = this.#generation
       this.#setState('recovering', 'recovery_required')
       try {
-        const prepared = await this.#prepareProfile(record, { allowCreate: false })
+        const prepared = await this.#prepareProfile(record)
         const metadata = await this.#metadataFor(record)
         const client = this.#createClient(record, prepared, metadata)
         const credential = await client.replaceCredential({ accessOrigin, authorization })
@@ -550,7 +564,7 @@ export class ConnectionManager {
         observed = await this.#options.removalStatus({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
       } else {
         const metadata = await this.#metadataFor(record)
-        const prepared = await this.#prepareProfile(record, { allowCreate: false })
+        const prepared = await this.#prepareProfile(record)
         const client = this.#createClient(record, prepared, metadata)
         observed = await client.readRemoval({ apiOrigin: record.service?.apiOrigin, hostId: record.bindings?.hostId })
       }
@@ -602,7 +616,7 @@ export class ConnectionManager {
     const current = this.#registry.get(record.id) ?? record
     this.#refreshDerivedState()
     if (!resume) return
-    if (this.#hasBinding(current) && current.pending?.paused !== true) {
+    if (this.#hasEnrollment(current) && current.pending?.paused !== true) {
       try {
         await this.#reconnect(current)
       } catch (error) {
@@ -678,7 +692,7 @@ export class ConnectionManager {
         // Start the target only after the pointer is committed. Failure stays
         // on the selected target; it never falls back to the old profile.
         const selection = this.#activeRecord()
-        if (selection && selection.mode === 'managed' && this.#hasBinding(selection) && this.#source) {
+        if (selection && selection.mode === 'managed' && this.#hasEnrollment(selection) && this.#source) {
           try {
             await this.#resumeManaged(selection)
           } catch (error) {
@@ -918,7 +932,7 @@ export class ConnectionManager {
         this.#refreshDerivedState()
         this.#setState(this.#establishedState(target), null)
         const selection = this.#activeRecord()
-        if (selection && selection.mode === 'managed' && this.#hasBinding(selection) && this.#source) {
+        if (selection && selection.mode === 'managed' && this.#hasEnrollment(selection) && this.#source) {
           try {
             await this.#resumeManaged(selection)
           } catch (error) {
@@ -1162,6 +1176,7 @@ export class ConnectionManager {
       return
     }
     if (!record) return
+    record = await this.#migrateStableIdentity(record)
     if (record.pending?.removal === 'removed') return
     if (record.pending?.removal === 'removing') {
       // A persisted removing state must be resolved from the authority even on
@@ -1171,7 +1186,13 @@ export class ConnectionManager {
       return
     }
     const intent = this.#readIntent(record)
-    if (intent && ['awaiting_approval', 'creating', 'create_uncertain'].includes(intent.state)) {
+    const approvedIntent = intent?.state === 'approved' && intent.authorization && intent.route
+      && record.pending?.paused !== true
+      ? intent
+      : null
+    if (approvedIntent) {
+      this.#state = 'enrolling'
+    } else if (intent && ['awaiting_approval', 'creating', 'create_uncertain'].includes(intent.state)) {
       this.#state = record.pending?.uncertain ? 'action_required' : 'awaiting_approval'
       this.#errorCode = record.pending?.uncertain ? 'recovery_required' : null
     } else if (record.pending?.phase === 'enrollment' || record.pending?.phase === 'credential') {
@@ -1186,6 +1207,14 @@ export class ConnectionManager {
     try {
       if (record.mode === 'standalone') {
         await this.#run(() => this.#startStandalone(record, { resume: true }))
+      } else if (approvedIntent) {
+        // The approval was already committed and its signed authorization is
+        // durable. Finish that exact enrollment before considering recovery.
+        await this.#run(async () => {
+          this.#activation.acquire()
+          this.#generation += 1
+          await this.#continuePersisted(record, this.#generation)
+        })
       } else if (record.pending?.phase === 'approval' && intent) {
         await this.#run(async () => {
           this.#activation.acquire()
@@ -1196,11 +1225,18 @@ export class ConnectionManager {
         || record.pending?.phase === 'credential') {
         await this.#run(async () => {
           const reconciled = await this.#reconcileUncertain(record)
-          if (reconciled && this.#hasBinding(record) && record.pending?.paused !== true) {
+          if (reconciled === 'restart') {
+            // The authority proved the attempt did not register. Keep the
+            // request actionable with a retry action; it starts a fresh
+            // approval. Do not present the credential-recovery action.
+            this.#setState('action_required', null)
+            return
+          }
+          if (reconciled && this.#hasEnrollment(record) && record.pending?.paused !== true) {
             await this.#reconnect(record)
           }
         })
-      } else if (this.#hasBinding(record) && record.pending?.paused !== true) {
+      } else if (this.#hasEnrollment(record) && record.pending?.paused !== true) {
         // Cold start verifies the authoritative removal state once before the
         // first managed connection attempt.
         if (!(await this.#checkRemovalBeforeConnect())) {
@@ -1319,6 +1355,8 @@ export class ConnectionManager {
       accessOrigin: approved.route.accessOrigin,
       region: approved.route.region,
     })
+    // The authorization was consumed; never replay it on a later start.
+    try { this.#intentJournal(record)?.clear() } catch { /* contained */ }
     await this.#startManagedRuntime(record, enrollment.credential, generation)
   }
 
@@ -1433,14 +1471,14 @@ export class ConnectionManager {
     this.#setState('reconnecting', null)
     try {
       if (record.mode === 'standalone') return await this.#startStandalone(record, { resume: true })
-      const prepared = await this.#prepareProfile(record, { allowCreate: false })
+      const prepared = await this.#prepareProfile(record)
       const credential = await prepared.store.getJson(CREDENTIAL_PURPOSES.transportCredential)
       if (!credential) {
         // A confirmed binding with a missing/superseded credential is
         // recoverable through the original enrollment; never a new approval.
         throw this.#failFast(
-          this.#hasBinding(record) ? 'recovery_required' : 'not_found',
-          this.#hasBinding(record) ? 'the saved transport credential is missing; recover it' : 'this profile is not enrolled',
+          this.#hasEnrollment(record) ? 'recovery_required' : 'not_found',
+          this.#hasEnrollment(record) ? 'the saved transport credential is missing; recover it' : 'this profile is not enrolled',
         )
       }
       // `routeExpiresAt` is legacy approval metadata. Access confirms the
@@ -1463,7 +1501,7 @@ export class ConnectionManager {
       this.#setState('disconnected', null)
       return this.snapshot()
     }
-    const prepared = await this.#prepareProfile(record, { allowCreate: false })
+    const prepared = await this.#prepareProfile(record)
     const credential = await prepared.store.getJson(CREDENTIAL_PURPOSES.transportCredential)
     if (!credential) return this.snapshot()
     this.#setState('reconnecting', null)
@@ -1572,9 +1610,40 @@ export class ConnectionManager {
     }
   }
 
+  /**
+   * One-time hard cut from a hostname-derived id to the profile id. The
+   * profile keys stay; the old enrollment generation, its credentials and its
+   * journal are discarded. New profiles simply bind their profile id.
+   */
+  async #migrateStableIdentity(record) {
+    if (!record || record.mode !== 'managed' || record.bindings?.hostId === record.id) return record
+    const changes = {
+      hostId: record.id,
+      operationId: null,
+      enrollmentRevision: null,
+      accessOrigin: null,
+      region: null,
+    }
+    await this.#registry.setBindings(record.id, changes)
+    if (record.bindings?.hostId !== undefined) {
+      const store = new ProfileCredentialStore({
+        credentials: this.#options.credentials,
+        installationId: this.#installationId,
+        profileId: record.id,
+      })
+      for (const purpose of [CREDENTIAL_PURPOSES.transportCredential, CREDENTIAL_PURPOSES.pollCredential]) {
+        try { await store.remove(purpose) } catch { /* absent */ }
+      }
+      this.#intentJournal(record)?.clear()
+      await this.#registry.setPending(record.id, { removal: null, uncertain: false })
+      await this.#registry.clearPendingPhase(record.id)
+    }
+    return this.#registry.get(record.id) ?? record
+  }
+
   // --- profile preparation -----------------------------------------------
 
-  async #prepareProfile(record, { allowCreate = true } = {}) {
+  async #prepareProfile(record) {
     if (record.mode !== 'managed') throw this.#failFast('invalid_argument', 'only managed profiles enroll')
     const store = new ProfileCredentialStore({
       credentials: this.#options.credentials,
@@ -1588,11 +1657,13 @@ export class ConnectionManager {
       const noisePublicKey = Buffer.from(identity.noisePublicKey).toString('base64url')
       if (record.bindings?.signingPublicKey !== signingPublicKey) changes.signingPublicKey = signingPublicKey
       if (record.bindings?.noisePublicKey !== noisePublicKey) changes.noisePublicKey = noisePublicKey
-      let hostId = record.bindings?.hostId
-      if (typeof hostId !== 'string' || hostId === '') {
-        if (!allowCreate) throw new PluginError('not_found', 'profile has no Host identity')
-        hostId = generateHostId(this.#hostName, this.#options.random)
+      // The DSH profile is the Host identity. Loading a profile never mints or
+      // mutates identity; the one-time v1 migration does that before connect.
+      const hostId = record.id
+      if (record.bindings?.hostId === undefined) {
         changes.hostId = hostId
+      } else if (record.bindings.hostId !== hostId) {
+        throw new PluginError('registry_corrupt', 'the profile Host identity does not match its profile id')
       }
       if (Object.keys(changes).length > 0) {
         await this.#registry.setBindings(record.id, changes)
@@ -1645,7 +1716,8 @@ export class ConnectionManager {
       verifyAuthorization: this.#options.verifyAuthorization,
       expectedIssuer: this.#options.expectedIssuer,
       expectedAudience: '',
-      displayName: this.#options.displayName ?? this.#hostName,
+      displayName: this.#options.displayName
+        ?? (this.#options.instanceLabel ? `${this.#hostName} · ${this.#options.instanceLabel}` : this.#hostName),
       locale: this.#options.locale,
     })
   }
@@ -1726,7 +1798,7 @@ export class ConnectionManager {
     if (record.pending?.removal === 'removing') return 'removing'
     if (record.pending?.paused) return 'disconnected'
     if (record.mode === 'standalone') return 'disconnected'
-    if (this.#hasBinding(record)) return 'disconnected'
+    if (this.#hasEnrollment(record)) return 'disconnected'
     return 'idle'
   }
 
@@ -1737,7 +1809,7 @@ export class ConnectionManager {
     if (this.#desiredError || this.#configError) return { kind: 'fix-config' }
     if (record?.pending?.paused === true
       && !['reconnecting', 'connected', 'removing'].includes(this.#state)) {
-      return this.#hasBinding(record) ? { kind: 'resume' } : { kind: 'connect' }
+      return this.#hasEnrollment(record) ? { kind: 'resume' } : { kind: 'connect' }
     }
     if (this.#state === 'awaiting_approval' || this.#state === 'requesting') {
       const url = intent?.approveUrl ?? null
@@ -1748,19 +1820,25 @@ export class ConnectionManager {
       if (this.#errorCode === 'unauthorized' || this.#errorCode === 'tls_trust' || this.#errorCode === 'invalid_config') {
         return { kind: 'fix-config' }
       }
-      if (this.#errorCode === 'recovery_required' || (this.#hasBinding(record) && this.#errorCode === 'not_found')) {
+      if (this.#errorCode === 'recovery_required' || (this.#hasEnrollment(record) && this.#errorCode === 'not_found')) {
         // An uncertain enrollment/setup attempt is reconciled, not treated as a
         // credential recovery; only an established credential may recover.
         if (record?.pending?.phase === 'enrollment') return { kind: 'retry' }
-        return this.#hasBinding(record) ? { kind: 'recover-credential' } : { kind: 'retry' }
+        return this.#hasEnrollment(record) ? { kind: 'recover-credential' } : { kind: 'retry' }
       }
-      return this.#hasBinding(record) ? { kind: 'retry' } : { kind: 'connect' }
+      return this.#hasEnrollment(record) ? { kind: 'retry' } : { kind: 'connect' }
     }
     return { kind: 'wait' }
   }
 
   #hasBinding(record) {
     return typeof record?.bindings?.hostId === 'string' && record.bindings.hostId !== ''
+  }
+
+  #hasEnrollment(record) {
+    return this.#hasBinding(record) &&
+      typeof record?.bindings?.operationId === 'string' && record.bindings.operationId !== '' &&
+      typeof record?.bindings?.enrollmentRevision === 'string' && record.bindings.enrollmentRevision !== ''
   }
 
   #pendingOperation(record, intent) {
@@ -1844,7 +1922,7 @@ export class ConnectionManager {
     if (!operationId || !accessOrigin) return false
     try {
       const metadata = await this.#metadataFor(record)
-      const prepared = await this.#prepareProfile(record, { allowCreate: false })
+      const prepared = await this.#prepareProfile(record)
       const client = this.#createClient(record, prepared, metadata)
       const status = await client.readOperation({
         accessOrigin,
@@ -1872,18 +1950,23 @@ export class ConnectionManager {
       }
       if (['refused', 'fenced', 'absent', 'expired'].includes(status.outcome)) {
         // A definitive no-effect outcome proves the newer attempt did not
-        // register. Repair the local binding to the confirmed credential and
-        // settle the rejected journal without a new enrollment.
+        // register. Repair the local binding to the confirmed credential, or
+        // discard the unusable intent so the user can start a fresh approval.
         const credential = await prepared.store.getJson(CREDENTIAL_PURPOSES.transportCredential)
-        if (!credential) return false
         await this.#registry.setPending(record.id, { uncertain: false })
         await this.#registry.clearPendingPhase(record.id)
         try {
           const journal = this.#intentJournal(record)
-          if (journal) journal.write({ ...(journal.read() ?? {}), state: 'rejected', operationId, settledAt: this.#now() })
+          if (journal) {
+            if (credential) {
+              journal.write({ ...(journal.read() ?? {}), state: 'rejected', operationId, settledAt: this.#now() })
+            } else {
+              journal.clear()
+            }
+          }
         } catch { /* contained */ }
         this.#lastErrorCode = null
-        return true
+        return credential ? true : 'restart'
       }
       // admitted/pending/unknown: retain the original operation across restart.
       return false

@@ -606,7 +606,18 @@ export class ManagedEnrollmentClient {
         }
         if (state === 'approved') {
           const approved = this.validateApproval(payload, { intent })
-          this.#journal.write({ ...intent, state: 'approved', approvedAt: this.#now(), operationId: approved.operationId })
+          // Persist the signed authorization and route with the approved
+          // intent: a restart between approval and enrollment must be able to
+          // finish the same operation instead of losing it or asking again.
+          this.#journal.write({
+            ...intent,
+            state: 'approved',
+            approvedAt: this.#now(),
+            operationId: approved.operationId,
+            authorization: approved.authorization,
+            route: approved.route,
+            authorizationExpiresAtUnixMs: approved.authorization?.expiresAtUnixMs,
+          })
           return approved
         }
         fail('protocol_version_incompatible', 'approval state is unknown')

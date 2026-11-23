@@ -70,6 +70,10 @@ export function resolveManagerConfig(raw = {}) {
   if (issuerPublicKey !== '' && (typeof issuerPublicKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(issuerPublicKey))) {
     throw new ConfigError('invalid_config', 'enrollment_issuer_public_key must be one base64url Ed25519 public key')
   }
+  const instanceLabel = pick(raw, ['host_label'], '')
+  if (typeof instanceLabel !== 'string' || instanceLabel.length > 64 || /[\u0000-\u001F\u007F]/.test(instanceLabel)) {
+    throw new ConfigError('invalid_config', 'host_label must be a string of at most 64 characters')
+  }
   const expectedIssuer = pick(raw, ['enrollment_issuer'], '')
   if (expectedIssuer !== '') {
     try {
@@ -85,6 +89,7 @@ export function resolveManagerConfig(raw = {}) {
     stateRoot: stateRoot.trim(),
     issuerPublicKey,
     expectedIssuer,
+    instanceLabel: instanceLabel.trim(),
     pendingQueueEnabled: boolean(pick(raw, ['pending_queue_enabled'], true), true),
     enableOpenQuestionBroker: boolean(pick(raw, ['enable_open_question_broker'], true), true),
     logLevel: pick(raw, ['log_level'], 'info'),

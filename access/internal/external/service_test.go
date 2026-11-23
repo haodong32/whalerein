@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -13,11 +14,16 @@ import (
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
 
+func testHigherRevision(candidate, current string) bool {
+	c, ce := strconv.ParseUint(candidate, 10, 64)
+	o, oe := strconv.ParseUint(current, 10, 64)
+	return ce == nil && oe == nil && c > o
+}
+
 type fakeStore struct {
 	enrollments map[string]store.ExternalEnrollment
 	operations  map[string]store.ExternalOperation
 	byPayload   map[string]store.ExternalOperation
-	revision    int
 	err         error
 	commits     int
 	credential  string
@@ -75,8 +81,27 @@ func (f *fakeStore) EnrollHost(_ context.Context, operation store.ExternalOperat
 		}
 		return f.enrollments[operation.HostID], "", false, nil
 	}
-	if _, exists := f.enrollments[enrollment.HostID]; exists {
-		return store.ExternalEnrollment{}, "", false, store.ErrConflict
+	if existing, exists := f.enrollments[enrollment.HostID]; exists {
+		disabled := existing.DisabledAt != nil || existing.State == "enrollment_disabled"
+		if !disabled {
+			return store.ExternalEnrollment{}, "", false, store.ErrConflict
+		}
+		if !testHigherRevision(operation.EnrollmentRevision, existing.EnrollmentRevision) {
+			return store.ExternalEnrollment{}, "", false, ErrEnrollmentDisabled
+		}
+		existing.EnrollmentRevision = operation.EnrollmentRevision
+		existing.HostSigningPublicKey = enrollment.HostSigningPublicKey
+		existing.HostNoisePublicKey = enrollment.HostNoisePublicKey
+		existing.OperationID = operation.OperationID
+		existing.State = "enrollment_pending"
+		existing.DisabledAt = nil
+		operation.Outcome = "committed"
+		operation.State = "operation_committed"
+		f.operations[operation.OperationID] = operation
+		f.byPayload[operation.AuthorizationID] = operation
+		f.enrollments[existing.HostID] = existing
+		f.commits++
+		return existing, f.credential, true, nil
 	}
 	f.commits++
 	operation.Outcome = "committed"
@@ -103,11 +128,6 @@ func (f *fakeStore) Operation(_ context.Context, operationID string) (store.Exte
 		return store.ExternalOperation{}, store.ErrNotFound
 	}
 	return operation, nil
-}
-
-func (f *fakeStore) NextEnrollmentRevision(context.Context, string) (string, error) {
-	f.revision++
-	return "1", nil
 }
 
 func (f *fakeStore) MarkEnrollmentReady(_ context.Context, hostID string, at time.Time) (store.ExternalEnrollment, bool, error) {
@@ -383,19 +403,42 @@ func TestEnrollHostRefusesAMismatchedService(t *testing.T) {
 	}
 }
 
-func TestEnrollHostRefusesADisabledEnrollment(t *testing.T) {
+func TestEnrollHostRefusesADisabledEnrollmentWithoutAHigherRevision(t *testing.T) {
 	h := newHarness(t)
 	service, data, request := h.service, h.data, h.data.request
 	disabled := time.Now().UTC()
 	data.enrollments[request.GetHostId()] = store.ExternalEnrollment{
-		HostID:     request.GetHostId(),
-		DisabledAt: &disabled,
+		HostID:             request.GetHostId(),
+		EnrollmentRevision: "1",
+		DisabledAt:         &disabled,
 	}
 	if _, err := service.EnrollHost(context.Background(), request); !errors.Is(err, ErrEnrollmentDisabled) {
 		t.Fatalf("expected a disabled refusal, got %v", err)
 	}
 	if data.commits != 0 {
 		t.Fatal("a disabled enrollment must not be re-created")
+	}
+}
+
+func TestEnrollHostReenablesWithAHigherRevision(t *testing.T) {
+	h := newHarness(t)
+	service, data, request := h.service, h.data, h.data.request
+	disabled := time.Now().UTC()
+	data.enrollments[request.GetHostId()] = store.ExternalEnrollment{
+		HostID:             request.GetHostId(),
+		EnrollmentRevision: "0",
+		DisabledAt:         &disabled,
+	}
+	if response, err := service.EnrollHost(context.Background(), request); err != nil {
+		t.Fatalf("unexpected re-enable error: %v", err)
+	} else if response.GetStatus().GetEnrollmentRevision() != "1" {
+		t.Fatalf("unexpected revision %q", response.GetStatus().GetEnrollmentRevision())
+	}
+	if data.commits != 1 {
+		t.Fatalf("expected one re-enable commit, got %d", data.commits)
+	}
+	if data.enrollments[request.GetHostId()].DisabledAt != nil {
+		t.Fatal("the new generation must clear disabled_at")
 	}
 }
 

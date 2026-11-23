@@ -226,16 +226,6 @@ func TestDisabledFromRemovalDefaultsTheRevocationMap(t *testing.T) {
 	}
 }
 
-func TestNextEnrollmentRevisionReportsCountFailures(t *testing.T) {
-	db := &fakeDB{t: t, queryRowFn: func(context.Context, string, ...any) pgx.Row {
-		return syntheticRow{err: errStoreUnit}
-	}}
-	revision, err := newStore(db).NextEnrollmentRevision(context.Background(), "ws-1")
-	if !errors.Is(err, errStoreUnit) || !strings.Contains(err.Error(), "count enrollments") || revision != "" {
-		t.Fatalf("revision=%q err=%v", revision, err)
-	}
-}
-
 func TestConsumeHostSignatureRejectsMalformedInputAndStorageFailures(t *testing.T) {
 	at := time.Unix(1_700_000_000, 0).UTC()
 	hash := make([]byte, 32)

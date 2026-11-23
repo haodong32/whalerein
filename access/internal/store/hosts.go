@@ -82,8 +82,19 @@ func (s *Store) SetHostAuthorizationKey(ctx context.Context, hostID string, publ
 // A missing host or a host that has not registered a key returns ErrNotFound.
 func (s *Store) HostAuthorizationKey(ctx context.Context, hostID string) ([]byte, error) {
 	var key []byte
+	// A removed or disabled enrollment must not keep acting through the legacy
+	// Host signature key. Standalone hosts have no external enrollment row.
 	err := s.db.QueryRow(ctx, `
-		SELECT authorization_public_key FROM hosts WHERE host_id = $1`, hostID).Scan(&key)
+		SELECT h.authorization_public_key FROM hosts h
+		WHERE h.host_id = $1
+		  AND (
+			NOT EXISTS (SELECT 1 FROM external_enrollments e WHERE e.host_id = h.host_id)
+			OR EXISTS (
+				SELECT 1 FROM external_enrollments e
+				WHERE e.host_id = h.host_id
+				  AND e.disabled_at IS NULL
+				  AND e.state <> 'enrollment_disabled')
+		  )`, hostID).Scan(&key)
 	if err != nil {
 		if errors.Is(wrapRequestScan(err), ErrNotFound) {
 			return nil, ErrNotFound

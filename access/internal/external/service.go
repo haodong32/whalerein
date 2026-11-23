@@ -17,7 +17,6 @@ type Store interface {
 	EnrollHost(ctx context.Context, operation store.ExternalOperation, enrollment store.ExternalEnrollment) (store.ExternalEnrollment, string, bool, error)
 	Enrollment(ctx context.Context, hostID string) (store.ExternalEnrollment, error)
 	Operation(ctx context.Context, operationID string) (store.ExternalOperation, error)
-	NextEnrollmentRevision(ctx context.Context, workspaceID string) (string, error)
 	MarkEnrollmentReady(ctx context.Context, hostID string, at time.Time) (store.ExternalEnrollment, bool, error)
 	DisableEnrollment(ctx context.Context, hostID string, at time.Time) (store.DisabledEnrollment, error)
 	DisableEnrollmentWithTarget(ctx context.Context, hostID, removalOperationID string, expected *store.RemovalTarget, at time.Time) (store.DisabledEnrollment, error)
@@ -149,19 +148,19 @@ func (s *Service) EnrollHost(ctx context.Context, request *whalereinv1.HostEnrol
 		operationID = store.NewOperationID()
 	}
 	existing, err := s.store.Enrollment(ctx, request.GetHostId())
-	if err == nil && (existing.DisabledAt != nil || existing.State == "enrollment_disabled") {
-		return nil, ErrEnrollmentDisabled
-	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, fmt.Errorf("load enrollment: %w", err)
 	}
+	// A disabled generation is refused by the store unless this authorization
+	// carries a strictly higher revision, in which case it starts the next
+	// generation for the same Host identity.
 
+	// Generations are allocated by Cloud under its Host lock and bound into
+	// the signed authorization. Access never invents one: a missing revision
+	// cannot name a generation.
 	revision := auth.GetEnrollmentRevision()
 	if revision == "" {
-		revision, err = s.store.NextEnrollmentRevision(ctx, auth.GetWorkspaceId())
-		if err != nil {
-			return nil, err
-		}
+		return nil, fmt.Errorf("%w: enrollment revision is required", ErrAuthorizationMismatch)
 	}
 	if expected := auth.GetExpectedRevision(); expected != "" && existing.EnrollmentRevision != "" &&
 		existing.EnrollmentRevision != expected {
@@ -193,6 +192,9 @@ func (s *Service) EnrollHost(ctx context.Context, request *whalereinv1.HostEnrol
 			enrollment, loadErr := s.store.Enrollment(ctx, request.GetHostId())
 			if loadErr != nil {
 				return nil, loadErr
+			}
+			if enrollment.OperationID != recorded.OperationID {
+				return nil, ErrOperationConflict
 			}
 			return &whalereinv1.HostEnrollmentResponse{Status: enrollmentStatus(enrollment)}, nil
 		case store.OperationRefused:

@@ -267,3 +267,12 @@ test('the Standalone runtime resolver refuses another explicitly selected servic
   }
   assert.equal(resolveConfig({ ...base, service: 'standalone' }).connectionMode, 'standalone')
 })
+
+test('a managed profile accepts a bounded display label without affecting identity', () => {
+  const config = resolveManagerConfig({ service: 'whalerein_cloud', state_root: '/tmp/whalerein-label', host_label: 'Work Mac' })
+  assert.equal(config.instanceLabel, 'Work Mac')
+  assert.throws(
+    () => resolveManagerConfig({ service: 'whalerein_cloud', state_root: '/tmp/whalerein-label', host_label: 'x'.repeat(65) }),
+    /host_label/
+  )
+})

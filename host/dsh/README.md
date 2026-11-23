@@ -109,7 +109,9 @@ origin. `tls` accepts only `ca_provider` (`system` or `file`, default `system`) 
 `ca_file` (an absolute path, required only for `file`). Unknown fields are errors.
 Access/MQTT routes and enrollment credentials are supplied by the approved service,
 not entered in the custom block. Changing authority selects an isolated identity;
-changing a label reuses the identity.
+changing a label reuses the identity. Managed profiles also accept an optional
+`host_label` (at most 64 characters). It is display metadata, included in the
+approval name as `hostname · host_label`, and never changes the Host id or keys.
 
 `service: standalone` uses the existing manual fields: `server`, `access_port`,
 `mqtt_port`, `host_id`, `host_token`, `admin_token`, `ca_file`, and, for explicit
@@ -175,9 +177,11 @@ definitive authentication refusal. Only an active `removing` state is polled
 to completion; a healthy connected profile has no background removal poll.
 A blocked or abandoned browser handoff leaves the original connection policy
 intact. Once removal is terminal the page shows a fresh-approval **Reconnect**
-action; reconnecting starts a fresh browser approval for the same Host
-identity, and Cloud allocates the next enrollment revision and resets the
-removal intent on approval. A rejected removal keeps the live binding usable. Inactive identity deletion is not exposed by the settings page. Managed profiles hide device invitation/revocation
+action; reconnecting keeps the DSH profile Host id and starts a new browser
+approval for the next enrollment generation. Access re-enables the same Host id
+only for a strictly higher revision with identical workspace and keys; old
+credentials, grants and revocation fences remain scoped to the removed
+generation. A rejected removal keeps the live binding usable. Inactive identity deletion is not exposed by the settings page. Managed profiles hide device invitation/revocation
 unless the selected service advertises pairing support; Standalone profiles keep
 the existing pairing, invitation, revocation, and connection-test behavior.
 Managed settings list paired Devices and mark those with an active Session

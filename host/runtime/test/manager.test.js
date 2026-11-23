@@ -1337,6 +1337,7 @@ test('re-adding a removed Host uses fresh approval and does not restore the old 
     await waitFor(() => f.manager.snapshot().state === 'connected')
     const profileId = f.manager.snapshot().profileId
     const oldHostId = f.manager.details().hostId
+    const oldSigningKey = new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).bindings.signingPublicKey
     const oldToken = f.mqtts.at(-1).options.token
     assert.equal(oldToken, 'credential-1')
     await f.manager.remove()
@@ -1354,7 +1355,12 @@ test('re-adding a removed Host uses fresh approval and does not restore the old 
     assert.equal(f.mqtts.at(-1).options.token, 'credential-2')
     assert.notEqual(f.mqtts.at(-1).options.token, oldToken, 'the replaced credential is not the old grant')
     assert.equal(f.manager.details().hostId, oldHostId,
-      're-add reuses the Host identity and obtains a fresh enrollment revision')
+      're-add keeps the same Host identity')
+    assert.equal(
+      new HostProfileRegistry({ stateRoot: f.stateRoot }).get(profileId).bindings.signingPublicKey,
+      oldSigningKey,
+      're-add keeps the same signing key'
+    )
     await f.manager.dispose()
   } finally {
     f.cleanup()
@@ -2288,7 +2294,7 @@ test('resuming a switched profile refuses pending removal and honours a paused t
     const staging = await f.manager.enableStaging()
     const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
     // Bind the staged profile so resuming it reaches the removal fence.
-    registry.setBindings(staging.id, { hostId: 'staging-host-1', accessOrigin: 'https://access.example', operationId: 'op-1' })
+    registry.setBindings(staging.id, { hostId: staging.id, enrollmentRevision: '1', accessOrigin: 'https://access.example', operationId: 'op-1' })
     registry.setPending(staging.id, { removal: 'removing' })
     const fenced = await f.manager.switchProfile(staging.id)
     assert.equal(fenced.profileId, staging.id)
@@ -2829,6 +2835,144 @@ test('a profile identity registry error is wrapped before leaving the manager', 
   }
 })
 
+test('a persisted approved authorization finishes enrollment after restart', async () => {
+  let failEnroll = true
+  let enrollCalls = 0
+  const f = fixture({
+    fetchOptions: {
+      onEnroll: () => {
+        enrollCalls += 1
+        return failEnroll ? json(503, { error: 'unavailable' }) : undefined
+      },
+    },
+  })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'action_required')
+    const profileId = f.manager.snapshot().profileId
+    const journal = intentJournalFor(f.stateRoot, profileId).read()
+    assert.equal(journal.state, 'approved')
+    assert.ok(typeof journal.operationId === 'string' && journal.operationId !== '')
+    assert.ok(journal.authorization && journal.route, 'the approved authorization is durable')
+    const createsBefore = f.network.calls.filter(
+      (call) => call.method === 'POST' && call.url.endsWith('/api/enrollment-requests')
+    ).length
+    await f.manager.dispose()
+
+    failEnroll = false
+    const reopened = createConnectionManager({
+      stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
+      credentials: f.credentials,
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: f.network.fetch,
+      mqtt: createMqtt([]),
+      runtimeFactory: createRuntimes().factory,
+      installationId: 'test-install',
+    })
+    await reopened.ready
+    await waitFor(() => reopened.snapshot().state === 'connected')
+    assert.equal(
+      f.network.calls.filter((call) => call.method === 'POST' && call.url.endsWith('/api/enrollment-requests')).length,
+      createsBefore,
+      'restart resumes the approved operation instead of requesting another approval'
+    )
+    assert.equal(enrollCalls, 2)
+    assert.equal(intentJournalFor(f.stateRoot, profileId).read(), null)
+    await reopened.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('an uncertain enrollment with no credential restarts approval on retry', async () => {
+  const f = fixture({ fetchOptions: { operationOutcome: 'refused' } })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    const profileId = f.manager.snapshot().profileId
+    const store = new ProfileCredentialStore({ credentials: f.credentials, profileId, installationId: 'test-install' })
+    await store.remove(CREDENTIAL_PURPOSES.transportCredential)
+    new HostProfileRegistry({ stateRoot: f.stateRoot }).setPending(profileId, {
+      uncertain: true,
+      phase: 'enrollment',
+      paused: null,
+    })
+    const createsBefore = f.network.calls.filter(
+      (call) => call.method === 'POST' && call.url.endsWith('/api/enrollment-requests')
+    ).length
+    await f.manager.dispose()
+
+    const reopened = createConnectionManager({
+      stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
+      credentials: f.credentials,
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: f.network.fetch,
+      mqtt: createMqtt([]),
+      runtimeFactory: createRuntimes().factory,
+      installationId: 'test-install',
+    })
+    await reopened.ready
+    assert.equal(reopened.snapshot().state, 'action_required')
+    assert.equal(reopened.snapshot().action.kind, 'retry')
+    const retried = await reopened.retry()
+    assert.equal(retried.state, 'awaiting_approval')
+    assert.equal(retried.error, null)
+    assert.equal(
+      f.network.calls.filter((call) => call.method === 'POST' && call.url.endsWith('/api/enrollment-requests')).length,
+      createsBefore + 1,
+      'a no-effect uncertain enrollment starts one fresh approval'
+    )
+    await reopened.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
+test('a committed enrollment without a credential moves retry to credential recovery', async () => {
+  const f = fixture({ fetchOptions: { operationOutcome: 'committed' } })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'connected')
+    await f.manager.disconnect()
+    const profileId = f.manager.snapshot().profileId
+    const store = new ProfileCredentialStore({ credentials: f.credentials, profileId, installationId: 'test-install' })
+    await store.remove(CREDENTIAL_PURPOSES.transportCredential)
+    new HostProfileRegistry({ stateRoot: f.stateRoot }).setPending(profileId, {
+      uncertain: true,
+      phase: 'enrollment',
+      paused: null,
+    })
+    await f.manager.dispose()
+
+    const reopened = createConnectionManager({
+      stateRoot: f.stateRoot,
+      configFile: ensureConfig(f.stateRoot),
+      credentials: f.credentials,
+      source: {},
+      now: () => NOW,
+      hostName: HOST_NAME,
+      fetch: f.network.fetch,
+      mqtt: createMqtt([]),
+      runtimeFactory: createRuntimes().factory,
+      installationId: 'test-install',
+    })
+    await reopened.ready
+    const retried = await reopened.retry()
+    assert.equal(retried.error.code, 'recovery_required')
+    assert.equal(retried.action.kind, 'recover-credential')
+    await reopened.dispose()
+  } finally {
+    f.cleanup()
+  }
+})
+
 test('startup keeps an uncertain operation unresolved when the status read fails', async () => {
   const base = createFetch()
   const fetch = async (url, options = {}) => {
@@ -2894,7 +3038,7 @@ test('applying an environment whose bound target has pending removal stays actio
     await waitFor(() => f.manager.snapshot().state === 'connected')
     const staging = await f.manager.enableStaging()
     const registry = new HostProfileRegistry({ stateRoot: f.stateRoot })
-    registry.setBindings(staging.id, { hostId: 'staging-host-1', accessOrigin: 'https://access.example', operationId: 'op-1' })
+    registry.setBindings(staging.id, { hostId: staging.id, enrollmentRevision: '1', accessOrigin: 'https://access.example', operationId: 'op-1' })
     registry.setPending(staging.id, { removal: 'removing' })
     const applied = await f.manager.applyEnvironment('staging')
     assert.equal(applied.environment, 'staging')
@@ -3065,5 +3209,18 @@ test('a standalone runtime start failure stops the runtime and stays actionable'
     await manager.dispose()
   } finally {
     rmSync(stateRoot, { recursive: true, force: true })
+  }
+})
+
+test('the managed Host id is the profile id and the display label is separate', async () => {
+  const f = fixture({ managerOptions: { instanceLabel: 'Work Mac' } })
+  try {
+    await f.manager.startConnect()
+    await waitFor(() => f.manager.snapshot().state === 'awaiting_approval')
+    assert.equal(f.manager.details().hostId, f.manager.snapshot().profileId)
+    assert.equal(f.network.intent().displayName, `${HOST_NAME} · Work Mac`)
+    await f.manager.dispose()
+  } finally {
+    f.cleanup()
   }
 })
