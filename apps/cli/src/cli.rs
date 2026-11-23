@@ -169,6 +169,12 @@ enum HostArgs {
     },
     /// Select a connected Host as the default.
     Default { host: String },
+    /// Probe one Host and report its authoritative device connection.
+    Status {
+        /// Select the Host for this operation.
+        #[arg(long, value_name = "HOST_ID")]
+        host: Option<String>,
+    },
 }
 
 impl HostArgs {
@@ -190,6 +196,7 @@ impl HostArgs {
                 None,
             ),
             Self::Default { host } => (Command::DefaultHost { host }, None),
+            Self::Status { host } => (Command::HostStatus { host }, None),
         }
     }
 }
@@ -738,6 +745,10 @@ pub enum Command {
 
     /// List Hosts for the selected Cloud or Standalone profile.
     Hosts,
+    /// Probe one Host and report its authoritative device connection.
+    HostStatus {
+        host: Option<String>,
+    },
 
     /// List sessions on one host.
     Sessions {
@@ -1048,6 +1059,7 @@ impl Command {
             Self::DefaultHost { .. } => "host.default",
             Self::Logout => "logout",
             Self::Hosts => "host.list",
+            Self::HostStatus { .. } => "host.status",
             Self::Sessions { .. } => "session.list",
             Self::Models { .. } => "session.models",
             Self::Model {

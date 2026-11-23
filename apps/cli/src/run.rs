@@ -22,9 +22,10 @@ use crate::output::{
     history_message_data, history_page_data, hosts_data, is_tail_output, lifecycle_error_code,
     lifecycle_exit_code, manifest_data, message_json, render_approval, render_approvals,
     render_command, render_doctor, render_download, render_history_message, render_history_page,
-    render_hosts, render_lifecycle_outcome, render_manifest, render_models, render_pair,
-    render_pairing_history, render_questions, render_queue, render_session_model, render_sessions,
-    retain_visible_sessions, sanitize_field, sessions_data, shell_quote, tail_event_json, CliError,
+    render_host_status, render_hosts, render_lifecycle_outcome, render_manifest, render_models,
+    render_pair, render_pairing_history, render_questions, render_queue, render_session_model,
+    render_sessions, retain_visible_sessions, sanitize_field, sessions_data, shell_quote,
+    tail_event_json, CliError,
     CliOutcome, DownloadProgressRenderer, TailRenderer,
 };
 
@@ -627,6 +628,52 @@ async fn dispatch(
         )),
         Command::Hosts if core.client_config().service == ClientService::WhaleReinCloud => {
             crate::account::run(core, command).await
+        }
+        Command::HostStatus { host } => {
+            let host_id = match host.clone().or_else(|| core.default_host().ok().flatten()) {
+                Some(host_id) => host_id,
+                None => {
+                    return Ok(CliOutcome::local_failure(
+                        command,
+                        "invalid_argument",
+                        "Select a Host with --host or `whalerein host default`.",
+                        2,
+                    ))
+                }
+            };
+            // The probe is the point: a reported state always means "right
+            // now", never a cached value from an earlier session.
+            let attempt = core.connect_host(&host_id).await;
+            let snapshot = core.connection_snapshot(&host_id).filter(|snapshot| {
+                snapshot.state != whalerein_core::api::ConnectionState::Disconnected
+            });
+            match (snapshot, attempt) {
+                (Some(snapshot), _) => Ok(CliOutcome::success(
+                    command,
+                    json!({
+                        "host_id": snapshot.host_id,
+                        "connection": {
+                            "state": snapshot.state.as_str(),
+                            "code": snapshot.code,
+                            "since_unix_ms": snapshot.since_unix_ms,
+                        }
+                    }),
+                    render_host_status(&snapshot),
+                )),
+                (None, Ok(snapshot)) => Ok(CliOutcome::success(
+                    command,
+                    json!({
+                        "host_id": snapshot.host_id,
+                        "connection": {
+                            "state": snapshot.state.as_str(),
+                            "code": snapshot.code,
+                            "since_unix_ms": snapshot.since_unix_ms,
+                        }
+                    }),
+                    render_host_status(&snapshot),
+                )),
+                (None, Err(error)) => Err(error),
+            }
         }
         Command::Hosts => match core.inspect_regional_hosts().await {
             Ok(hosts) => Ok(CliOutcome::success(

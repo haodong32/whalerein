@@ -2226,10 +2226,19 @@ impl Core {
         if snapshot.state == ConnectionState::Connected {
             return Ok(snapshot);
         }
-        connection
-            .wait_ready(&Cancellation::new())
-            .await
-            .map(|()| connection.snapshot())
+        // Bounded so a caller that probes (the CLI, an app launch) reports what
+        // is true now instead of blocking on a retry loop. A slow or absent
+        // Host simply keeps its current state; the connection keeps trying.
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            connection.wait_ready(&Cancellation::new()),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(connection.snapshot()),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Ok(connection.snapshot()),
+        }
     }
 
     /// Open the connection without waiting for it, for a background monitor.
