@@ -177,7 +177,7 @@ pub struct Core {
     cache: Arc<Mutex<Option<Arc<Cache>>>>,
     pub(crate) watch_active: Arc<AtomicBool>,
     /// One device connection per Host, independent of any session.
-    pub(crate) connections: Arc<crate::connection::HostConnections>,
+    connections: Arc<crate::connection::HostConnections>,
     pub(crate) attachments: Arc<crate::attachments::Downloads>,
     instance: Option<Arc<Instance>>,
     /// Platform anchors supplied as data by a client that must extract them

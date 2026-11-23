@@ -67,10 +67,8 @@ struct HostConnectionStatusChrome: View {
             "checkmark.circle"
         case .unknown, .connecting, .degraded, .reconnecting:
             "arrow.triangle.2.circlepath"
-        case .disconnected, .offline:
-            "wifi.slash"
-        case .unavailable:
-            "exclamationmark.triangle"
+        case .disconnected, .offline, .unavailable:
+            status.symbol
         }
     }
 }

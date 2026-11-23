@@ -7,7 +7,7 @@
 //! detach without disturbing it.
 //!
 //! ```text
-//! Connecting -> Syncing -> Connected
+//! Connecting -> Connected (broker session and subscriptions acknowledged)
 //! Connected -> Reconnecting (broker dropped) -> Connecting ...
 //! any -> Offline { code } (terminal: TLS, credentials, revocation)
 //! ```
@@ -87,18 +87,6 @@ pub(crate) struct ConnectionInput {
 /// One attached observer. The transport pushes frames into `control` and
 /// `live`; dropping the subscription detaches it without touching the
 /// connection.
-pub(crate) struct Subscription {
-    control: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
-    live: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
-    interrupted: Arc<AtomicBool>,
-    overflow: Arc<AtomicBool>,
-    live_overflow: Arc<AtomicBool>,
-    error: Arc<Mutex<Option<CoreError>>>,
-    queued: Arc<AtomicUsize>,
-    live_queued: Arc<AtomicUsize>,
-    guard: SubscriptionGuard,
-}
-
 /// An attached observer split into its receiver halves plus a detach guard.
 pub(crate) struct SubscriptionParts {
     pub control: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
@@ -109,37 +97,6 @@ pub(crate) struct SubscriptionParts {
     pub error: Arc<Mutex<Option<CoreError>>>,
     pub queued: Arc<AtomicUsize>,
     pub live_queued: Arc<AtomicUsize>,
-}
-
-impl Subscription {
-    /// Split the observer from its channels. The returned guard detaches the
-    /// observer from the connection when dropped; the connection keeps running.
-    pub(crate) fn into_parts(self) -> (SubscriptionParts, SubscriptionGuard) {
-        let Subscription {
-            control,
-            live,
-            interrupted,
-            overflow,
-            live_overflow,
-            error,
-            queued,
-            live_queued,
-            guard,
-        } = self;
-        (
-            SubscriptionParts {
-                control,
-                live,
-                interrupted,
-                overflow,
-                live_overflow,
-                error,
-                queued,
-                live_queued,
-            },
-            guard,
-        )
-    }
 }
 
 pub(crate) struct SubscriptionGuard {
@@ -249,8 +206,9 @@ impl HostConnection {
         }
     }
 
-    /// Attach one observer to the shared transport.
-    pub(crate) fn subscribe(&self) -> Subscription {
+    /// Attach one observer to the shared transport. The guard detaches it when
+    /// dropped; the connection keeps running.
+    pub(crate) fn subscribe(&self) -> (SubscriptionParts, SubscriptionGuard) {
         static NEXT_SUBSCRIBER: AtomicUsize = AtomicUsize::new(1);
         let id = NEXT_SUBSCRIBER.fetch_add(1, Ordering::SeqCst) as u64;
         let control_budget = self.queue_bytes;
@@ -279,20 +237,22 @@ impl HostConnection {
                 control_budget,
                 live_budget,
             });
-        Subscription {
-            control,
-            live,
-            interrupted,
-            overflow,
-            live_overflow,
-            error,
-            queued,
-            live_queued,
-            guard: SubscriptionGuard {
+        (
+            SubscriptionParts {
+                control,
+                live,
+                interrupted,
+                overflow,
+                live_overflow,
+                error,
+                queued,
+                live_queued,
+            },
+            SubscriptionGuard {
                 subscriber_id: id,
                 subscribers: self.subscribers.clone(),
             },
-        }
+        )
     }
 
     fn interrupt_subscribers(&self, detail: &'static str) {
@@ -374,7 +334,9 @@ impl HostConnection {
                 },
                 |_| true,
                 |event| match event {
-                    MqttConnectionEvent::Connected => owner.set_state(ConnectionState::Syncing),
+                    // The broker session exists but is not usable until every
+                    // subscription is acknowledged.
+                    MqttConnectionEvent::Connected => {}
                     MqttConnectionEvent::Subscribed => owner.set_state(ConnectionState::Connected),
                     MqttConnectionEvent::Disconnected => {
                         owner.interrupt_subscribers("device connection was interrupted");

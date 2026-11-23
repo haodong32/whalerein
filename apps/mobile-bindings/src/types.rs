@@ -1120,8 +1120,8 @@ pub enum ConversationEvent {
     /// delivered with no session open and survives watch replacement.
     HostConnection {
         host_id: String,
-        /// `connecting`, `syncing`, `connected`, `reconnecting`, `offline`,
-        /// `disconnected`.
+        /// `connecting`, `connected`, `reconnecting`, `offline`,
+        /// `disconnected`, or `revoked`.
         state: String,
         /// Present only for a terminal state (revoked, unauthorized, TLS...).
         code: Option<String>,

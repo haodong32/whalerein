@@ -135,24 +135,17 @@ struct SessionSwitcherHostSection: View {
 
     private var currentHostSymbol: String {
         guard let host = currentHost else { return "wifi.slash" }
-        switch hostStatus(host) {
-        case .connected, .degraded:
-            return "desktopcomputer"
-        case .unavailable:
-            return "exclamationmark.triangle"
-        case .unknown, .connecting, .reconnecting, .disconnected, .offline:
-            return "wifi.slash"
-        }
+        return hostStatus(host).symbol
     }
 
     private var hostStatusText: String {
         guard let host = currentHost else { return "" }
-        return L10nKey.hostPresenceKey(for: hostStatus(host)).string
+        return hostStatus(host).presenceKey.string
     }
 
     private var hostPickerAccessibilityValue: String {
         guard let host = currentHost else { return "" }
-        var parts = [host.hostId, L10nKey.hostPresenceKey(for: hostStatus(host)).string]
+        var parts = [host.hostId, hostStatus(host).presenceKey.string]
         if models.hosts.selectedHostId == host.hostId {
             parts.append(L10n.hostsSelected.string)
         }

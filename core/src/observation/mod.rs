@@ -24,6 +24,7 @@ use crate::access::DeliveryClass;
 use crate::api::core::watch::{SinkFuture, UpdateSink};
 use crate::api::{Cancellation, ObservationInterests, SessionEvent, SessionEventPayload};
 use crate::api::{Core, CoreError, CoreResult, QuestionView};
+use crate::connection::SubscriptionGuard;
 use crate::conversation::{Conversation, ViewUpdate};
 use crate::runtime::ConnectionState;
 use crate::session::SessionKey;
@@ -167,6 +168,8 @@ impl Drop for WatchGuard {
 /// stops the region watch; the connection outlives it.
 struct Pump {
     renewal: Option<JoinHandle<()>>,
+    /// Keeps this observer registered with the shared connection.
+    _detach: SubscriptionGuard,
 }
 
 impl Drop for Pump {
@@ -636,11 +639,6 @@ async fn run_connection(
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
 ) -> CoreResult<End> {
     let channel = core.ensure_channel(&key.host_id, fresh).await?;
-    if fresh {
-        let _ = core
-            .runtime
-            .set_state(&key.host_id, ConnectionState::Reconnecting);
-    }
     // The transport belongs to the Host, not to this session. Attaching here
     // only subscribes to it; the connection keeps running for other sessions
     // and for the app-level monitor.
@@ -648,7 +646,7 @@ async fn run_connection(
     let connection = core
         .host_connection_with(&key.host_id, regional.clone())
         .await?;
-    let (subscription, detach) = connection.subscribe().into_parts();
+    let (subscription, detach) = connection.subscribe();
     let interrupted = subscription.interrupted.clone();
     let overflow = subscription.overflow.clone();
     let live_overflow = subscription.live_overflow.clone();
@@ -687,10 +685,10 @@ async fn run_connection(
             }
         })
     });
-    let pump = Pump { renewal };
-    // Keep the detach guard alive for the whole watch; it is dropped with the
-    // pump's owner when the loop returns.
-    let _detach = detach;
+    let pump = Pump {
+        renewal,
+        _detach: detach,
+    };
     let response = core
         .query(
             &key.host_id,

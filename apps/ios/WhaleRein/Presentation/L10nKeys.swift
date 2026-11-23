@@ -90,21 +90,6 @@ extension L10nKey {
     /// Host list row label. Rows keep the shorter presence wording while they
     /// derive from the same Host status; terminal failures keep the actionable
     /// error instead of collapsing to "offline".
-    static func hostPresenceKey(for status: HostConnectionStatus) -> L10nKey {
-        switch status {
-        case .connected, .degraded:
-            return .hostsOnline
-        case .unknown, .connecting:
-            return .conversationConnectionConnecting
-        case .reconnecting:
-            return .conversationConnectionReconnecting
-        case .disconnected, .offline:
-            return .hostsOffline
-        case .unavailable(let code):
-            return hostConnectionErrorKey(for: code)
-        }
-    }
-
     /// Actionable text for a terminal Host connection failure.
     static func hostConnectionErrorKey(for code: String) -> L10nKey {
         switch code.lowercased() {

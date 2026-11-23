@@ -966,9 +966,6 @@ impl MobileCore {
         Ok(sessions.into_iter().map(Into::into).collect())
     }
 
-    /// Current in-memory connection state: `disconnected`, `pairing`,
-    /// `connecting`, `handshaking`, `syncing`, `connected`, `reconnecting`,
-    /// `offline`, `revoked` or `failed`.
     /// The authoritative device connection for one Host.
     ///
     /// `None` means it was never opened; that is different from `offline`.

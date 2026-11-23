@@ -33,7 +33,7 @@ enum HostConnectionStatus: Equatable, Sendable {
         switch state.lowercased() {
         case "connected":
             self = .connected
-        case "pairing", "connecting", "handshaking", "syncing":
+        case "connecting":
             self = .connecting
         case "reconnecting":
             self = .reconnecting
@@ -53,6 +53,26 @@ enum HostConnectionStatus: Equatable, Sendable {
     }
 
     var isOnline: Bool { self == .connected || self == .degraded }
+
+    /// Symbol shared by every surface that renders this Host.
+    var symbol: String {
+        switch self {
+        case .connected, .degraded: "desktopcomputer"
+        case .unavailable: "exclamationmark.triangle"
+        case .unknown, .connecting, .reconnecting, .disconnected, .offline: "wifi.slash"
+        }
+    }
+
+    /// Wire label used by the compact/sidebar summaries.
+    var presenceKey: L10nKey {
+        switch self {
+        case .connected, .degraded: .hostsOnline
+        case .unknown, .connecting: .conversationConnectionConnecting
+        case .reconnecting: .conversationConnectionReconnecting
+        case .disconnected, .offline: .hostsOffline
+        case .unavailable(let code): L10nKey.hostConnectionErrorKey(for: code)
+        }
+    }
 
 }
 

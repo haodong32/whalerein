@@ -11,7 +11,6 @@ struct HostConnectivityTests {
     func stateMapping() {
         #expect(HostConnectionStatus(state: "connected", code: nil) == .connected)
         #expect(HostConnectionStatus(state: "connecting", code: nil) == .connecting)
-        #expect(HostConnectionStatus(state: "syncing", code: nil) == .connecting)
         #expect(HostConnectionStatus(state: "reconnecting", code: nil) == .reconnecting)
         #expect(HostConnectionStatus(state: "offline", code: nil) == .offline)
         #expect(HostConnectionStatus(state: "disconnected", code: nil) == .disconnected)

@@ -111,12 +111,10 @@ struct SettingsAccountView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(verbatim: host.hostId)
                                     Text(
-                                        L10nKey.hostPresenceKey(
-                                            for: hostConnectivity.status(
-                                                for: host.hostId,
-                                                fallbackOnline: host.online
-                                            )
-                                        ).key
+                                        hostConnectivity
+                                            .status(for: host.hostId, fallbackOnline: host.online)
+                                            .presenceKey
+                                            .key
                                     )
                                     .font(.caption)
                                     .foregroundStyle(.secondary)

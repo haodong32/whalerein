@@ -1249,7 +1249,7 @@ final class LiveSessionService: SessionService {
             } else {
                 switch state {
                 case "connected": mqtt = .ok
-                case "failed", "offline", "revoked": mqtt = .failed
+                case "offline", "revoked": mqtt = .failed
                 default: mqtt = .idle
                 }
             }
