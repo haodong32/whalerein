@@ -39,6 +39,9 @@ pub struct MqttSettings {
     pub port: u16,
     pub tls: bool,
     pub ca_pem: Option<Vec<u8>>,
+    /// Platform anchors supplied as data when Rust cannot enumerate the
+    /// platform store itself. Ignored in custom mode.
+    pub platform_roots: Option<Vec<u8>>,
     pub alpn: Vec<String>,
     pub keep_alive: Duration,
     pub(crate) budget: TransportBudget,
@@ -65,6 +68,7 @@ impl MqttSettings {
             },
             tls,
             ca_pem: None,
+            platform_roots: None,
             alpn: if tls {
                 vec!["mqtt".to_owned()]
             } else {
@@ -98,6 +102,7 @@ impl MqttSettings {
             port,
             tls,
             ca_pem: None,
+            platform_roots: None,
             alpn: Vec::new(),
             keep_alive: DEFAULT_KEEP_ALIVE,
             budget: TransportBudget::default(),
@@ -106,6 +111,11 @@ impl MqttSettings {
 
     pub fn with_ca(mut self, ca_pem: Option<Vec<u8>>) -> Self {
         self.ca_pem = ca_pem;
+        self
+    }
+
+    pub fn with_platform_roots(mut self, platform_roots: Option<Vec<u8>>) -> Self {
+        self.platform_roots = platform_roots;
         self
     }
 
@@ -123,7 +133,11 @@ impl MqttSettings {
     fn tls_config(&self) -> Result<Arc<ClientConfig>, AccessError> {
         // HTTPS and MQTT share one trust decision: platform roots by default,
         // or exactly the configured CA bundle.
-        super::tls::client_config(self.ca_pem.as_deref(), &self.alpn)
+        super::tls::client_config(
+            self.ca_pem.as_deref(),
+            self.platform_roots.as_deref(),
+            &self.alpn,
+        )
     }
 
     #[cfg(test)]

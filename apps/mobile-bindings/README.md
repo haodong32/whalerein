@@ -103,9 +103,11 @@ Android specifics:
   AES-256-GCM Keystore key per profile and one atomically replaced encrypted
   document under `secrets/` (backup-excluded). Absent, temporary failure,
   invalidated key and corrupt ciphertext are distinct outcomes.
-- `AndroidTrustRoots` materializes the platform CA store for Core's system-trust
-  consumer shared by HTTPS and MQTT; custom-CA instances replace it with their
-  own bundle. `TlsPolicy` rejects cleartext Standalone targets.
+- `AndroidTrustRoots` reads the platform CA store as one PEM bundle and passes
+  it to the Core constructor for the system-trust path shared by HTTPS and MQTT;
+  nothing is written to disk and no process-global path is changed. Custom-CA
+  instances ignore it and trust their own bundle. `TlsPolicy` rejects cleartext
+  Standalone targets.
 - `DiagnosticContext` reserves the Core trace before opening and forwards
   redacted events through a bounded background dispatcher. `StateDiagnosticSinkAdapter`
   maps them onto the `:state` sink.

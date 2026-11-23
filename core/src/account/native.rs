@@ -316,6 +316,7 @@ impl AccountClient {
         instance: Arc<Instance>,
         secrets: Arc<dyn SecretStore>,
         create: bool,
+        platform_roots: Option<Vec<u8>>,
     ) -> CoreResult<Self> {
         let definition = &instance
             .cloud
@@ -331,8 +332,12 @@ impl AccountClient {
         }
         // The account endpoints follow the same two trust modes as Access:
         // platform verification by default, or exactly the configured CA.
-        let tls = crate::access::tls::client_config(instance.ca_pem.as_deref(), &[])
-            .map_err(CoreError::from)?;
+        let tls = crate::access::tls::client_config(
+            instance.ca_pem.as_deref(),
+            platform_roots.as_deref(),
+            &[],
+        )
+        .map_err(CoreError::from)?;
         let builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(15))
@@ -1641,9 +1646,10 @@ mod tests {
     ) -> AccountClient {
         // Keep the production instance, storage, and file lock. Redirect this
         // test's HTTP requests to the existing loopback provider fixture.
-        let mut client = AccountClient::for_instance(instance.clone(), secrets.clone(), create)
-            .await
-            .unwrap();
+        let mut client =
+            AccountClient::for_instance(instance.clone(), secrets.clone(), create, None)
+                .await
+                .unwrap();
         client.api = server.url();
         client.issuer = server.url().join("oidc").unwrap();
         client

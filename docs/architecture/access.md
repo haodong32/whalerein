@@ -63,7 +63,7 @@ transports. The decision is made once from configuration and the same
 
 | Mode | Configuration | Trust set |
 |---|---|---|
-| System (default) | no CA configured | Apple/Windows platform verifier; elsewhere the platform certificate files, or the portable Mozilla roots when the platform exposes no store |
+| System (default) | no CA configured | Apple/Windows platform verifier; elsewhere the platform certificate files, or the portable Mozilla roots when the platform exposes no store. A client that must extract the platform store itself (Android) supplies those anchors to Core as construction data instead of a process-global path |
 | Custom | explicit `ca_pem` / `ca_file` | exactly the supplied CA bundle; it replaces the platform roots |
 
 Custom mode follows the `--cacert` convention used by curl, Git, Go and

@@ -28,12 +28,13 @@ use super::AccessError;
 /// device connection.
 pub(crate) fn client_config(
     ca_pem: Option<&[u8]>,
+    platform_roots: Option<&[u8]>,
     alpn: &[String],
 ) -> Result<Arc<ClientConfig>, AccessError> {
     let provider = crypto_provider();
     let verifier = match ca_pem {
         Some(ca) => custom_verifier(ca, provider.clone())?,
-        None => system_verifier(provider.clone())?,
+        None => system_verifier(provider.clone(), platform_roots)?,
     };
     let mut config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -61,44 +62,57 @@ fn custom_verifier(
     ca_pem: &[u8],
     provider: Arc<CryptoProvider>,
 ) -> Result<Arc<dyn ServerCertVerifier>, AccessError> {
+    webpki_verifier(pem_store(ca_pem)?, provider)
+}
+
+/// Build a root store from one PEM bundle. An empty or unparsable bundle is a
+/// configuration error, never an empty trust set.
+fn pem_store(pem: &[u8]) -> Result<RootCertStore, AccessError> {
     let mut roots = RootCertStore::empty();
     let (added, _) = roots.add_parsable_certificates(
-        rustls_pemfile::certs(&mut &ca_pem[..])
+        rustls_pemfile::certs(&mut &pem[..])
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| AccessError::protocol("invalid CA certificate"))?,
     );
     if added == 0 {
         return Err(AccessError::protocol("invalid CA certificate"));
     }
-    webpki_verifier(roots, provider)
+    Ok(roots)
 }
 
-/// System mode. Apple and Windows expose a real per-connection platform
-/// verifier; other targets use the platform certificate files and finally the
-/// portable roots when the platform has no store to enumerate.
-#[cfg(any(target_vendor = "apple", windows))]
+/// System mode.
+///
+/// An app that had to extract the platform store itself supplies those anchors
+/// as data; they are the system trust set and replace discovery on every
+/// target, so the behavior is identical wherever the app runs. Otherwise Apple
+/// and Windows verify per connection against the OS, and other targets read the
+/// platform certificate files, falling back to the portable public roots when
+/// the platform exposes no store.
 fn system_verifier(
     provider: Arc<CryptoProvider>,
+    platform_roots: Option<&[u8]>,
 ) -> Result<Arc<dyn ServerCertVerifier>, AccessError> {
-    let verifier = rustls_platform_verifier::Verifier::new(provider)
-        .map_err(|_| AccessError::protocol("platform TLS verifier is unavailable"))?;
-    Ok(Arc::new(verifier))
-}
-
-#[cfg(not(any(target_vendor = "apple", windows)))]
-fn system_verifier(
-    provider: Arc<CryptoProvider>,
-) -> Result<Arc<dyn ServerCertVerifier>, AccessError> {
-    let mut roots = RootCertStore::empty();
-    let native = rustls_native_certs::load_native_certs();
-    let (added, _) = roots.add_parsable_certificates(native.certs);
-    if added == 0 {
-        // Android installs its platform bundle through `SSL_CERT_FILE`; OHOS
-        // and minimal containers have no OpenSSL path at all. Keep the default
-        // mode working with the portable public roots in that case.
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    if let Some(pem) = platform_roots {
+        return webpki_verifier(pem_store(pem)?, provider);
     }
-    webpki_verifier(roots, provider)
+    #[cfg(any(target_vendor = "apple", windows))]
+    {
+        let verifier = rustls_platform_verifier::Verifier::new(provider)
+            .map_err(|_| AccessError::protocol("platform TLS verifier is unavailable"))?;
+        Ok(Arc::new(verifier))
+    }
+    #[cfg(not(any(target_vendor = "apple", windows)))]
+    {
+        let mut roots = RootCertStore::empty();
+        let native = rustls_native_certs::load_native_certs();
+        let (added, _) = roots.add_parsable_certificates(native.certs);
+        if added == 0 {
+            // OHOS and minimal containers expose no store at all. Keep the
+            // default mode working with the portable public roots.
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+        webpki_verifier(roots, provider)
+    }
 }
 
 fn webpki_verifier(
@@ -128,13 +142,13 @@ mod tests {
 
     #[test]
     fn custom_mode_rejects_an_empty_or_unparseable_bundle() {
-        assert!(client_config(Some(b"not a certificate"), &[]).is_err());
-        assert!(client_config(Some(b""), &[]).is_err());
+        assert!(client_config(Some(b"not a certificate"), None, &[]).is_err());
+        assert!(client_config(Some(b""), None, &[]).is_err());
     }
 
     #[test]
     fn custom_mode_uses_only_the_supplied_bundle() {
-        let config = client_config(Some(TEST_CA), &["mqtt".to_owned()]).unwrap();
+        let config = client_config(Some(TEST_CA), None, &["mqtt".to_owned()]).unwrap();
         assert_eq!(config.alpn_protocols, vec![b"mqtt".to_vec()]);
         assert_eq!(certificate(TEST_CA).len(), 1);
     }
@@ -143,7 +157,16 @@ mod tests {
     fn system_mode_is_always_available() {
         // Platform verifier targets use the OS; other targets use the native
         // store or the portable fallback, so construction never fails.
-        assert!(client_config(None, &[]).is_ok());
+        assert!(client_config(None, None, &[]).is_ok());
+    }
+
+    #[test]
+    fn explicit_platform_roots_replace_the_platform_store() {
+        // A platform store Rust cannot enumerate is supplied as data. An unusable
+        // bundle must fail instead of silently trusting something else.
+        assert!(client_config(None, Some(TEST_CA), &[]).is_ok());
+        assert!(client_config(None, Some(b"not a certificate"), &[]).is_err());
+        assert!(client_config(None, Some(b""), &[]).is_err());
     }
 
     /// Self-signed test certificate. The signing key was discarded.

@@ -246,7 +246,6 @@ class AndroidCore private constructor(
         return CoreBridge.open(
             configPath = view.configPath,
             instanceDirectory = instanceRoot,
-            filesDir = context.filesDir,
             diagnosticReceiver = receiver,
             appVersion = appVersion,
         )

@@ -1,7 +1,5 @@
 package com.whalerein.android.corebridge.trust
 
-import com.whalerein.android.corebridge.installNativeTrustRoots
-import java.io.File
 import java.security.KeyStore
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
@@ -10,12 +8,12 @@ import java.util.Base64
 /**
  * Android platform trust for Core's system-trust consumer (HTTPS and MQTT).
  *
- * Core's system-trust path uses `rustls-native-certs` for HTTPS and MQTT.
- * Android has no OpenSSL certificate directory, so this helper materializes
- * `AndroidCAStore` into a private PEM bundle and installs it before Core opens.
- * Custom-CA instances replace the system roots with their own bundle instead.
- * The bundle contains only public certificates; it is never logged and never
- * exported.
+ * Rust cannot enumerate Android's system store, so this helper reads
+ * `AndroidCAStore` and returns the anchors as one PEM bundle. Core receives that
+ * bundle as constructor data and uses it for system mode; nothing is written to
+ * disk and no process-global certificate path is changed. Custom-CA instances
+ * ignore it and trust their own bundle. The bundle contains only public
+ * certificates; it is never logged and never exported.
  *
  * Device-only: Android's system trust store is not available to JVM tests.
  */
@@ -25,29 +23,15 @@ object AndroidTrustRoots {
     private const val PEM_FOOTER = "-----END CERTIFICATE-----"
 
     /**
-     * Extract the platform CA certificates and install them for the process.
-     * Returns the private PEM path so callers can report preparation without
-     * exposing certificate contents.
+     * Read the platform CA certificates as one PEM bundle for Core.
+     *
+     * Returns the bytes directly; the caller passes them to the Core
+     * constructor. Nothing is persisted and no environment variable is set.
      */
-    fun install(filesDir: File): File {
-        val directory = File(filesDir, "trust").apply {
-            if (!exists() && !mkdirs()) throw java.io.IOException("trust directory is unavailable")
-        }
-        val target = File(directory, "native-roots.pem")
+    fun platformPem(): ByteArray {
         val pem = platformCertificatesPem()
         if (pem.isEmpty()) throw java.io.IOException("no platform CA certificates")
-        val temporary = File.createTempFile(".native-roots.", ".tmp", directory)
-        try {
-            temporary.writeBytes(pem)
-            if (!temporary.renameTo(target)) {
-                temporary.copyTo(target, overwrite = true)
-                temporary.delete()
-            }
-        } finally {
-            temporary.delete()
-        }
-        installNativeTrustRoots(target.absolutePath)
-        return target
+        return pem
     }
 
     /** Pure PEM assembly helper, unit tested on the JVM. */

@@ -61,6 +61,20 @@ const EVENT_QUEUE_CAPACITY: usize = 512;
 const MAX_ID_BYTES: usize = 512;
 const MAX_TEXT_BYTES: usize = 256 * 1024;
 const MAX_INVITATION_BYTES: usize = 16 * 1024;
+/// Bound on an app-supplied platform trust bundle. A real platform store is
+/// far smaller; this only rejects absurd input before parsing.
+const MAX_CA_PEM_BYTES: usize = 4 * 1024 * 1024;
+
+/// Reject an unusable platform trust bundle before it reaches Core. A real
+/// platform store is far smaller than the bound; the check only stops absurd or
+/// empty input, while Core still validates the anchors when it opens a
+/// transport.
+fn platform_trust_pem(pem: Vec<u8>) -> Result<Vec<u8>, MobileError> {
+    if pem.is_empty() || pem.len() > MAX_CA_PEM_BYTES {
+        return Err(MobileError::invalid_input());
+    }
+    Ok(pem)
+}
 const MAX_FINGERPRINT_BYTES: usize = 64;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_APP_VERSION_BYTES: usize = 256;
@@ -131,34 +145,6 @@ pub fn new_operation_id() -> String {
 #[uniffi::export]
 pub fn android_redirect_uri(environment: String) -> String {
     whalerein_core::api::android_redirect_uri(&environment).to_owned()
-}
-
-/// Install an explicit PEM bundle as the process native-root source.
-///
-/// Core's system-trust path loads native roots through `rustls-native-certs`,
-/// which on Android cannot discover the platform store by itself. The app
-/// extracts the system CA certificates into a private PEM file and calls this
-/// before opening Core. HTTPS and MQTT share that system trust; custom CA
-/// instances replace it with their own bundle instead.
-///
-/// On non-Android hosts the call validates the path but leaves process trust
-/// unchanged, because the host store is already discoverable.
-#[uniffi::export]
-pub fn install_native_trust_roots(pem_path: String) -> Result<(), MobileError> {
-    if pem_path.is_empty() || pem_path.len() > MAX_PATH_BYTES {
-        return Err(MobileError::invalid_input());
-    }
-    let path = Path::new(&pem_path);
-    if !path.is_file() {
-        return Err(MobileError::invalid_input());
-    }
-    #[cfg(target_os = "android")]
-    {
-        // Safe here: this runs during app initialization, before Core opens any
-        // transport. rustls-native-certs reads the variable per connection.
-        std::env::set_var("SSL_CERT_FILE", path);
-    }
-    Ok(())
 }
 
 /// The Host-qualified observation that produced one queued event.
@@ -591,6 +577,7 @@ fn open_mobile_core(
     app_version: String,
     diagnostics: Option<whalerein_core::api::DiagnosticContext>,
     dispatcher: Option<Arc<DiagnosticDispatcher>>,
+    platform_roots: Option<Vec<u8>>,
 ) -> Result<Arc<MobileCore>, MobileError> {
     if config_path.is_empty() || config_path.len() > MAX_PATH_BYTES {
         return Err(MobileError::invalid_input());
@@ -602,8 +589,10 @@ fn open_mobile_core(
     let secrets = Arc::new(SecretStoreAdapter::new(secret_store));
     let path = Path::new(&config_path);
     let core = match diagnostics {
-        Some(context) => Core::open_with_diagnostics(path, secrets, context),
-        None => Core::open(path, secrets),
+        Some(context) => {
+            Core::open_with_diagnostics_and_platform_roots(path, secrets, context, platform_roots)
+        }
+        None => Core::open_with_platform_roots(path, secrets, platform_roots),
     }
     .map_err(MobileError::from)?;
     Ok(Arc::new(MobileCore {
@@ -649,7 +638,7 @@ impl MobileCore {
         secret_store: Arc<dyn SecretStore>,
         app_version: String,
     ) -> Result<Arc<Self>, MobileError> {
-        open_mobile_core(config_path, secret_store, app_version, None, None)
+        open_mobile_core(config_path, secret_store, app_version, None, None, None)
     }
 
     /// Create a Core instance that forwards Core's redacted diagnostics to
@@ -683,6 +672,53 @@ impl MobileCore {
             app_version,
             Some(core_context),
             Some(context.dispatcher()),
+            None,
+        )
+    }
+
+    /// Create a Core instance whose system trust comes from platform anchors
+    /// the app supplies as data.
+    ///
+    /// Used where Rust cannot enumerate the platform certificate store. The
+    /// bundle is read once at construction; there is no process-global state
+    /// and no ordering requirement beyond this call.
+    #[uniffi::constructor]
+    pub fn new_with_diagnostic_context_and_platform_trust(
+        config_path: String,
+        secret_store: Arc<dyn SecretStore>,
+        app_version: String,
+        context: Arc<DiagnosticContext>,
+        pem: Vec<u8>,
+    ) -> Result<Arc<Self>, MobileError> {
+        let platform_trust = platform_trust_pem(pem)?;
+        let core_context = context.take_core().ok_or_else(MobileError::conflict)?;
+        open_mobile_core(
+            config_path,
+            secret_store,
+            app_version,
+            Some(core_context),
+            Some(context.dispatcher()),
+            Some(platform_trust),
+        )
+    }
+
+    /// Create a Core instance whose system trust comes from platform anchors
+    /// the app supplies as data, without a diagnostic context.
+    #[uniffi::constructor]
+    pub fn new_with_platform_trust(
+        config_path: String,
+        secret_store: Arc<dyn SecretStore>,
+        app_version: String,
+        pem: Vec<u8>,
+    ) -> Result<Arc<Self>, MobileError> {
+        let platform_trust = platform_trust_pem(pem)?;
+        open_mobile_core(
+            config_path,
+            secret_store,
+            app_version,
+            None,
+            None,
+            Some(platform_trust),
         )
     }
 
@@ -2882,5 +2918,18 @@ mod tests {
         assert!(revision.contains(" core:"), "{revision}");
         assert!(revision.ends_with(CORE_VERSION), "{revision}");
         assert_eq!(revision.matches(' ').count(), 1, "{revision}");
+    }
+}
+
+#[cfg(test)]
+mod platform_trust_tests {
+    use super::*;
+
+    #[test]
+    fn platform_trust_input_is_bounded_and_nonempty() {
+        assert!(platform_trust_pem(Vec::new()).is_err());
+        assert!(platform_trust_pem(vec![b'x'; MAX_CA_PEM_BYTES + 1]).is_err());
+        let pem = b"-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n".to_vec();
+        assert_eq!(platform_trust_pem(pem.clone()).unwrap(), pem);
     }
 }
