@@ -97,6 +97,18 @@ products stay under `build/`. The packaged library is
 Gradle passes `WHALEREIN_MOBILE_SOURCE`, so `CoreProvenance`/`BuildConfig` and
 `coreRevision()` report the same value.
 
+Host connectivity is a Core concern, not a session concern:
+
+- `startHostMonitor(hostIds)` probes every Host (real broker handshake and
+  subscription) and streams `ConversationEvent.hostConnection` transitions.
+  The event is Host-scoped and unscoped in the queue, so it reaches the app
+  with no session open and survives watch replacement.
+- `stopHostMonitor()` closes the connections the monitor opened.
+- `hostConnection(hostId)` is the authoritative snapshot (`nil` = never
+  opened). The app shows one status per Host; a session only adds its own
+  `watchEnded` exception.
+- `startWatch` no longer owns or reports transport state.
+
 Android specifics:
 
 - `AndroidSecretStore` implements the UniFFI `SecretStore` with one
