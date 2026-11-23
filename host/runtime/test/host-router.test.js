@@ -34,9 +34,23 @@ class FakeHostAccess {
     this.connected = false
   }
 
-  async publishResult(payload) {
+  // Mirrors the real transport: an inline result that exceeds the receiver
+  // budget is published as a reference, never truncated and never failed.
+  async publishResult(payload, options = {}) {
     if (this.failPublish) throw new Error('offline')
-    this.results.push(proto.decode('whalerein.v1.HostResult', payload))
+    const limit = Number.isSafeInteger(options?.envelopeLimit) && options.envelopeLimit > 0
+      ? options.envelopeLimit
+      : 16 * 1024 * 1024
+    const result = proto.decode('whalerein.v1.HostResult', payload)
+    if (payload.length > limit && result.result_body?.length) {
+      result.result_reference = {
+        object_id: 'object-1', owner_node_id: 'node-1',
+        ciphertext_bytes: result.result_body.length, sha256: new Uint8Array(32),
+        expires_at_unix_ms: Date.now() + 60_000, purpose: 'PAYLOAD_PURPOSE_RESULT',
+      }
+      result.result_body = new Uint8Array(0)
+    }
+    this.results.push(result)
   }
 
   async publishEvent() {}
@@ -450,9 +464,9 @@ test('model read response enforces the full encrypted HostResult transport budge
     assert.equal(proto.encode('whalerein.v1.HostResult', exact).length, 16 * 1024 * 1024)
     length++
     const above = await query()
-    assert.equal(above.status, 'failed')
-    assert.equal(above.error_code, 'payload_too_large')
-    assert.equal(above.result_body?.length ?? 0, 0)
+    assert.equal(above.status, 'succeeded')
+    assert.ok(above.result_reference, 'an oversized result is delivered by reference')
+    assert.equal(above.result_body?.length ?? 0, 0, 'no inline body above the receiver bound')
   } finally {
     await ctx.host.stop()
     rmSync(ctx.dir, { recursive: true, force: true })
@@ -529,7 +543,7 @@ test('a command response sealing failure reports unknown and replays the durable
   } finally {await ctx.host.stop();ctx.store.close();rmSync(ctx.dir,{recursive:true,force:true})}
 })
 
-test('an oversized complete pending queue fails instead of publishing a partial observation', async () => {
+test('an oversized complete pending queue is published by reference, never partially', async () => {
   const ctx = setup()
   try {
     await ctx.host.start()
@@ -539,8 +553,8 @@ test('an oversized complete pending queue fails instead of publishing a partial 
     ctx.adapter.readPendingQueue = async () => ({session_id:'s1',available:true,items:[{item_id:'q1',placement:'QUEUED',blocks:[{block_id:'t',text:{text:'x'.repeat(16*1024*1024)}}]}]})
     const request = encryptedQuery({security:ctx.host.security,store:ctx.store,channel,payload:{read_pending_queue:{session_id:'s1'}}})
     await ctx.access.handlers.onRequest(request)
-    assert.equal(ctx.access.lastResult().status,'failed')
-    assert.equal(ctx.access.lastResult().error_code,'payload_too_large')
+    assert.equal(ctx.access.lastResult().status,'succeeded')
+    assert.ok(ctx.access.lastResult().result_reference, 'the complete observation travels by reference')
     assert.equal(ctx.access.lastResult().result_body?.length ?? 0,0)
   } finally {
     await ctx.host.stop()
@@ -573,7 +587,11 @@ test('pending queue complete encrypted HostResult uses exact transport boundary'
       textSize=exactText+delta
       const result=await observe()
       if(delta<=0) { assert.equal(result.status,'succeeded'); assert.equal(wireSize,limit+delta) }
-      else { assert.equal(result.status,'failed'); assert.equal(result.error_code,'payload_too_large') }
+      else {
+        assert.equal(result.status,'succeeded')
+        assert.ok(result.result_reference, 'above the receiver bound the result travels by reference')
+        assert.equal(result.result_body?.length ?? 0, 0)
+      }
     }
   } finally { await ctx.host.stop();ctx.store.close();rmSync(ctx.dir,{recursive:true,force:true}) }
 })
@@ -610,8 +628,9 @@ test('wait state rejects an oversized encrypted HostResult for a valid request',
           assert.equal(observed.result.status,'succeeded')
           assert.equal(wireSize,limit+delta)
         } else {
-          assert.equal(observed.result.error_code,'payload_too_large')
-          assert.equal(observed.result.result_body?.length ?? 0,0)
+          assert.equal(observed.result.status,'succeeded')
+          assert.ok(observed.result.result_reference, 'an oversized result travels by reference')
+          assert.equal(observed.result.result_body?.length ?? 0, 0)
         }
       }
       const recovered = await query(2, waiting)
@@ -655,7 +674,11 @@ test('question reads enforce the complete encrypted HostResult budget without le
           const response = proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, aad, frame.nonce, frame.ciphertext))
           assert.equal(response.question_page.batches[0].content_unavailable, true)
           assert.equal(response.question_page.batches[0].questions.length, 0)
-        } else { assert.equal(result.status, 'failed'); assert.equal(result.error_code, 'payload_too_large'); assert.equal(result.result_body?.length ?? 0, 0) }
+        } else {
+          assert.equal(result.status, 'succeeded')
+          assert.ok(result.result_reference, 'an oversized question read travels by reference')
+          assert.equal(result.result_body?.length ?? 0, 0)
+        }
       }
     }
   } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
@@ -1091,7 +1114,7 @@ test('when an encrypted payload carries an unknown enum value, the host reports 
   } finally { await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true }) }
 })
 
-test('canonical history packing honors the request result bound without a partial page or cursor advance', async () => {
+test('canonical history packing is delivered whole by reference above the receiver bound', async () => {
   const ctx = setup()
   try {
     await ctx.host.start()
@@ -1116,9 +1139,9 @@ test('canonical history packing honors the request result bound without a partia
       return { request, result: ctx.access.lastResult() }
     }
     const bounded = await query({ result_max_bytes: 1024, grant_generation: 3, revocation_generation: 9 }, 'bound-small')
-    assert.equal(bounded.result.status, 'failed')
-    assert.equal(bounded.result.error_code, 'payload_too_large')
-    assert.equal(bounded.result.result_body?.length ?? 0, 0, 'no partial page is published')
+    assert.equal(bounded.result.status, 'succeeded')
+    assert.ok(bounded.result.result_reference, 'a page above the receiver bound travels by reference, whole')
+    assert.equal(bounded.result.result_body?.length ?? 0, 0, 'no partial page is published inline')
     assert.equal(bounded.request.transport.revocation_generation, 9, 'request metadata is passed through unchanged')
 
     const retried = await query({ result_max_bytes: 16 * 1024 * 1024, grant_generation: 3, revocation_generation: 9 }, 'bound-large')

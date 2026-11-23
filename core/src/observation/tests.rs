@@ -241,7 +241,6 @@ fn state_event(core: &Core, session: &str, watch: &str, revision: u64) -> EventE
                     revision,
                     history_head: "bookmark:committed".into(),
                     run_phase: whalerein_proto::RunPhase::Idle as i32,
-                    approvals: Vec::new(),
                     questions: None,
                     projection_id: "projection-1".into(),
                 },
@@ -1260,4 +1259,84 @@ fn a_scope_denial_ends_a_watch_instead_of_reconnecting() {
     // A transport-shaped failure remains reconnectable.
     assert!(!watch_fatal(&CoreError::Unavailable("mqtt down".into())));
     assert!(!watch_fatal(&CoreError::Timeout));
+}
+
+#[tokio::test]
+async fn a_deterministic_lease_failure_ends_the_watch_instead_of_reconnecting() {
+    // An oversized or malformed renewal is guaranteed to fail again. The watch
+    // must report the real cause once, not loop through reconnects that look
+    // like a network problem.
+    let (_dir, core, access, listener) = setup(false).await;
+    access.host.lock().unwrap().refresh_error = Some(whalerein_proto::ErrorCode::PayloadTooLarge);
+    let key = core.session_key("session-1").await.unwrap();
+    let peer = tokio::spawn(async move {
+        let _stream = subscribe(&listener).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let handshakes = access.host.lock().unwrap().channel_handshake_steps;
+    // The first lease tick fires five seconds after the watch is ready.
+    let ended = tokio::time::timeout(Duration::from_secs(20), async {
+        while observation.next_event().await.is_some() {}
+    })
+    .await
+    .is_ok();
+    assert!(
+        ended,
+        "a deterministic lease failure closes the observation"
+    );
+    let error = observation
+        .take_terminal_error()
+        .expect("the deterministic cause is available");
+    assert_eq!(error.code(), "payload_too_large");
+    assert_eq!(
+        access.host.lock().unwrap().channel_handshake_steps,
+        handshakes,
+        "a deterministic lease failure must not rebuild the connection"
+    );
+    peer.abort();
+}
+
+#[tokio::test]
+async fn a_transient_lease_failure_keeps_the_stream_open() {
+    // A failed renewal changes nothing while the lease still has room: the
+    // same connection retries on the next tick.
+    let (_dir, core, access, listener) = setup(false).await;
+    access.host.lock().unwrap().refresh_error = Some(whalerein_proto::ErrorCode::Unavailable);
+    let key = core.session_key("session-1").await.unwrap();
+    let peer = tokio::spawn(async move {
+        let _stream = subscribe(&listener).await;
+        tokio::time::sleep(Duration::from_secs(8)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let handshakes = access.host.lock().unwrap().channel_handshake_steps;
+    // The first tick is a transient failure; the observation stays open and
+    // the connection stays connected instead of reconnecting.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(
+        core.get_connection_state(&key.host_id),
+        crate::runtime::ConnectionState::Connected,
+        "a transient renewal failure must not mark the host as reconnecting"
+    );
+    assert_eq!(
+        access.host.lock().unwrap().channel_handshake_steps,
+        handshakes,
+        "a transient renewal failure must not rebuild the connection"
+    );
+    observation.close().await;
+    peer.abort();
 }

@@ -628,11 +628,12 @@ export class MqttAccess {
   }
 
   /** Publish one complete HostResult, inline or as a ready reference. */
-  publishResult(payload) {
+  publishResult(payload, options = {}) {
     return this.#transport.sendComplete(this.topics.result, payload, {
       kind: 'result',
       receiverLimit: this.#accessReceive?.budget?.packet_bytes,
       expiresAt: this.now() + this.relayObjectTtlMs,
+      ...options,
     })
   }
 

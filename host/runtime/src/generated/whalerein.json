@@ -3413,11 +3413,6 @@
                   "type": "RunPhase",
                   "id": 5
                 },
-                "approvals": {
-                  "rule": "repeated",
-                  "type": "Approval",
-                  "id": 6
-                },
                 "questions": {
                   "type": "QuestionDescriptor",
                   "id": 7
@@ -3426,7 +3421,14 @@
                   "type": "string",
                   "id": 8
                 }
-              }
+              },
+              "reserved": [
+                [
+                  6,
+                  6
+                ],
+                "approvals"
+              ]
             },
             "HistoryReset": {
               "fields": {
@@ -3532,11 +3534,47 @@
                 }
               }
             },
+            "WatchLease": {
+              "fields": {
+                "watch_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "lease_ms": {
+                  "type": "uint32",
+                  "id": 2
+                },
+                "revision": {
+                  "type": "uint64",
+                  "id": 3
+                },
+                "run_phase": {
+                  "type": "RunPhase",
+                  "id": 4
+                },
+                "live_epoch": {
+                  "type": "string",
+                  "id": 5
+                },
+                "history_head": {
+                  "type": "string",
+                  "id": 6
+                },
+                "projection_id": {
+                  "type": "string",
+                  "id": 7
+                },
+                "questions": {
+                  "type": "QuestionDescriptor",
+                  "id": 8
+                }
+              }
+            },
             "WatchStates": {
               "fields": {
                 "watches": {
                   "rule": "repeated",
-                  "type": "WatchReady",
+                  "type": "WatchLease",
                   "id": 1
                 }
               }

@@ -445,10 +445,13 @@ finished. `unknown` never means success.
 
 `HostResult` carries exactly one of `result_body` and `result_reference` when a
 body exists. `HostReady`, pairing results and internal control results are
-small bootstrap bodies and stay inline. Access may replace an inline
-`result_body` with a `result_reference` for the Device hop, staging the exact
-ciphertext under `PAYLOAD_PURPOSE_RESULT` with the same request and command
-identity. A
+small bootstrap bodies and stay inline. The Host and Access publish a complete
+result inline when it fits the receiver's advertised inline bound and the hop
+packet, and otherwise stage the exact ciphertext under `PAYLOAD_PURPOSE_RESULT`
+and publish a `result_reference` with the same request and command identity. A
+query result is therefore admitted whole and never fails or shrinks for a
+transport-size reason; `payload_too_large` means the complete message cannot be
+represented even by reference (it exceeds the logical envelope budget). A
 packet-sized terminal status may carry neither representation when the complete
 body could not be admitted; the recorded outcome, error code and command
 identity are unchanged, and the client reports confirmed completion with scoped
@@ -967,13 +970,29 @@ content projection.
 
 Core subscribes MQTT before WatchSession and baseline synchronization. Watch IDs
 are channel-scoped; leases last 30 seconds. RefreshWatches every five seconds
-returns authoritative history watermarks and current state, repairing a lost last
-notification even when no later event arrives. Unwatch is best effort; channel
-cleanup/lease expiry bounds abandoned resources. Current Core admits one active
-watch per instance so device MQTT client identities cannot compete internally.
+renews the lease and answers with `WatchLease`: transition markers
+(`revision`, `run_phase`, `live_epoch`, `history_head`, `projection_id`) and the
+question descriptor, never `SessionState`. The marker read is authoritative, so a
+lost last notification is still repaired, but the periodic message cannot grow
+with the transcript. Content travels only on the event stream and the paged
+history read. A structural marker change re-attaches for a fresh baseline; a
+moved history head repairs the transcript through paged reads; a newer revision
+rebuilds state from markers plus the approvals query. A lease answer never
+carries content, so a renewal cannot fail for size reasons and be mistaken for a
+connection problem. Deterministic refusals (`payload_too_large`,
+`invalid_input`) end the observation with their own code instead of reconnecting;
+transient ones leave the stream untouched until the next tick. Unwatch is best
+effort; channel cleanup/lease expiry bounds abandoned resources. Current Core
+admits one active watch per instance so device MQTT client identities cannot
+compete internally.
 
 Approvals and runtime state are current-state projections outside history cursor
-arithmetic. Approval execution always revalidates the native pending action.
+arithmetic. `SessionState` is a bounded transition summary (session, epoch,
+revision, history head, run phase, projection identity and question descriptor):
+pending approvals are content and travel only through the bounded `ApprovalList`
+query, so neither a baseline, a state update nor a lease can grow with the
+pending approval set. Approval execution always revalidates the native pending
+action.
 The complete schema and Source invariants are in
 [the Harness contract](../../docs/architecture/harness-contract.md).
 

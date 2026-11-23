@@ -33,6 +33,23 @@ const BATCH_SEEN_LIMIT = 512
 const LIVE_QUEUE_PACKETS = 64
 const LIVE_QUEUE_BYTES = 256 * 1024
 
+/**
+ * Session state is a bounded transition summary. Approvals are content: they
+ * travel only through the bounded ApprovalList query, so a state read that
+ * returned a large pending set can never overflow a baseline, a event or a
+ * lease response.
+ */
+function stateMarkers(state, hostId, sessionId) {
+  const markers = { session: { host_id: hostId, session_id: sessionId } }
+  if (state.live_epoch !== undefined) markers.live_epoch = state.live_epoch
+  if (state.revision !== undefined) markers.revision = state.revision
+  if (state.history_head !== undefined) markers.history_head = state.history_head
+  if (state.run_phase !== undefined) markers.run_phase = state.run_phase
+  if (state.projection_id !== undefined) markers.projection_id = state.projection_id
+  if (state.questions !== undefined) markers.questions = state.questions
+  return markers
+}
+
 function attemptKey(attempt, projectionId) {
   return `${projectionId ?? ''}\u0000${attempt?.live_epoch ?? ''}\u0000${attempt?.attempt_id ?? ''}`
 }
@@ -309,7 +326,7 @@ export class WatchedEvents {
     watch.expires = this.now() + LEASE
     const ready = { watch_id: watch.id, lease_ms: LEASE }
     if (state) {
-      ready.state = { ...state, session: { host_id: this.hostId, session_id: watch.sessionId } }
+      ready.state = stateMarkers(state, this.hostId, watch.sessionId)
       if (questions) ready.state.questions = questionDescriptorToProto(questions)
     }
     if (questions) {
@@ -322,10 +339,29 @@ export class WatchedEvents {
     }
     return ready
   }
+  // Lease renewal. The Host still reads the authoritative state so a lost
+  // final notification cannot leave a stale observation, but the answer keeps
+  // only transition markers: content rides the event stream and the paged
+  // history read, so a lease can never grow with the transcript.
   async refresh(deviceId, channelId, ids, signal) {
     if (!Array.isArray(ids) || ids.length > 8 || new Set(ids).size !== ids.length) throw new PluginError('invalid_argument', 'invalid watch selection')
-    return { watches: await Promise.all(ids.map(id => this.#ready(this.#owned(deviceId, channelId, id), signal))) }
+    const watches = await Promise.all(ids.map(async id => {
+      const ready = await this.#ready(this.#owned(deviceId, channelId, id), signal)
+      const state = ready.state
+      return {
+        watch_id: id,
+        lease_ms: ready.lease_ms,
+        revision: state?.revision ?? 0,
+        run_phase: state?.run_phase ?? 0,
+        live_epoch: state?.live_epoch ?? '',
+        history_head: state?.history_head ?? '',
+        projection_id: state?.projection_id ?? '',
+        questions: ready.questions,
+      }
+    }))
+    return { watches }
   }
+
   unwatch(deviceId, channelId, id) { this.#owned(deviceId, channelId, id); this.#remove(id) }
   async readHistory(sessionId, read, signal) {
     const page = await this.adapter.readHistory(sessionId, read, { signal })
@@ -418,8 +454,12 @@ export class WatchedEvents {
         if (!this.#admitLive(source, update.live)) return
       } else if (update.history) {
         if (!this.#admitHistory(source, update.history)) return
-      } else if (update.state?.projection_id !== undefined) {
-        this.#adoptProjection(source, update.state.projection_id)
+      } else if (update.state) {
+        if (update.state.projection_id !== undefined) {
+          this.#adoptProjection(source, update.state.projection_id)
+        }
+        // A state update is a transition summary, never content.
+        update = { ...update, state: stateMarkers(update.state, this.hostId, sessionId) }
       }
     } catch (error) {
       this.logger?.warn('source_update_rejected', { code: safeCode(error?.code), reason: 'stream' })

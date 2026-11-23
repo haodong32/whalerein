@@ -1510,6 +1510,7 @@ impl Core {
         host_id: &str,
         payload: RequestPayload,
     ) -> CoreResult<ResponsePayload> {
+        let payload_label = Self::request_payload_name(&payload);
         let expected_session = self.cloud_session_id()?;
         let result = async {
             let config = self.require_config()?;
@@ -1553,7 +1554,7 @@ impl Core {
             }
         }
         .await;
-        self.diagnostics.record_stage(
+        self.diagnostics.record_query(
             result
                 .as_ref()
                 .err()
@@ -1565,8 +1566,72 @@ impl Core {
                 "failed"
             },
             result.as_ref().err().map_or("none", CoreError::code),
+            payload_label,
         );
         self.settle(result).await
+    }
+
+    /// Fixed, content-free name for a query payload. A failed query must be
+    /// attributable to its purpose; the transport layer only sees encrypted
+    /// bodies and cannot answer that.
+    fn request_payload_name(payload: &RequestPayload) -> &'static str {
+        match payload.payload {
+            Some(whalerein_proto::request_payload::Payload::ListSessions(_)) => "list_sessions",
+            Some(whalerein_proto::request_payload::Payload::GetSession(_)) => "get_session",
+            Some(whalerein_proto::request_payload::Payload::GetApproval(_)) => "get_approval",
+            Some(whalerein_proto::request_payload::Payload::GetCommandResult(_)) => {
+                "get_command_result"
+            }
+            Some(whalerein_proto::request_payload::Payload::SendMessage(_)) => "send_message",
+            Some(whalerein_proto::request_payload::Payload::Interrupt(_)) => "interrupt",
+            Some(whalerein_proto::request_payload::Payload::ResolveApproval(_)) => {
+                "resolve_approval"
+            }
+            Some(whalerein_proto::request_payload::Payload::Ping(_)) => "ping",
+            Some(whalerein_proto::request_payload::Payload::ListApprovals(_)) => "list_approvals",
+            Some(whalerein_proto::request_payload::Payload::ReadHistory(_)) => "read_history",
+            Some(whalerein_proto::request_payload::Payload::WatchSession(_)) => "watch_session",
+            Some(whalerein_proto::request_payload::Payload::RefreshWatches(_)) => "refresh_watches",
+            Some(whalerein_proto::request_payload::Payload::UnwatchSession(_)) => "unwatch_session",
+            Some(whalerein_proto::request_payload::Payload::ReadMessageReply(_)) => {
+                "read_message_reply"
+            }
+            Some(whalerein_proto::request_payload::Payload::GetHostCapabilities(_)) => {
+                "get_host_capabilities"
+            }
+            Some(whalerein_proto::request_payload::Payload::ListModels(_)) => "list_models",
+            Some(whalerein_proto::request_payload::Payload::ReadSessionModel(_)) => {
+                "read_session_model"
+            }
+            Some(whalerein_proto::request_payload::Payload::SelectSessionModel(_)) => {
+                "select_session_model"
+            }
+            Some(whalerein_proto::request_payload::Payload::WaitSession(_)) => "wait_session",
+            Some(whalerein_proto::request_payload::Payload::CancelSessionWait(_)) => {
+                "cancel_session_wait"
+            }
+            Some(whalerein_proto::request_payload::Payload::ReadWaitState(_)) => "read_wait_state",
+            Some(whalerein_proto::request_payload::Payload::CreateSession(_)) => "create_session",
+            Some(whalerein_proto::request_payload::Payload::ReadPendingQueue(_)) => {
+                "read_pending_queue"
+            }
+            Some(whalerein_proto::request_payload::Payload::UpdatePendingQueue(_)) => {
+                "update_pending_queue"
+            }
+            Some(whalerein_proto::request_payload::Payload::ListQuestions(_)) => "list_questions",
+            Some(whalerein_proto::request_payload::Payload::GetQuestion(_)) => "get_question",
+            Some(whalerein_proto::request_payload::Payload::AnswerQuestion(_)) => "answer_question",
+            Some(whalerein_proto::request_payload::Payload::CancelQuestionAnswer(_)) => {
+                "cancel_question_answer"
+            }
+            Some(whalerein_proto::request_payload::Payload::ForkSession(_)) => "fork_session",
+            Some(whalerein_proto::request_payload::Payload::OpenAttachment(_)) => "open_attachment",
+            Some(whalerein_proto::request_payload::Payload::PullAttachment(_)) => "pull_attachment",
+            Some(whalerein_proto::request_payload::Payload::CloseAttachment(_)) => {
+                "close_attachment"
+            }
+            None => "unspecified",
+        }
     }
 
     async fn control(&self, host_id: &str, payload: RequestPayload) -> CoreResult<CommandHandle> {

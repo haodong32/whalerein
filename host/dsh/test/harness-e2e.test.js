@@ -86,11 +86,15 @@ test('when FakeDSH requests approval, the client reads it and the host reports i
     const send = await device.command({ send_message: { session_id: 's1', text: 'needs approval' } }, { commandId: 'cmd-approval' })
     assert.equal(send.status, 'succeeded')
 
-    await waitFor(() => device.bufferedEvents.some(payload => payload.update.state?.approvals?.some(a=>a.state==='APPROVAL_STATE_PENDING')))
-    const events = await device.events()
-    const approvalEvent = events.find((payload) => payload.update.state?.approvals?.some(a=>a.state==='APPROVAL_STATE_PENDING'))
-    assert.ok(approvalEvent)
-    const approval = approvalEvent.update.state.approvals.find(a=>a.state==='APPROVAL_STATE_PENDING')
+    // Pending approvals are content: a session state is a bounded transition
+    // summary, so the client reads them from the bounded ApprovalList query.
+    let approval
+    await waitFor(async () => {
+      const list = await device.query({ list_approvals: { session_id: 's1' } })
+      assert.equal(list.status, 'succeeded')
+      approval = list.response.approval_list.approvals.find(a => a.state === 'APPROVAL_STATE_PENDING')
+      return approval !== undefined
+    }, 5000)
     assert.equal(approval.state, 'APPROVAL_STATE_PENDING')
     assert.equal(approval.session_id, 's1')
 
@@ -108,8 +112,12 @@ test('when FakeDSH requests approval, the client reads it and the host reports i
     assert.equal(resolved.status, 'succeeded')
     const approvalNow = await device.query({ get_approval: { approval_id: approval.approval_id } })
     assert.equal(approvalNow.response.approval.state, 'APPROVAL_STATE_APPROVED')
-    const later = await device.events()
-    assert.ok(later.some((payload) => payload.update.state && payload.update.state.approvals.length===0))
+    // A resolution arrives as a state transition; the approval itself is no
+    // longer in the state and the bounded list now reports it resolved.
+    const laterList = await device.query({ list_approvals: { session_id: 's1' } })
+    assert.ok(laterList.response.approval_list.approvals
+      .every((entry) => entry.approval_id !== approval.approval_id
+        || entry.state === 'APPROVAL_STATE_APPROVED'))
 
     const second = await device.command({
       resolve_approval: {

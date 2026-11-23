@@ -48,6 +48,12 @@ pub(crate) enum QuestionSignal {
 /// Failures a reconnect cannot fix. Everything else during a watch is treated
 /// as a transient transport/path problem and retried with backoff.
 fn watch_fatal(error: &CoreError) -> bool {
+    // A deterministic failure (an oversized or malformed response) is
+    // guaranteed to repeat: rebuilding the connection cannot change the
+    // outcome, and looping would present it as a network problem.
+    if matches!(error.code(), "payload_too_large" | "invalid_input") {
+        return true;
+    }
     if matches!(
         error.code(),
         // A scope denial is an authoritative answer, not a transport problem.
@@ -876,7 +882,14 @@ async fn run_connection(
         let _ = core
             .runtime
             .set_state(&key.host_id, ConnectionState::Connected);
-        if sink.failed || !sink.emit(&ViewUpdate::State(initial.clone().into())).await {
+        // Approvals are content and never ride the baseline; they are read
+        // through their own bounded query. A failed read must not erase the
+        // pending approvals a later event or lease tick will restore, so the
+        // baseline is emitted only with what Core actually read.
+        let approvals = fetch_approvals(core, key).await.unwrap_or_default();
+        let mut baseline: crate::conversation::SessionState = initial.clone().into();
+        baseline.approvals = approvals;
+        if sink.failed || !sink.emit(&ViewUpdate::State(baseline)).await {
             pump.finish().await;
             return Ok(End::Done);
         }
@@ -1071,57 +1084,36 @@ async fn conversation_loop(
                     }
                 }
                 let failure = error.lock().expect("watch error mutex").take();
-                    if let Some(failure) = failure {
+                if let Some(failure) = failure {
                     return Err(failure);
                 }
-                let response = core.query(
-                    &key.host_id,
-                    whalerein_proto::RequestPayload {
-                        payload: Some(request_payload::Payload::RefreshWatches(RefreshWatches {
-                            watch_ids: vec![watch_id.clone()],
-                        })),
-                    },
-                ).await;
-                let response = match response {
-                    Err(error) if error.code() == "expired" => {
+                let renewal = renew_watch_lease(core, key, &watch_id).await;
+                let lease = match renewal {
+                    LeaseRenewal::Extended(lease) => lease,
+                    // The Host no longer holds this observation; only a fresh
+                    // attach can restore a consistent baseline.
+                    LeaseRenewal::Reattach => {
                         pump.finish().await;
                         return Ok(End::Reconnect);
                     }
-                    // The Host's authoritative refresh says the Source no
-                    // longer has this session. That is terminal even when the
-                    // explicit `watch_closed` event is delayed or lost.
-                    Err(error) if error.code() == "not_found" => {
-                        return Err(CoreError::AuthorityClosed("session_deleted".into()));
-                    }
-                    Err(error) if error.code() == "forbidden" || error.code() == "unauthorized" => {
-                        return Err(CoreError::AuthorityClosed("unauthorized".into()));
-                    }
-                    other => other?,
+                    // A deterministic lease failure is not a connectivity
+                    // event. The caller sees the real cause instead of an
+                    // endless reconnect.
+                    LeaseRenewal::Terminal(failure) => return Err(failure),
+                    // A transient failure leaves the stream untouched: the
+                    // lease still has room, so the next tick retries on this
+                    // connection instead of building a new one.
+                    LeaseRenewal::Retry => continue,
                 };
-                let Some(response_payload::Payload::WatchStates(states)) = response.payload else {
-                    return Err(CoreError::Security("unexpected watch refresh".into()));
-                };
-                let refreshed = states.watches.into_iter().find(|watch| watch.watch_id == watch_id)
-                    .ok_or_else(|| CoreError::Security("missing watch refresh".into()))?;
                 if interests.questions {
-                    if let Some(descriptor) = refreshed.questions {
+                    if let Some(descriptor) = lease.questions {
                         signal_descriptor(questions, descriptor);
-                    } else if let Some(state) = &refreshed.state {
-                        if let Some(descriptor) = state.questions.clone() {
-                            signal_descriptor(questions, descriptor);
-                        }
                     }
                 }
                 if !interests.conversation {
                     continue;
                 }
-                let Some(state) = refreshed.state else {
-                    continue;
-                };
-                if state.session.as_ref() != Some(&wire_key) {
-                    return Err(CoreError::Security("watch refresh scope mismatch".into()));
-                }
-                if state.projection_id.is_empty() || state.projection_id != projection {
+                if lease.projection_id.is_empty() || lease.projection_id != projection {
                     if !send_event(
                         events,
                         key,
@@ -1137,12 +1129,46 @@ async fn conversation_loop(
                     pump.finish().await;
                     return Ok(End::Reconnect);
                 }
-                if state.live_epoch != epoch {
+                if lease.live_epoch != epoch {
                     pump.finish().await;
                     return Ok(End::Reconnect);
                 }
+                if lease.revision > state_revision {
+                    // A newer revision without a delivered state event means a
+                    // hint was lost. Rebuild the same bounded state the event
+                    // would have carried: markers from the lease and approvals
+                    // from their own paged query.
+                    if let Some(approvals) = fetch_approvals(core, key).await {
+                        state_revision = lease.revision;
+                        let state = crate::conversation::SessionState {
+                            session: Some(wire_key.clone().into()),
+                            live_epoch: lease.live_epoch.clone(),
+                            revision: lease.revision as i64,
+                            history_head: lease.history_head.clone(),
+                            projection_id: lease.projection_id.clone(),
+                            run_phase: crate::conversation::RunPhase::try_from(lease.run_phase)
+                                .unwrap_or_default(),
+                            approvals,
+                        };
+                        if !send_event(
+                            events,
+                            key,
+                            observation_id,
+                            generation,
+                            SessionEventPayload::Conversation(ViewUpdate::State(state)),
+                        )
+                        .await
+                        {
+                            pump.finish().await;
+                            return Ok(End::Done);
+                        }
+                    }
+                }
                 if let Some(sync) = sync.as_ref() {
-                    if sync.cursor(key)?.as_deref() != Some(state.history_head.as_str()) {
+                    // A moved history head means committed content was missed.
+                    // Repair it through the paged history read, which keeps
+                    // every response bounded.
+                    if sync.cursor(key)?.as_deref() != Some(lease.history_head.as_str()) {
                         let mut sink = EventSink {
                             events,
                             key,
@@ -1165,21 +1191,95 @@ async fn conversation_loop(
                         }
                     }
                 }
-                if state.revision > state_revision
-                    && !send_event(
-                        events,
-                        key,
-                        observation_id,
-                        generation,
-                        SessionEventPayload::Conversation(ViewUpdate::State(state.into())),
-                    )
-                    .await
-                {
-                    pump.finish().await;
-                    return Ok(End::Done);
-                }
             }
         }
+    }
+}
+
+/// Fetch the pending approvals of this session through their own bounded
+/// query. `None` means the read failed; the next lease tick retries it rather
+/// than emitting a state that would erase visible approvals.
+async fn fetch_approvals(
+    core: &Core,
+    key: &SessionKey,
+) -> Option<Vec<crate::conversation::Approval>> {
+    let response = core
+        .query(
+            &key.host_id,
+            whalerein_proto::RequestPayload {
+                payload: Some(request_payload::Payload::ListApprovals(
+                    whalerein_proto::ListApprovals {
+                        session_id: key.session_id.clone(),
+                    },
+                )),
+            },
+        )
+        .await
+        .ok()?;
+    let Some(response_payload::Payload::ApprovalList(list)) = response.payload else {
+        return None;
+    };
+    Some(list.approvals.into_iter().map(Into::into).collect())
+}
+
+/// Outcome of one lease renewal.
+enum LeaseRenewal {
+    /// The lease was extended and carries only divergence markers.
+    Extended(whalerein_proto::WatchLease),
+    /// The Host no longer owns this observation; re-attach for a baseline.
+    Reattach,
+    /// Deterministic failure: the caller must see it, never a reconnect.
+    Terminal(CoreError),
+    /// Transient failure: keep the stream and retry on the next tick.
+    Retry,
+}
+
+/// Renew one watch lease. The Host answers from cached markers, so the
+/// response is constant-sized no matter how large the transcript is.
+async fn renew_watch_lease(core: &Core, key: &SessionKey, watch_id: &str) -> LeaseRenewal {
+    let response = core
+        .query(
+            &key.host_id,
+            whalerein_proto::RequestPayload {
+                payload: Some(request_payload::Payload::RefreshWatches(RefreshWatches {
+                    watch_ids: vec![watch_id.to_owned()],
+                })),
+            },
+        )
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(core_error) => {
+            return match core_error.code() {
+                // The Host no longer holds the observation. A re-attach is the
+                // only path that can restore a consistent baseline.
+                "expired" => LeaseRenewal::Reattach,
+                // An authoritative answer that the session is gone or that the
+                // device lost the grant is terminal, even when the explicit
+                // `watch_closed` event is delayed or lost.
+                "not_found" => {
+                    LeaseRenewal::Terminal(CoreError::AuthorityClosed("session_deleted".into()))
+                }
+                "forbidden" | "unauthorized" => {
+                    LeaseRenewal::Terminal(CoreError::AuthorityClosed("unauthorized".into()))
+                }
+                // Retrying a deterministic refusal with a new connection
+                // cannot succeed and would mask the real cause.
+                "payload_too_large" | "invalid_input" => LeaseRenewal::Terminal(core_error),
+                _ => LeaseRenewal::Retry,
+            };
+        }
+    };
+    let Some(response_payload::Payload::WatchStates(states)) = response.payload else {
+        return LeaseRenewal::Terminal(CoreError::Security("unexpected watch refresh".into()));
+    };
+    match states
+        .watches
+        .into_iter()
+        .find(|lease| lease.watch_id == watch_id)
+    {
+        Some(lease) => LeaseRenewal::Extended(lease),
+        None => LeaseRenewal::Terminal(CoreError::Security("missing watch refresh".into())),
     }
 }
 
@@ -1405,12 +1505,17 @@ async fn handle_update(
             }
             if state.revision > *state_revision {
                 *state_revision = state.revision;
+                // A state event carries transition markers; approvals are
+                // merged from their bounded query so they stay current without
+                // riding the event.
+                let mut next: crate::conversation::SessionState = state.into();
+                next.approvals = fetch_approvals(core, key).await.unwrap_or_default();
                 if !send_event(
                     events,
                     key,
                     observation_id,
                     generation,
-                    SessionEventPayload::Conversation(ViewUpdate::State(state.into())),
+                    SessionEventPayload::Conversation(ViewUpdate::State(next)),
                 )
                 .await
                 {

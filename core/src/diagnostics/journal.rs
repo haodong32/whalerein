@@ -48,6 +48,10 @@ pub enum DiagnosticKind {
         stage: &'static str,
         outcome: &'static str,
         code: String,
+        /// Fixed query payload name. An operator must be able to tell which
+        /// query failed without reading message content.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        payload: Option<&'static str>,
     },
     #[serde(rename = "http_completed")]
     HttpCompleted {
@@ -266,7 +270,7 @@ impl Diagnostics {
         outcome: &'static str,
         code: &str,
     ) {
-        if !valid_stage_fields([layer, stage, outcome, code]) {
+        if !valid_stage_fields(&[layer, stage, outcome, code]) {
             return;
         }
         self.record(DiagnosticKind::OperationStage {
@@ -274,6 +278,29 @@ impl Diagnostics {
             stage,
             outcome,
             code: code.into(),
+            payload: None,
+        });
+    }
+
+    /// Record a query stage together with its fixed payload name so a failed
+    /// query is attributable to its purpose.
+    pub fn record_query(
+        &self,
+        layer: &'static str,
+        stage: &'static str,
+        outcome: &'static str,
+        code: &str,
+        payload: &'static str,
+    ) {
+        if !valid_stage_fields(&[layer, stage, outcome, code, payload]) {
+            return;
+        }
+        self.record(DiagnosticKind::OperationStage {
+            layer,
+            stage,
+            outcome,
+            code: code.into(),
+            payload: Some(payload),
         });
     }
 
@@ -284,6 +311,7 @@ impl Diagnostics {
             stage,
             outcome,
             code,
+            ..
         } = &kind
         {
             let mut events = self.events.lock().expect("diagnostic journal mutex");
@@ -342,8 +370,8 @@ impl Diagnostics {
     }
 }
 
-fn valid_stage_fields(fields: [&str; 4]) -> bool {
-    fields.into_iter().all(|field| {
+fn valid_stage_fields(fields: &[&str]) -> bool {
+    fields.iter().all(|field| {
         !field.is_empty()
             && field.len() <= 48
             && field
@@ -368,7 +396,12 @@ pub fn load_failure(directory: &Path) -> Option<FailureRecord> {
     if !valid_opaque_id(&record.trace_id)
         || record.events.len() > MAX_EVENTS
         || record.events.iter().any(|event| {
-            !valid_stage_fields([&event.layer, &event.stage, &event.outcome, &event.code])
+            !valid_stage_fields(&[
+                event.layer.as_str(),
+                event.stage.as_str(),
+                event.outcome.as_str(),
+                event.code.as_str(),
+            ])
         })
     {
         return None;
@@ -414,6 +447,26 @@ mod tests {
                 record.events.last().unwrap().time_unix_ms
             );
         }
+        // The recorded payload name is what lets an operator attribute a
+        // failure to its query without reading any content.
+        journal.record_query(
+            "host",
+            "query",
+            "failed",
+            "payload_too_large",
+            "refresh_watches",
+        );
+        {
+            let live = sink.0.lock().expect("sink lock");
+            assert_eq!(
+                live.last()
+                    .and_then(|event| event.get("payload"))
+                    .and_then(|value| value.as_str()),
+                Some("refresh_watches"),
+                "the recorded payload name is what attributes a failure to its query"
+            );
+        }
+
         assert!(!std::fs::read_to_string(dir.path().join(FAILURE_FILE))
             .unwrap()
             .contains("secret"));
@@ -453,5 +506,36 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
         assert!(load_failure(dir.path()).is_none());
         assert!(!path.exists());
+    }
+}
+
+#[cfg(test)]
+mod query_label_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn record_query_serializes_the_payload_name() {
+        let sink = Arc::new(CapturingSink::default());
+        let journal = Diagnostics::new(Some(sink.clone()));
+        journal.record_query(
+            "host",
+            "query",
+            "failed",
+            "payload_too_large",
+            "refresh_watches",
+        );
+        {
+            let live = sink.0.lock().expect("sink lock");
+            assert_eq!(
+                live.last()
+                    .and_then(|event| event.get("payload"))
+                    .and_then(|value| value.as_str()),
+                Some("refresh_watches"),
+                "the recorded payload name is what attributes a failure to its query"
+            );
+        }
+        let live = sink.0.lock().unwrap();
+        assert_eq!(live[0]["payload"], "refresh_watches");
     }
 }

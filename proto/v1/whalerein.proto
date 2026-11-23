@@ -1328,7 +1328,13 @@ message LiveFrame {
 }
 message SessionState {
   SessionKey session = 1; string live_epoch = 2; uint64 revision = 3;
-  string history_head = 4; RunPhase run_phase = 5; repeated Approval approvals = 6;
+  string history_head = 4; RunPhase run_phase = 5;
+  // Pending approvals are content: they travel only through the bounded
+  // ApprovalList query, never inside a session state. Their former field
+  // number is reserved so a stale writer cannot reappear as a compatible
+  // baseline.
+  reserved 6;
+  reserved "approvals";
   // Questions readiness is independent of history readiness. A questions-only
   // observation may omit history_head and run_phase.
   QuestionDescriptor questions = 7;
@@ -1355,7 +1361,24 @@ message WatchReady {
   QuestionDescriptor questions = 4;
 }
 message RefreshWatches { repeated string watch_ids = 1; }
-message WatchStates { repeated WatchReady watches = 1; }
+// Lease renewal carries no session content. Content is delivered by the
+// event stream and by the one bounded baseline read at attach; a renewal that
+// had to rebuild the baseline would grow with the transcript and eventually
+// exceed the transport budget for reasons unrelated to connectivity.
+message WatchLease {
+  string watch_id = 1;
+  uint32 lease_ms = 2;
+  // State transition markers only: a changed marker means the observer missed
+  // something. Structural drift is repaired by re-attaching for a fresh baseline
+  // and history drift by the paged history read; a lease never ships content.
+  uint64 revision = 3;
+  RunPhase run_phase = 4;
+  string live_epoch = 5;
+  string history_head = 6;
+  string projection_id = 7;
+  QuestionDescriptor questions = 8;
+}
+message WatchStates { repeated WatchLease watches = 1; }
 message UnwatchSession { string watch_id = 1; }
 
 // Ephemeral, read-only observations. The enclosing request owns authorization
