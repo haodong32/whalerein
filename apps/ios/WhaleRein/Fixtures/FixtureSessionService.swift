@@ -23,7 +23,13 @@ final class FixtureSessionService: SessionService {
     }
 
     private var continuations: [UUID: AsyncStream<SessionEventEnvelope>.Continuation] = [:]
-    private(set) var connectionStatus: ConnectionStatus = .online
+    /// Authoritative Host connection fixtures behind the app-level monitor.
+    private var hostConnections: [String: HostConnectionSnapshot] = [:]
+    private var monitoredHostIds: [String] = []
+
+    var hasOfflineHostConnection: Bool {
+        monitoredHostIds.contains { hostConnections[$0]?.state == "offline" }
+    }
 
     let options: LaunchOptions
     private let clock: FixtureClock
@@ -106,6 +112,69 @@ final class FixtureSessionService: SessionService {
             }
         }
         return stream
+    }
+
+    // MARK: - Host connection
+
+    /// Fixtures are connected by default so the chrome and the host rows can be
+    /// exercised without a broker. A lifecycle scenario can override the
+    /// snapshot before the app-level monitor starts.
+    func hostConnection(hostId: String) -> HostConnectionSnapshot? {
+        guard paired, !revoked else { return nil }
+        if let snapshot = hostConnections[hostId] { return snapshot }
+        return HostConnectionSnapshot(
+            hostId: hostId,
+            state: "connected",
+            code: nil,
+            sinceUnixMs: Self.fixtureTimestamp(clock.now())
+        )
+    }
+
+    func startHostMonitor(hostIds: [String]) {
+        monitoredHostIds = hostIds
+        for hostId in hostIds {
+            guard paired else { continue }
+            if let existing = hostConnection(hostId: hostId) {
+                emit(
+                    .hostConnection(
+                        hostId: existing.hostId,
+                        state: existing.state,
+                        code: existing.code,
+                        sinceUnixMs: existing.sinceUnixMs
+                    ),
+                    hostId: hostId,
+                    sessionId: ""
+                )
+            }
+        }
+    }
+
+    func stopHostMonitor() {
+        monitoredHostIds.removeAll()
+    }
+
+    private func publishHostConnection(hostId: String, state: String, code: String? = nil) {
+        let snapshot = HostConnectionSnapshot(
+            hostId: hostId,
+            state: state,
+            code: code,
+            sinceUnixMs: Self.fixtureTimestamp(clock.now())
+        )
+        hostConnections[hostId] = snapshot
+        emit(
+            .hostConnection(
+                hostId: hostId,
+                state: state,
+                code: code,
+                sinceUnixMs: snapshot.sinceUnixMs
+            ),
+            hostId: hostId,
+            sessionId: ""
+        )
+    }
+
+    private static func fixtureTimestamp(_ date: Date) -> UInt64 {
+        UInt64(max(0, Int64(date.timeIntervalSince1970 * 1000)))
     }
 
     // MARK: - Pairing
@@ -319,7 +388,6 @@ final class FixtureSessionService: SessionService {
                 await self.clock.sleep(for: .milliseconds(180))
                 guard !Task.isCancelled else { return }
                 self.activeWatch = nil
-                self.connectionStatus = .offline
                 self.emit(.watchEnded(reason: "ended"), hostId: hostId, sessionId: sessionId)
             }
             lifecycleTasks.append(task)
@@ -328,8 +396,7 @@ final class FixtureSessionService: SessionService {
                 guard let self else { return }
                 await self.clock.sleep(for: .milliseconds(180))
                 guard !Task.isCancelled else { return }
-                self.connectionStatus = .offline
-                self.emit(.connection(hostId: hostId, status: .offline), hostId: hostId, sessionId: sessionId)
+                self.publishHostConnection(hostId: hostId, state: "offline")
             }
             lifecycleTasks.append(task)
         }

@@ -8,6 +8,7 @@ import SwiftUI
 
 struct SettingsAccountView: View {
     let account: AccountSettingsModel?
+    let hostConnectivity: HostConnectivityModel
     @Binding var showDiagnostics: Bool
     @State private var pendingScope: AccountSessionScope?
 
@@ -110,9 +111,12 @@ struct SettingsAccountView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(verbatim: host.hostId)
                                     Text(
-                                        host.online
-                                            ? L10n.hostsOnline.key
-                                            : L10n.hostsOffline.key
+                                        L10nKey.hostPresenceKey(
+                                            for: hostConnectivity.status(
+                                                for: host.hostId,
+                                                fallbackOnline: host.online
+                                            )
+                                        ).key
                                     )
                                     .font(.caption)
                                     .foregroundStyle(.secondary)

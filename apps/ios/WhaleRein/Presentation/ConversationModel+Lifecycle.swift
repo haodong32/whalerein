@@ -63,7 +63,6 @@ extension ConversationModel {
         consumeTask = nil
         wait.close()
         service.stopWatch()
-        state = ConversationReduce.reduce(state, .connectionChanged(.offline))
     }
 
     /// Restarts the watch and resyncs the visible session after returning to the

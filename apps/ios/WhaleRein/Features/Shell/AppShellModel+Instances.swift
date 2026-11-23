@@ -188,6 +188,7 @@ extension AppShellModel {
         self.dismissSheet()
         self.dismissSheet()
         self.hostList = HostListModel(service: service, preferences: preferences)
+        self.connectivity.reset()
         self.sessionList = SessionListModel(service: service, preferences: preferences)
         self.diagnostics = DiagnosticsModel(
             service: service,

@@ -28,6 +28,18 @@ struct ConversationView: View {
         .background(Color(.systemBackground))
         .navigationTitle(model.sessionTitle)
         .inlineNavigationTitle()
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text(model.sessionTitle)
+                        .font(.headline)
+                        .lineLimit(1)
+                    HostConnectionStatusChrome(
+                        status: model.connectivity.status(for: model.hostId)
+                    )
+                }
+            }
+        }
         .toolbarBackground(.hidden, for: .navigationBar)
         .modifier(TopScrollEdgeEffect())
         .overlay(alignment: .top) {

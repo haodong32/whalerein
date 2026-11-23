@@ -48,11 +48,21 @@ enum ScenarioBuilder {
         sessionId: String = "s-001",
         title: String = "Release checklist"
     ) -> ConversationModel {
-        ConversationModel(
+        let service = service(for: scenario, directory: directory)
+        // Seed the same authoritative snapshot the app-level monitor would
+        // receive so previews and the gallery show the real Host status.
+        var seeded: [String: HostConnectionSnapshot] = [:]
+        for host in FixtureCatalog.hosts {
+            if let snapshot = service.hostConnection(hostId: host.hostId) {
+                seeded[host.hostId] = snapshot
+            }
+        }
+        return ConversationModel(
             hostId: hostId,
             sessionId: sessionId,
             sessionTitle: title,
-            service: service(for: scenario, directory: directory)
+            service: service,
+            connectivity: HostConnectivityModel(snapshot: seeded)
         )
     }
 

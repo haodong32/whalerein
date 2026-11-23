@@ -244,6 +244,7 @@ enum L10nKey: String, CaseIterable, Sendable {
     case settingsDiagnosticsOpen = "settings.diagnostics.open"
     case errorNotPaired = "error.notPaired"
     case errorRevoked = "error.revoked"
+    case errorUnauthorized = "error.unauthorized"
     case errorHostOffline = "error.hostOffline"
     case errorUnavailable = "error.unavailable"
     case errorConflict = "error.conflict"

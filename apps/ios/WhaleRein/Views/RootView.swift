@@ -45,6 +45,7 @@ struct RootView: View {
                 cloud: app.cloudSignIn,
                 dataPath: app.dataDirectory.path,
                 serviceSelection: serviceSelection,
+                hostConnectivity: app.connectivity,
                 reasoningVisible: app.reasoningVisible,
                 setReasoningVisible: { app.setReasoningVisible($0) },
                 onSignOutCloud: { Task { await app.signOutCloud() } },
@@ -94,6 +95,7 @@ struct RootView: View {
     private var switcherModels: SessionSwitcherModels {
         SessionSwitcherModels(
             hosts: app.hostList,
+            connectivity: app.connectivity,
             sessions: app.sessionList,
             management: app.sessionManagement,
             currentConversation: app.conversation.map {
@@ -137,7 +139,11 @@ struct RootView: View {
             // directory; the self-hosted invitation flow remains reachable
             // from the welcome surface. An explicit local forget/revoke
             // returns to the invitation flow so the reset is visible.
-            CloudSignInRootView(cloud: cloud, serviceSelection: serviceSelection) {
+            CloudSignInRootView(
+                cloud: cloud,
+                serviceSelection: serviceSelection,
+                connectivity: app.connectivity
+            ) {
                 app.openManualPairing()
             }
         } else {

@@ -11,7 +11,7 @@ final class NavigationAndConversationUITests: WhaleReinUITestCase {
 
         // The paired app restores a conversation directly; the toolbar switcher
         // is the only Host/session entry point.
-        let connection = waitFor("conversation.connectionStatus")
+        let connection = waitFor("host.connectionStatus")
         XCTAssertEqual(connection.value as? String, "Connected")
         XCTAssertTrue(element("message.msg-0320").waitForExistence(timeout: 10))
         XCTAssertTrue(element("approval.card.\(Self.approvalId)").exists)

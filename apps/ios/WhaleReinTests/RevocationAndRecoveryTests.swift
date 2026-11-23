@@ -51,7 +51,9 @@ struct RevocationAndRecoveryTests {
         let (app, _) = makeApp(service: service) { $0.paired = true }
         await app.bootstrapConversation()
         #expect(app.conversation != nil)
-        await waitUntil { service.activeStreamCount == 1 }
+        // The app-level monitor subscribes too, so wait for this session's
+        // consumer instead of the first stream that appears.
+        await waitUntil { app.conversation?.eventSubscriptionCount == 1 }
 
         service.emit(.error(code: .revoked, message: "revoked"), sequence: 1)
         await waitUntil { app.isRevoked }

@@ -28,6 +28,9 @@ struct CloudSignInProgressView: View {
 struct CloudSignInRootView: View {
     let cloud: CloudSignInModel
     let serviceSelection: ServiceSelectionContext
+    /// Authoritative Host status. Before the first snapshot exists the Cloud
+    /// directory's own presence hint is the only available signal.
+    let connectivity: HostConnectivityModel
     /// Injected by the shell so this screen never reads the app environment.
     var onPairSelfHosted: () -> Void = {}
 
@@ -35,7 +38,7 @@ struct CloudSignInRootView: View {
         NavigationStack {
             Group {
                 if let account = cloud.account {
-                    CloudDirectoryView(cloud: cloud, account: account)
+                    CloudDirectoryView(cloud: cloud, account: account, connectivity: connectivity)
                 } else {
                     CloudWelcomeView(cloud: cloud, serviceSelection: serviceSelection, onPairSelfHosted: onPairSelfHosted)
                 }
@@ -133,6 +136,7 @@ struct CloudWelcomeView: View {
 struct CloudDirectoryView: View {
     let cloud: CloudSignInModel
     let account: CloudAccount
+    let connectivity: HostConnectivityModel
 
     var body: some View {
         List {
@@ -225,7 +229,7 @@ struct CloudDirectoryView: View {
             }
         case .loaded(let hosts):
             ForEach(hosts) { host in
-                CloudDirectoryHostRow(cloud: cloud, host: host)
+                CloudDirectoryHostRow(cloud: cloud, host: host, connectivity: connectivity)
             }
         }
     }
@@ -234,6 +238,7 @@ struct CloudDirectoryView: View {
 private struct CloudDirectoryHostRow: View {
     let cloud: CloudSignInModel
     let host: CloudDirectoryHost
+    let connectivity: HostConnectivityModel
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -287,6 +292,22 @@ private struct CloudDirectoryHostRow: View {
     private var stateKey: L10nKey {
         switch host.access {
         case .authorized(let online):
+            // Once the Host connection has a snapshot, it is authoritative and
+            // Cloud presence never overrides it.
+            if connectivity.hasSnapshot(host.hostId) {
+                switch connectivity.status(for: host.hostId) {
+                case .connected, .degraded:
+                    return .cloudHostOnline
+                case .unknown, .connecting:
+                    return .conversationConnectionConnecting
+                case .reconnecting:
+                    return .conversationConnectionReconnecting
+                case .disconnected, .offline:
+                    return .cloudHostOffline
+                case .unavailable(let code):
+                    return L10nKey.hostConnectionErrorKey(for: code)
+                }
+            }
             return online ? .cloudHostOnline : .cloudHostOffline
         case .eligible:
             return .cloudHostEligible

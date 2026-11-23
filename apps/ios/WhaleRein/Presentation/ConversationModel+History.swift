@@ -55,7 +55,7 @@ extension ConversationModel {
             }
             return
         }
-        let useCache = cacheFallback || historySource == .cache || !connection.isOnline
+        let useCache = cacheFallback || historySource == .cache || !connectivity.isOnline(hostId)
         // Switching source requires a fresh traversal; a continuation belongs
         // to one source, projection and scope.
         if let historySource, historySource != (useCache ? .cache : .online) {
@@ -161,7 +161,7 @@ extension ConversationModel {
         historySource = page.source
         historyProvenance = page.source == .cache
             ? .cache
-            : (connection.isOnline ? .online : .unavailable)
+            : (connectivity.isOnline(hostId) ? .online : .unavailable)
         let existing = Set(messages.map(\.messageId))
         var prepended: [ConversationMessage] = []
         for message in page.messages where !existing.contains(message.messageId) {

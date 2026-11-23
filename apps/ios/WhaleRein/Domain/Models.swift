@@ -4,16 +4,18 @@
 
 import Foundation
 
-// MARK: - Connection
+// MARK: - Host connection
 
-enum ConnectionStatus: String, Codable, CaseIterable, Sendable {
-    case offline
-    case connecting
-    case online
-    case degraded
-    case reconnecting
-
-    var isOnline: Bool { self == .online || self == .degraded }
+/// One authoritative connection snapshot for a Host. `nil` from
+/// `SessionService.hostConnection(hostId:)` means the connection was never
+/// opened, which is distinct from an `offline` snapshot.
+struct HostConnectionSnapshot: Equatable, Hashable, Sendable {
+    let hostId: String
+    /// Core's connection state name, e.g. `connected`, `connecting`, `offline`.
+    let state: String
+    /// Terminal failure code, present only for terminal failures.
+    let code: String?
+    let sinceUnixMs: UInt64
 }
 
 // MARK: - Hosts and pairing
@@ -557,8 +559,9 @@ enum MessageEvent: Sendable {
     /// One material change to a canonical tool activity already merged by Core.
     case toolActivity(ToolActivity)
     case attemptEnded(attemptId: String, outcome: AttemptOutcome)
-    case state(ConnectionStatus)
-    case connection(hostId: String, status: ConnectionStatus)
+    /// Host-scoped, unscoped connection transition. Delivered with no session
+    /// open and never dropped when a watch is replaced.
+    case hostConnection(hostId: String, state: String, code: String?, sinceUnixMs: UInt64)
     case capabilities(SessionCapabilities)
     case approvals([Approval])
     case approvalChanged(Approval)
@@ -571,6 +574,8 @@ enum MessageEvent: Sendable {
 /// Envelope carrying the watch identity and ordering of a `MessageEvent`.
 /// Presentation models drop any event whose host/session no longer matches the
 /// active watch, or whose sequence is not newer than the last one applied.
+/// A host-scoped `hostConnection` event carries an empty `sessionId` because it
+/// is not owned by any watch.
 struct SessionEventEnvelope: Sendable {
     let hostId: String
     let sessionId: String

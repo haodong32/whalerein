@@ -67,14 +67,27 @@ struct LocalizationTests {
         #expect(value(.diagnosticsLastFailure, in: zh).contains("%@"))
     }
 
-    @Test("connection status labels are localized and distinguish states")
+    @Test("Host connection labels are localized and terminal codes are actionable")
     func connectionLabels() {
-        let keys = ConnectionStatus.allCases.map { L10nKey.connectionKey(for: $0) }
-        #expect(Set(keys).count == ConnectionStatus.allCases.count)
-        for key in keys {
+        let statuses: [HostConnectionStatus] = [
+            .unknown, .disconnected, .connecting, .connected, .degraded, .reconnecting, .offline
+        ]
+        for status in statuses {
+            let key = L10nKey.connectionKey(for: status)
             #expect(!key.string.isEmpty)
             #expect(key.string != key.rawValue)
         }
+        // "Never opened" must render as connecting, not offline.
+        #expect(L10nKey.connectionKey(for: .unknown) == .conversationConnectionConnecting)
+        #expect(L10nKey.connectionKey(for: .offline) == .conversationConnectionOffline)
+        // Terminal failures stay actionable instead of collapsing to offline.
+        #expect(L10nKey.connectionKey(for: .unavailable("revoked")) == .errorRevoked)
+        #expect(L10nKey.connectionKey(for: .unavailable("unauthorized")) == .errorUnauthorized)
+        #expect(L10nKey.connectionKey(for: .unavailable("not_paired")) == .errorNotPaired)
+        #expect(
+            L10nKey.connectionKey(for: .unavailable("protocol_version_incompatible"))
+                == .errorProtocolIncompatible
+        )
     }
 
     @Test("command status labels are localized")
