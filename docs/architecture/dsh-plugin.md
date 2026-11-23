@@ -31,6 +31,15 @@ normalized Messages, text deltas/resets, Attempt outcomes and state invalidation
 Native revision/index handling and cumulative/native block completion checks stay
 here. Source-specific fields never require Core or CLI JSON parsing.
 
+Archive state is a source fact, not a Session record field. The DSH adapter reads
+the workspace registry's `archivedSessionIds` when it lists Sessions and marks
+the normalized summary's `archived` flag. That flag belongs to the
+harness-neutral summary contract: another adapter maps its own default-hidden
+state into it, and a source without the concept reports false. Core transports
+and caches the flag without filtering, so a client can hide archived Sessions by
+default and still offer an explicit archived view. The Host listing never drops
+them, and `archived` never stands in for deletion or inaccessibility.
+
 Native history positions remain inside the adapter. ReadHistory pins a source cut,
 budgets encoded Messages and advances across filtered internal records. A native
 regression changes the view and live epoch; old cursors require a new snapshot.

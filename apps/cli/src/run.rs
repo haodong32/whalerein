@@ -24,8 +24,8 @@ use crate::output::{
     render_command, render_doctor, render_download, render_history_message, render_history_page,
     render_hosts, render_lifecycle_outcome, render_manifest, render_models, render_pair,
     render_pairing_history, render_questions, render_queue, render_session_model, render_sessions,
-    sanitize_field, sessions_data, shell_quote, tail_event_json, CliError, CliOutcome,
-    DownloadProgressRenderer, TailRenderer,
+    retain_visible_sessions, sanitize_field, sessions_data, shell_quote, tail_event_json, CliError,
+    CliOutcome, DownloadProgressRenderer, TailRenderer,
 };
 
 const DEFAULT_TAIL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -288,7 +288,7 @@ where
         Ok(core) => core,
         Err(error) => return core_error_outcome(&command, error),
     };
-    if let Command::Sessions { host }
+    if let Command::Sessions { host, .. }
     | Command::Models { host }
     | Command::SessionCreate { host, .. } = &mut command
     {
@@ -636,12 +636,15 @@ async fn dispatch(
             )),
             Err(error) => Err(error),
         },
-        Command::Sessions { host } => match core.sessions(host).await {
-            Ok(list) => Ok(CliOutcome::success(
-                command,
-                sessions_data(host, &list),
-                render_sessions(&list),
-            )),
+        Command::Sessions { host, all } => match core.sessions(host).await {
+            Ok(mut list) => {
+                retain_visible_sessions(&mut list, *all);
+                Ok(CliOutcome::success(
+                    command,
+                    sessions_data(host, &list),
+                    render_sessions(&list),
+                ))
+            }
             Err(error) => Err(error),
         },
         Command::Models { host } => match core.list_models(host).await {

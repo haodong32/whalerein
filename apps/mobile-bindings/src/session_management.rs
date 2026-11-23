@@ -730,6 +730,7 @@ mod tests {
             history_cursor: "cursor-1".into(),
             source_capabilities: None,
             queued_prompts: 0,
+            archived: false,
         };
         let view = SessionDetailView::from_summary("host-1", summary);
         assert_eq!(view.host_id, "host-1");

@@ -65,6 +65,9 @@ struct SessionSummary: Identifiable, Hashable, Codable, Sendable {
     let cwd: String
     /// True while the Source reports an active turn for this session.
     var running: Bool = false
+    /// The source's own default listing hides this session. The switcher hides
+    /// archived rows unless the user asks to see them.
+    var archived: Bool = false
 
     var id: String { sessionId }
 

@@ -39,6 +39,9 @@ final class SessionListModel {
     private let service: any SessionService
     private let preferences: PreferencesStore
 
+    /// Whether the switcher shows sessions the source reports as archived.
+    private(set) var showsArchived: Bool
+
     private var isLoadInFlight = false
     private var reloadRequested = false
     private var requestedHostId = ""
@@ -47,22 +50,38 @@ final class SessionListModel {
     init(service: any SessionService, preferences: PreferencesStore) {
         self.service = service
         self.preferences = preferences
+        showsArchived = preferences.value.showsArchivedSessions
+    }
+
+    /// Rows the switcher renders: archived sessions only appear on request.
+    var visibleSessions: [SessionSummary] {
+        showsArchived ? sessions : sessions.filter { !$0.archived }
+    }
+
+    var archivedCount: Int {
+        sessions.reduce(0) { $0 + ($1.archived ? 1 : 0) }
+    }
+
+    func setShowsArchived(_ value: Bool) {
+        guard value != showsArchived else { return }
+        showsArchived = value
+        preferences.update { $0.showsArchivedSessions = value }
     }
 
     /// Sessions grouped by workspace for the switcher. A single workspace
     /// yields one group so callers can decide whether to show section headers.
     var workspaceGroups: [WorkspaceGroup] {
-        WorkspaceGrouping.groups(for: sessions, otherName: L10n.sessionsWorkspaceOther.string)
+        WorkspaceGrouping.groups(for: visibleSessions, otherName: L10n.sessionsWorkspaceOther.string)
     }
 
     var hasMultipleWorkspaces: Bool { workspaceGroups.count > 1 }
 
     var continueSession: SessionSummary? {
         guard let last = preferences.value.lastSessionId else { return nil }
-        return sessions.first { $0.sessionId == last }
+        return visibleSessions.first { $0.sessionId == last }
     }
 
-    var isEmpty: Bool { loadState == .loaded && sessions.isEmpty }
+    var isEmpty: Bool { loadState == .loaded && visibleSessions.isEmpty }
 
     func load(hostId: String) async {
         state = SessionsReduce.reduce(state, .sessionsLoadStarted(hostId: hostId))

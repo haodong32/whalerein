@@ -207,7 +207,7 @@ standaloneCAPath }`, `AppConfigView { path, version, app, instances }`,
 
 Records: `HostSummary { hostId, online, fingerprint, protocolVersion }`,
 `SessionSummaryView { sessionId, title, updatedAtUnixMs, cwd, running,
-capabilities: SessionCapabilitiesView? }`,
+archived, capabilities: SessionCapabilitiesView? }`,
 `SessionCapabilitiesView { history, resumableHistory, liveText, interrupt,
 approvals, liveReasoning, toolActivity, conversationNotices, attachments,
 historyPage, historyExact, sendFollowup, deliveryModes: [String],

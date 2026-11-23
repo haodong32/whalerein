@@ -16,19 +16,22 @@ struct AppPreferences: Codable, Equatable {
     var lastHostId: String?
     var lastSessionId: String?
     var lastSessionTitle: String?
+    var showsArchivedSessions: Bool = false
 
     init(
         schemaVersion: Int = AppPreferences.currentSchemaVersion,
         paired: Bool = false,
         lastHostId: String? = nil,
         lastSessionId: String? = nil,
-        lastSessionTitle: String? = nil
+        lastSessionTitle: String? = nil,
+        showsArchivedSessions: Bool = false
     ) {
         self.schemaVersion = schemaVersion
         self.paired = paired
         self.lastHostId = lastHostId
         self.lastSessionId = lastSessionId
         self.lastSessionTitle = lastSessionTitle
+        self.showsArchivedSessions = showsArchivedSessions
     }
 
     enum CodingKeys: String, CodingKey {
@@ -37,6 +40,7 @@ struct AppPreferences: Codable, Equatable {
         case lastHostId
         case lastSessionId
         case lastSessionTitle
+        case showsArchivedSessions
     }
 
     /// Tolerant decoding with an explicit one-way migration from the original
@@ -59,6 +63,7 @@ struct AppPreferences: Codable, Equatable {
         lastHostId = Self.nonEmpty(host)
         lastSessionId = Self.nonEmpty(session)
         lastSessionTitle = Self.nonEmpty(title)
+        showsArchivedSessions = try container.decodeIfPresent(Bool.self, forKey: .showsArchivedSessions) ?? false
         if lastHostId == nil {
             lastSessionId = nil
             lastSessionTitle = nil

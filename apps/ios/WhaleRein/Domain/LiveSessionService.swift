@@ -922,7 +922,8 @@ final class LiveSessionService: SessionService {
             title: view.title,
             updatedAtUnixMs: view.updatedAtUnixMs,
             cwd: view.cwd,
-            running: view.running
+            running: view.running,
+            archived: view.archived
         )
     }
 

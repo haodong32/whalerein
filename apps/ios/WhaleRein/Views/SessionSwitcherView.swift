@@ -188,14 +188,15 @@ struct SessionSwitcherContent: View {
                     .accessibilityIdentifier("sessions.retry")
                 }
             }
-        case .loaded where models.sessions.sessions.isEmpty:
-            Section {
-                Text(L10n.sessionsEmpty.key)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("sessions.empty")
-            }
         case .loaded:
-            if showsWorkspaceHeaders {
+            archivedToggle
+            if models.sessions.visibleSessions.isEmpty {
+                Section {
+                    Text(L10n.sessionsEmpty.key)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("sessions.empty")
+                }
+            } else if showsWorkspaceHeaders {
                 ForEach(models.sessions.workspaceGroups) { group in
                     Section {
                         sessionRows(in: group)
@@ -214,6 +215,21 @@ struct SessionSwitcherContent: View {
                 } header: {
                     Text(L10n.sessionsTitle.key)
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var archivedToggle: some View {
+        if models.sessions.archivedCount > 0 || models.sessions.showsArchived {
+            Section {
+                Toggle(isOn: Binding(
+                    get: { models.sessions.showsArchived },
+                    set: { models.sessions.setShowsArchived($0) }
+                )) {
+                    Label(L10n.sessionsShowArchived.key, systemImage: "archivebox")
+                }
+                .accessibilityIdentifier("sessions.archivedToggle")
             }
         }
     }

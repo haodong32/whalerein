@@ -1,3 +1,7 @@
+// The normalized session summary every source adapter must produce. `archived`
+// is a source fact: the source's own default listing hides the Session. It is
+// never a WhaleRein preference, and it must not stand in for deletion or
+// inaccessibility (those Sessions are not listed at all).
 export function summaryToProto(summary) {
   return {
     session_id: summary.sessionId,
@@ -13,6 +17,7 @@ export function summaryToProto(summary) {
     history_cursor: summary.historyCursor ?? '',
     source_capabilities: summary.sourceCapabilities,
     queued_prompts: summary.queuedPrompts ?? 0,
+    archived: Boolean(summary.archived),
   }
 }
 

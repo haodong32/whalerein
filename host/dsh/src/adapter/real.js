@@ -86,7 +86,7 @@ function nativeFailureCode(error) {
   return mapAdapterError(error)
 }
 
-function summaryFromControllerSession(session, sessionId = session?.sessionId) {
+function summaryFromControllerSession(session, sessionId, archived) {
   return normalizeSummary({
     sessionId: String(sessionId ?? ''),
     title: controllerSessionTitle(session),
@@ -98,6 +98,7 @@ function summaryFromControllerSession(session, sessionId = session?.sessionId) {
     blank: Boolean(session?.blank),
     parentSessionId: session?.parentSessionId ?? '',
     origin: session?.origin ?? '',
+    archived,
     queuedPrompts: controllerSessionQueuedPrompts(session),
   })
 }
@@ -808,20 +809,37 @@ export class RealDshAdapter extends DshAdapter {
     }
   }
 
+  // DSH keeps archive state in the workspace registry, not on the Session
+  // record. A missing or unreadable registry reports no archives instead of
+  // failing the listing.
+  #archivedSessionIds() {
+    try {
+      const registry = this.#provided('workspaceRegistry')
+      const ids = registry?.archivedSessionIds
+      return Array.isArray(ids) ? new Set(ids.map(String)) : new Set()
+    } catch {
+      return new Set()
+    }
+  }
+
   // --- sessions -----------------------------------------------------------
 
   async listNativeSessions({signal} = {}) {
     try {
       if(signal?.aborted)throw new AdapterError('unavailable')
+      const archived = this.#archivedSessionIds()
       const controller = this.#service('sessionController')
       if (controller && typeof controller.list === 'function') {
         const value = await controller.list({}, signal ? AbortSignal.any([this.#signal(),signal]) : this.#signal())
         if(signal?.aborted)throw new AdapterError('unavailable')
-        return controllerSessionRows(value).map((session) => summaryFromControllerSession(session))
+        return controllerSessionRows(value).map((session) => {
+          const sessionId = String(session?.sessionId ?? '')
+          return summaryFromControllerSession(session, sessionId, archived.has(sessionId))
+        })
       }
       const store = this.#service('sessions')
       if (store && typeof store.list === 'function') {
-        return store.list().map((session) => this.#summaryFromLive(session))
+        return store.list().map((session) => this.#summaryFromLive(session, archived))
       }
       throw new AdapterError('unsupported_capability', 'session listing unavailable')
     } catch (error) {
@@ -830,12 +848,13 @@ export class RealDshAdapter extends DshAdapter {
     }
   }
 
-  #summaryFromLive(session) {
+  #summaryFromLive(session, archived) {
     const header = session?.header ?? {}
     const events = typeof session?.snapshotEvents === 'function' ? session.snapshotEvents() : []
     const last = events[events.length - 1]
+    const sessionId = String(session?.id ?? header.id ?? '')
     return normalizeSummary({
-      sessionId: String(session?.id ?? header.id ?? ''),
+      sessionId,
       cwd: header.cwd ?? '',
       createdAt: Number(header.createdAt ?? 0),
       updatedAt: Number(last?.time ?? header.createdAt ?? 0),
@@ -844,6 +863,7 @@ export class RealDshAdapter extends DshAdapter {
       blank: events.length === 0,
       parentSessionId: header.parentSession ?? '',
       origin: header.origin ?? '',
+      archived: archived.has(sessionId),
     })
   }
 
@@ -957,12 +977,14 @@ export class RealDshAdapter extends DshAdapter {
   async #summaryFor(sessionId, signal) {
     if (signal?.aborted) throw new AdapterError('unavailable')
     const controller = this.#service('sessionController')
+    const archived = this.#archivedSessionIds()
+    const key = String(sessionId)
     if (controller && typeof controller.list === 'function') {
       try {
         const value = await controller.list({}, signal ? AbortSignal.any([this.#signal(),signal]) : this.#signal())
         if (signal?.aborted) throw new AdapterError('unavailable')
-        const found = controllerSessionRows(value).find((session) => String(session.sessionId) === sessionId)
-        if (found) return summaryFromControllerSession(found, sessionId)
+        const found = controllerSessionRows(value).find((session) => String(session.sessionId) === key)
+        if (found) return summaryFromControllerSession(found, key, archived.has(key))
       } catch {
         if (signal?.aborted) throw new AdapterError('unavailable')
         // fall through to the live session view
@@ -971,7 +993,7 @@ export class RealDshAdapter extends DshAdapter {
     if (signal?.aborted) throw new AdapterError('unavailable')
     const live = this.#service('sessions')?.get?.(sessionId)
     if (live) {
-      const summary = this.#summaryFromLive(live)
+      const summary = this.#summaryFromLive(live, archived)
       const state = await this.#stateOf(sessionId, signal)
       if (state) {
         summary.running = Boolean(state.running)
@@ -979,7 +1001,7 @@ export class RealDshAdapter extends DshAdapter {
       }
       return summary
     }
-    return normalizeSummary({ sessionId })
+    return normalizeSummary({ sessionId, archived: archived.has(key) })
   }
 
   // The source state endpoint is passive: null means there is no live inbox.

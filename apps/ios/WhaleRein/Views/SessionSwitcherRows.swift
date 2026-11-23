@@ -38,6 +38,15 @@ struct SwitcherSessionRow: View {
                 .font(.body)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            if session.archived {
+                Text(L10n.sessionsArchived.key)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(.quaternary, in: Capsule())
+                    .accessibilityHidden(true)
+            }
             Spacer(minLength: 8)
             SessionActivityText(date: session.updatedAt)
                 .font(.caption)
@@ -56,7 +65,8 @@ struct SwitcherSessionRow: View {
     }
 
     private var statusText: String {
-        session.running ? L10n.sessionsRunning.string : L10n.sessionsStatusIdle.string
+        if session.archived { return L10n.sessionsArchived.string }
+        return session.running ? L10n.sessionsRunning.string : L10n.sessionsStatusIdle.string
     }
 
     private var accessibilityLabel: String {

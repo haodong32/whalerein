@@ -325,6 +325,9 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_capabilities: Option<SessionCapabilities>,
     pub queued_prompts: u32,
+    /// The source's own default listing hides this Session; it is still listed
+    /// here so a client can offer an archived view.
+    pub archived: bool,
 }
 
 impl From<whalerein_proto::SessionSummary> for SessionSummary {
@@ -343,6 +346,7 @@ impl From<whalerein_proto::SessionSummary> for SessionSummary {
             history_cursor: value.history_cursor,
             source_capabilities: value.source_capabilities.map(Into::into),
             queued_prompts: value.queued_prompts,
+            archived: value.archived,
         }
     }
 }
@@ -363,6 +367,7 @@ impl From<SessionSummary> for whalerein_proto::SessionSummary {
             history_cursor: value.history_cursor,
             queued_prompts: value.queued_prompts,
             source_capabilities: value.source_capabilities.map(Into::into),
+            archived: value.archived,
         }
     }
 }
@@ -724,6 +729,7 @@ mod tests {
             history_cursor: "source-head".into(),
             source_capabilities: None,
             queued_prompts: 2,
+            archived: true,
         };
         let proto: whalerein_proto::SessionSummary = summary.clone().into();
         assert_eq!(SessionSummary::from(proto), summary);
