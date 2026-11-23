@@ -4,6 +4,7 @@ import android.content.Context
 import com.whalerein.android.corebridge.diagnostics.CoreDiagnosticReceiver
 import com.whalerein.android.corebridge.ports.AccountAdapter
 import com.whalerein.android.corebridge.ports.AccessPorts
+import com.whalerein.android.corebridge.ports.AccessRecordStore
 import com.whalerein.android.corebridge.ports.AttachmentAdapter
 import com.whalerein.android.corebridge.ports.AttachmentAuthorizationAdapter
 import com.whalerein.android.corebridge.ports.AttachmentPorts
@@ -71,13 +72,18 @@ class AndroidCore private constructor(
     private var installed: CoreBridge = openBridge(initial)
     private val closed = AtomicBoolean(false)
 
+    /** Non-secret pending-attempt and last-target records. */
+    internal val accessStore: AccessRecordStore by lazy {
+        AccessRecordStore.besideConfig(appConfigPath)
+    }
+
     val accessPorts: AccessPorts by lazy {
         AccessPorts(
-            cloudAuth = CloudAuthAdapter(this),
+            cloudAuth = CloudAuthAdapter(this, accessStore),
             profiles = ProfileAdapter(this),
             directory = DirectoryAdapter(this),
             pairing = PairingAdapter(this),
-            startup = StartupAdapter(this),
+            startup = StartupAdapter(this, accessStore),
             externalEntry = ExternalEntryAdapter(this),
         )
     }
@@ -204,6 +210,22 @@ class AndroidCore private constructor(
         }
     }
 
+    /**
+     * Reopen the active instance after its persisted configuration changed,
+     * for example when a Standalone CA was just applied. A failure leaves the
+     * previous, still-valid handle in place.
+     */
+    internal fun reloadActive(instance: InstanceId) {
+        synchronized(lock) {
+            if (closed.get()) return
+            val next = openBridge(instance)
+            val previous = installed
+            installed = next
+            activeInstance = instance
+            previous.close()
+        }
+    }
+
     /** Commit-then-swap profile activation. */
     internal fun switchTo(instance: InstanceId) {
         if (instance == activeInstance) return
@@ -246,7 +268,6 @@ class AndroidCore private constructor(
         return CoreBridge.open(
             configPath = view.configPath,
             instanceDirectory = instanceRoot,
-            filesDir = context.filesDir,
             diagnosticReceiver = receiver,
             appVersion = appVersion,
         )

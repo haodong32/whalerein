@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug-only host for instrumentation tests that need ActivityResult
+             launchers registered before the activity starts. -->
+        <activity
+            android:name=".SupportTestActivity"
+            android:exported="false" />
+        <!-- Debug-only provider so instrumentation tests can exercise the real
+             ContentResolver output path without the system Files picker. -->
+        <provider
+            android:name=".TestDocumentProvider"
+            android:authorities="com.whalerein.android.test.documents"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+</manifest>

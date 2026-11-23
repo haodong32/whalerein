@@ -74,12 +74,19 @@ class AndroidDocumentGateway(private val activity: ComponentActivity) {
 
     /** True when the provider accepted the bytes without a reported failure. */
     suspend fun write(uri: Uri, bytes: ByteArray): Boolean = withContext(Dispatchers.IO) {
-        val stream = activity.contentResolver.openOutputStream(uri, "w") ?: return@withContext false
-        stream.use { output ->
-            output.write(bytes)
-            output.flush()
+        try {
+            val stream = activity.contentResolver.openOutputStream(uri, "w")
+                ?: return@withContext false
+            stream.use { output ->
+                output.write(bytes)
+                output.flush()
+            }
+            true
+        } catch (_: Exception) {
+            // The document provider refused or aborted the write. Callers report
+            // an unconfirmed save because partial bytes may exist.
+            false
         }
-        true
     }
 
     private class PendingResult {

@@ -82,34 +82,29 @@ internal class SessionListAdapter(private val owner: AndroidCore) : SessionListP
                 ),
             )
         val session = SessionRef(host, com.whalerein.android.state.core.SessionId(sessionId))
+        // The Host confirmed this identity. A failed details read must not
+        // discard it, otherwise a retry would create a second session.
         val details = try {
-            owner.core().sessionDetails(host.hostId.value, sessionId)
+            owner.core().sessionDetails(host.hostId.value, sessionId).let { view ->
+                if (view.hostId == host.hostId.value && view.sessionId == sessionId) {
+                    view.toDetails(session)
+                } else {
+                    null
+                }
+            }
         } catch (_: Throwable) {
-            throw CoreFailureException(
-                CoreFailure(
-                    SessionListFailureCodes.DETAILS_REQUIRED,
-                    "The created session details could not be read.",
-                ),
-            )
+            null
         }
-        CreatedSession(session, details.toDetails(session))
+        CreatedSession(session, details)
     }
 
     override suspend fun fork(
         session: SessionRef,
         input: ForkSessionInput,
     ): Outcome<ForkedSession> = suspendOutcome {
-        if (input.turnId != null) {
-            // The shared binding's fork entry point targets the latest completed
-            // turn only; an explicit turn cannot be forwarded without a
-            // protocol change.
-            throw CoreFailureException(
-                CoreFailure(
-                    SessionListFailureCodes.INVALID_INPUT,
-                    "An explicit fork turn is not supported by this binding.",
-                ),
-            )
-        }
+        // Core's fork request targets the session's latest completed turn.
+        // A resolved turn id from session details therefore selects the same
+        // operation; it is not a second wire field and must not be rejected.
         val view = owner.core().forkSessionOutcome(
             session.host.hostId.value,
             session.sessionId.value,
@@ -176,7 +171,7 @@ private fun SessionSummaryView.toSummary(): SessionSummary = SessionSummary(
     updatedAtMillis = updatedAtUnixMs,
 )
 
-private fun com.whalerein.android.corebridge.SessionDetailView.toDetails(
+internal fun com.whalerein.android.corebridge.SessionDetailView.toDetails(
     session: SessionRef,
 ): SessionDetails = SessionDetails(
     session = session,
@@ -184,7 +179,10 @@ private fun com.whalerein.android.corebridge.SessionDetailView.toDetails(
     workingDirectory = cwd.ifEmpty { null },
     workspace = null,
     preset = null,
-    latestCompletedTurnId = null,
+    // The binding's fork is explicitly "latest completed turn". A non-blank
+    // history cursor proves a committed turn exists, so Fork is enabled and the
+    // resolved locator is accepted back by the latest-turn fork request.
+    latestCompletedTurnId = latestCompletedTurn(historyCursor, blank),
     updatedAtMillis = updatedAtUnixMs,
     cached = false,
 )

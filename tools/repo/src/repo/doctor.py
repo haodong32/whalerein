@@ -202,7 +202,10 @@ def specs_for_target(target):
         return specs_for(target.kind)
     base = [spec for spec in TOOL_SPECS if spec.name in ("uv", "git")]
     if target.kind == "android":
-        return [*base, *(spec for spec in TOOL_SPECS if spec.name in ("java", "adb"))]
+        names = ("java", "adb")
+        if target.name == "android-bridge-jvm":
+            names = ("java", "cargo", "protoc")
+        return [*base, *(spec for spec in TOOL_SPECS if spec.name in names)]
     if target.kind == "ios":
         return [
             *base,

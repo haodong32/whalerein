@@ -154,8 +154,24 @@ on device without a UI test.
 token-protected loopback control API for fresh invitations, fixture events,
 Access restarts, and separate broker stop/start so transport loss can be tested
 while HTTPS stays reachable. See its README for the exact environment variables,
-lifecycle and limitations. It is intentionally local-only: GitHub macOS runners
-cannot run the Docker service stack.
+lifecycle and limitations. It is intentionally local-only: hosted GitHub macOS
+runners cannot run the Docker service stack.
+
+The `iOS` workflow schedules this plan nightly and exposes it as the
+`integration` manual-dispatch suite; `./repo test ios-integration` starts and
+tears down the fixture stack itself. The job uses
+`vars.WHALEREIN_IOS_STACK_RUNNER` and defaults to `macos-15`, which has no Docker
+daemon. Until a self-hosted macOS runner with Docker and Xcode is registered in
+that repository variable, the scheduled integration job is expected to fail its
+Docker preflight; that is a repository-runner setting, not a workflow secret.
+
+`ContractParityTests/testLocalStackParity` remains a skip in the Unit plan even
+when `WHALEREIN_LOCAL_STACK=1`, because it throws before doing any comparison.
+The live contract comparison is instead owned by the `WhaleReinIntegrationTests`
+cases in the `Integration` plan against the stack that `ios-integration`
+provisions. Converting the placeholder into an executable comparison needs a
+client-test change with injected stack state; it is not reachable from CI
+configuration alone and is not counted as coverage here.
 
 The session switcher is sessions-first. The current Host is a single compact
 picker row (a native `Menu`) above the list; sessions are grouped by workspace
@@ -182,6 +198,8 @@ Per-instance materialized Core configuration lives at
 `client/instances/<id>/ca.pem`. All document writes are atomic; activation
 writes and validates the materialized instance before committing
 `app.active_instance`, so a failed write keeps the previous selection.
+Cloud instances without an imported CA use the iOS platform verifier for both
+HTTPS and MQTT; an imported CA replaces that trust for the instance.
 
 The welcome screen and Settings offer the service selector. Production builds
 show Cloud production and Standalone; Debug/test builds also show Staging.

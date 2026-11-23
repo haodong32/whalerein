@@ -75,11 +75,12 @@ fun AccountRoute(
     LaunchedEffect(Unit) { viewModel.load() }
     AccountScreen(
         state = state,
-        cloudHostGrants = emptyList(),
-        standaloneDevices = emptyList(),
+        cloudHostGrants = state.targets.cloudHostGrants,
+        standaloneDevices = state.targets.standaloneDevices,
         onSignOut = viewModel::requestSignOut,
         onRevokeSession = viewModel::requestRevokeAppSession,
         onRevokeAllSessions = viewModel::requestRevokeAllAppSessions,
+        onRevokeCurrentDevice = viewModel::requestRevokeCurrentDevice,
         onRevokeCloudGrant = viewModel::requestRevokeCloudHostGrant,
         onRevokeStandaloneDevice = viewModel::requestRevokeStandaloneDevice,
         onRequestForget = viewModel::requestForget,

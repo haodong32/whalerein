@@ -371,3 +371,322 @@ struct SessionManagementTests {
         #expect(outcome?.sessionAccepted == false)
     }
 }
+
+/// Delegates real fixture semantics and gates one response so the test can
+/// observe the in-flight window before publishing. Later calls are ungated.
+@MainActor
+final class GatedSessionManagementService: SessionManagementService {
+    let fixture: FixtureSessionService
+    var createGate: SuspendedResponse<Void>?
+    var forkGate: SuspendedResponse<Void>?
+    var detailsGate: SuspendedResponse<Void>?
+    private var gateNextCreate = true
+    private var gateNextFork = true
+    private var gateNextDetails = true
+
+    init(fixture: FixtureSessionService) {
+        self.fixture = fixture
+    }
+
+    var instanceId: String { fixture.instanceId }
+
+    func sessionCreateSupported(hostId: String) async throws -> Bool {
+        try await fixture.sessionCreateSupported(hostId: hostId)
+    }
+
+    func createSession(
+        hostId: String,
+        input: SessionCreateInput
+    ) async throws -> SessionCreateOutcome {
+        if gateNextCreate, let createGate {
+            gateNextCreate = false
+            try await createGate.wait()
+        }
+        return try await fixture.createSession(hostId: hostId, input: input)
+    }
+
+    func sessionDetails(hostId: String, sessionId: String) async throws -> SessionDetail {
+        if gateNextDetails, let detailsGate {
+            gateNextDetails = false
+            try await detailsGate.wait()
+        }
+        return try await fixture.sessionDetails(hostId: hostId, sessionId: sessionId)
+    }
+
+    func forkSession(hostId: String, sessionId: String) async throws -> SessionForkOutcome {
+        if gateNextFork, let forkGate {
+            gateNextFork = false
+            try await forkGate.wait()
+        }
+        return try await fixture.forkSession(hostId: hostId, sessionId: sessionId)
+    }
+
+    func modelCatalog(hostId: String) async throws -> ModelCatalog {
+        try await fixture.modelCatalog(hostId: hostId)
+    }
+
+    func readSessionModel(hostId: String, sessionId: String) async throws -> SessionModelState {
+        try await fixture.readSessionModel(hostId: hostId, sessionId: sessionId)
+    }
+
+    func selectSessionModel(
+        hostId: String,
+        sessionId: String,
+        choice: ModelChoice
+    ) async throws -> ModelSelectionOutcome {
+        try await fixture.selectSessionModel(hostId: hostId, sessionId: sessionId, choice: choice)
+    }
+}
+
+@Suite("Session management scope and receipts")
+@MainActor
+struct SessionManagementScopeTests {
+    private func makeGated() -> (SessionManagementModel, GatedSessionManagementService, FixtureSessionManagementState) {
+        let state = FixtureSessionManagementState()
+        let fixture = FixtureSessionService(
+            draftStore: InMemoryDraftStore(),
+            initiallyPaired: true,
+            sessionManagement: state
+        )
+        let service = GatedSessionManagementService(fixture: fixture)
+        return (SessionManagementModel(service: service), service, state)
+    }
+
+    @Test("confirmed create with a failed details read keeps its identity and retries only details")
+    func confirmedCreateRetriesDetailsOnly() async throws {
+        let (model, _, state) = makeGated()
+        state.createDetailFails = true
+        model.prepareCreate(hostId: "studio-mac")
+        await model.loadCreateSupport(hostId: "studio-mac")
+
+        let submitted = await model.submitCreate(hostId: "studio-mac")
+        let outcome = try #require(submitted)
+        #expect(outcome.receipt.status == .confirmed)
+        #expect(outcome.sessionId == "s-created-1")
+        #expect(outcome.session == nil)
+        #expect(outcome.detailError == .unavailable)
+        #expect(outcome.openableSummary?.sessionId == "s-created-1")
+        #expect(state.createCount == 1)
+
+        // A repeated submission reuses the confirmed identity instead of
+        // creating a second session.
+        let repeated = await model.submitCreate(hostId: "studio-mac")
+        #expect(repeated?.sessionId == "s-created-1")
+        #expect(state.createCount == 1)
+
+        // The retry reads details only; it never calls create again.
+        let detail = await model.retryCreateDetails(
+            hostId: "studio-mac",
+            sessionId: "s-created-1"
+        )
+        #expect(detail?.hostId == "studio-mac")
+        #expect(detail?.sessionId == "s-created-1")
+        #expect(state.createCount == 1)
+        guard case .result(let refreshed) = model.createState else {
+            Issue.record("confirmed receipt disappeared after a detail retry")
+            return
+        }
+        #expect(refreshed.detailError == nil)
+        #expect(refreshed.session?.sessionId == "s-created-1")
+    }
+
+    @Test("a failed details retry keeps the confirmed create receipt visible")
+    func failedDetailsRetryKeepsReceipt() async throws {
+        let (model, _, state) = makeGated()
+        state.createDetailFails = true
+        state.createdDetailsFail = true
+        model.prepareCreate(hostId: "studio-mac")
+        await model.loadCreateSupport(hostId: "studio-mac")
+        let submitted = await model.submitCreate(hostId: "studio-mac")
+        _ = try #require(submitted)
+
+        let detail = await model.retryCreateDetails(
+            hostId: "studio-mac",
+            sessionId: "s-created-1"
+        )
+        #expect(detail == nil)
+        #expect(state.createCount == 1)
+        guard case .result(let unchanged) = model.createState else {
+            Issue.record("a failed detail retry replaced the confirmed receipt")
+            return
+        }
+        #expect(unchanged.receipt.status == .confirmed)
+        #expect(unchanged.sessionId == "s-created-1")
+        #expect(unchanged.detailError == .unavailable)
+    }
+
+    @Test("a late create result from an earlier sheet is fenced to its Host")
+    func lateCreateIsFenced() async throws {
+        let (model, service, state) = makeGated()
+        model.prepareCreate(hostId: "studio-mac")
+        await model.loadCreateSupport(hostId: "studio-mac")
+        let gate = SuspendedResponse<Void>()
+        service.createGate = gate
+
+        let first = Task { await model.submitCreate(hostId: "studio-mac") }
+        await gate.waitUntilStarted()
+        // A new sheet for another Host replaces the scope before the first
+        // Host answers.
+        model.prepareCreate(hostId: "travel-laptop")
+        gate.resume(with: ())
+        let late = await first.value
+
+        #expect(late == nil)
+        #expect(model.createState == .idle)
+        #expect(model.isCreating == false)
+        await model.loadCreateSupport(hostId: "travel-laptop")
+
+        let submitted = await model.submitCreate(hostId: "travel-laptop")
+        let current = try #require(submitted)
+        #expect(current.hostId == "travel-laptop")
+        #expect(current.receipt.status == .confirmed)
+        #expect(state.createCount == 2)
+    }
+
+    @Test("a late fork from another scope cannot become the visible child")
+    func lateForkIsFenced() async throws {
+        let (model, service, _) = makeGated()
+        let studio = SessionScope(hostId: "studio-mac", sessionId: "s-001")
+        let travel = SessionScope(hostId: "travel-laptop", sessionId: "s-101")
+        let gate = SuspendedResponse<Void>()
+        service.forkGate = gate
+
+        let first = Task { await model.forkSession(hostId: studio.hostId, sessionId: studio.sessionId) }
+        await gate.waitUntilStarted()
+        // Selecting another session fences the old scope and immediately
+        // starts the fork the user asked for.
+        let travelResult = await model.forkSession(
+            hostId: travel.hostId,
+            sessionId: travel.sessionId
+        )
+        #expect(model.forkScope == travel)
+        let travelOutcome = try #require(travelResult)
+        #expect(travelOutcome.hostId == travel.hostId)
+        #expect(travelOutcome.parentSessionId == travel.sessionId)
+        #expect(travelOutcome.child?.hostId == travel.hostId)
+        #expect(model.isForkConfirmed(for: travel))
+
+        gate.resume(with: ())
+        let late = await first.value
+        #expect(late == nil)
+        #expect(model.isForkConfirmed(for: travel))
+        #expect(!model.isForkConfirmed(for: studio))
+
+        // A confirmed child is reused instead of forking a second time.
+        let duplicate = await model.forkSession(
+            hostId: travel.hostId,
+            sessionId: travel.sessionId
+        )
+        #expect(duplicate?.isConfirmed == true)
+    }
+
+    @Test("a late details read cannot retarget the selected session")
+    func lateDetailsAreFenced() async throws {
+        let (model, service, _) = makeGated()
+        let gate = SuspendedResponse<Void>()
+        service.detailsGate = gate
+
+        let first = Task { await model.loadDetails(hostId: "studio-mac", sessionId: "s-001") }
+        await gate.waitUntilStarted()
+        await model.loadDetails(hostId: "travel-laptop", sessionId: "s-101")
+        gate.resume(with: ())
+        await first.value
+
+        #expect(model.detailsScope == SessionScope(hostId: "travel-laptop", sessionId: "s-101"))
+        if case .loaded(let detail) = model.detailsState {
+            #expect(detail.hostId == "travel-laptop")
+        } else {
+            #expect(model.detailsState == .unavailable(.unavailable))
+        }
+    }
+
+    @Test("an accepted receipt stays visible when the follow-up refresh fails")
+    func acceptedReceiptSurvivesRefreshFailure() async throws {
+        let (model, _, state) = makeGated()
+        await model.loadModel(hostId: "studio-mac", sessionId: "s-001")
+        state.defaultPersistence = "unconfirmed"
+        state.sessionModelUnavailable = true
+        let choice = ModelChoice(provider: "anthropic", model: "opus", effort: "high")
+
+        let selected = await model.selectModel(
+            hostId: "studio-mac",
+            sessionId: "s-001",
+            choice: choice
+        )
+        let outcome = try #require(selected)
+
+        #expect(outcome.sessionAccepted)
+        #expect(outcome.defaultPersistenceUnconfirmed)
+        #expect(model.selectionState == .result(outcome))
+        #expect(model.modelRefreshError == .unsupportedCapability)
+        // The accepted receipt is still the visible result, not a failure.
+        guard case .result(let visible) = model.selectionState else {
+            Issue.record("the accepted receipt was replaced by the refresh failure")
+            return
+        }
+        #expect(visible.sessionAccepted)
+    }
+
+    @Test("an explicit persisted default is the only success value")
+    func persistedDefaultIsSuccess() async throws {
+        let (model, _, state) = makeGated()
+        await model.loadModel(hostId: "studio-mac", sessionId: "s-001")
+        state.defaultPersistence = "persisted"
+        let selected = await model.selectModel(
+            hostId: "studio-mac",
+            sessionId: "s-001",
+            choice: ModelChoice(provider: "anthropic", model: "opus", effort: nil)
+        )
+        let outcome = try #require(selected)
+        #expect(outcome.sessionAccepted)
+        #expect(outcome.defaultPersistenceConfirmed)
+        #expect(!outcome.defaultPersistenceUnconfirmed)
+    }
+
+    @Test("rejected and uncertain default writes are not reported as success")
+    func rejectedOrUncertainDefaultIsUnconfirmed() async throws {
+        for value in ["rejected", "uncertain", "unconfirmed"] {
+            let (model, _, state) = makeGated()
+            await model.loadModel(hostId: "studio-mac", sessionId: "s-001")
+            state.defaultPersistence = value
+            let selected = await model.selectModel(
+                hostId: "studio-mac",
+                sessionId: "s-001",
+                choice: ModelChoice(provider: "anthropic", model: "opus", effort: nil)
+            )
+            let outcome = try #require(selected)
+            #expect(outcome.sessionAccepted)
+            #expect(outcome.defaultPersistenceConfirmed == false)
+            #expect(
+                outcome.defaultPersistenceUnconfirmed,
+                "\(value) must not be presented as a persisted default"
+            )
+        }
+    }
+
+    @Test("a stale catalog refuses submission and asks for a reload")
+    func staleCatalogAsksForReload() async throws {
+        let (model, _, state) = makeGated()
+        await model.loadModel(hostId: "studio-mac", sessionId: "s-001")
+        let outcome = await model.selectModel(
+            hostId: "studio-mac",
+            sessionId: "s-001",
+            choice: ModelChoice(provider: "anthropic", model: "removed", effort: nil)
+        )
+        #expect(outcome == nil)
+        #expect(model.selectionState == .stale)
+        #expect(model.isCatalogStale)
+        #expect(state.selectionCount == 0)
+
+        model.clearStaleCatalog()
+        await model.loadModel(hostId: "studio-mac", sessionId: "s-001")
+        let reselected = await model.selectModel(
+            hostId: "studio-mac",
+            sessionId: "s-001",
+            choice: ModelChoice(provider: "anthropic", model: "opus", effort: "high")
+        )
+        let reloaded = try #require(reselected)
+        #expect(reloaded.sessionAccepted)
+        #expect(state.selectionCount == 1)
+    }
+}

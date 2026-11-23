@@ -78,8 +78,10 @@ The separate `full-ci.yml` runs on the `run-full-ci` label event, manual dispatc
 main pushes, merge queue and nightly schedule. Leaving the label attached does
 not rerun heavy jobs on later pushes. Full verification runs checks, supported
 builds and unit coverage, plus deployment acceptance when `access` is selected,
-protocol contracts when `proto` is selected, and Android device suites when
-Android-facing paths changed. A manual dispatch can additionally request the
+protocol contracts when `proto` is selected, and the Android device and Core
+bridge JVM suites when Android-facing paths changed. `core/`,
+`apps/mobile-bindings/` and `proto/` count as native Android inputs on an
+explicitly requested run. A manual dispatch can additionally request the
 physical-device Macrobenchmark. Android device work is never part of the
 ordinary quick `CI gate`. Protocol generation is checked
 once in the contract job rather than again in the Node job. `Full CI gate` requires every selected job; it is distinct
@@ -303,17 +305,21 @@ unmatched selector. Its `--coverage` runs JaCoCo verification and reports
 per-package line ratios against the 90% gate; ordinary quick CI does not request
 coverage. The explicit device targets are `android-ui`, `android-integration`
 and `android-performance`; they require `adb`, the Android SDK and a compatible
-target, while `android-performance` requires a physical device. A missing
-prerequisite produces unavailable evidence with exit status 3. Instrumentation
-case selection filters parsed case IDs, and an unmatched `--only` is invalid
-usage. See [apps/android/README.md](../../apps/android/README.md).
+target, while `android-performance` requires a physical device.
+`android-integration` runs both the app instrumentation suite and the
+`:core-bridge` instrumentation suite. `android-bridge-jvm` runs the Core bridge
+adapter JVM cases with the Android SDK, Cargo and `protoc`, but no `adb` or
+device. A missing prerequisite produces unavailable evidence with exit status 3.
+Instrumentation case selection filters parsed case IDs, and an unmatched
+`--only` is invalid usage. See
+[apps/android/README.md](../../apps/android/README.md).
 
 | Option | Targets | Additional constraints |
 |---|---|---|
 | `--project ID` | `test` only | Unit project ID; equivalent to the TARGET positional argument. Do not pass both. |
 | `--only TEXT` | Leaf targets | Literal, case-sensitive case ID substring. An unmatched filter is invalid usage. Android device suites filter parsed instrumentation case IDs. |
 | `--coverage` | Unit targets | No `--only` or `--list`. Kotlin/JVM `android-state` uses JaCoCo per-package lines; the Android device suites reject the option. |
-| `--list` | Unit, Linux integration, iOS leaves, and Android device leaves | No coverage; Node static listing is unsupported. Kotlin listing runs Gradle list mode; Android device listing runs instrumentation in log mode and requires a device. |
+| `--list` | Unit, Linux integration, iOS leaves, and Android device leaves | No coverage; Node static listing is unsupported. Kotlin listing runs Gradle list mode; Android device listing runs instrumentation in log mode and requires a device. `android-bridge-jvm` has no list mode. |
 | `--parallel N` | Linux integration targets | 1–8 independent hash shards, default 1; incompatible with `--list`. |
 | `--integration-timeout SECONDS` | Linux integration targets | Positive run deadline covering preparation through execution, defaults to 7200 seconds. |
 | `--simulator UDID` | iOS targets | Exact Simulator device UDID. |
@@ -454,7 +460,7 @@ scripts come from native manifests; new projects require explicit registration.
 | `sources.py` | Frozen source inputs and their identities. |
 | `integration_targets.py` | Linux integration scope, collection paths and artifact requirements. |
 | `test_cost.py` | Advisory selection notices and comparable local wall-time history. |
-| `runners/` | Ecosystem-specific commands, discovery and coverage. `runners/kotlin.py` owns the JDK-only Gradle state runner; `runners/android.py` owns explicit device suites. |
+| `runners/` | Ecosystem-specific commands, discovery and coverage. `runners/kotlin.py` owns the JDK-only Gradle state runner; `runners/android.py` owns explicit device suites and the Core bridge JVM suite. |
 | `process.py` | Child processes, deadlines, process-group cancellation and capture. |
 | `reports/model.py` | Versioned facts, validation and atomic persistence. |
 | `reports/html.py` | Offline HTML presentation. |

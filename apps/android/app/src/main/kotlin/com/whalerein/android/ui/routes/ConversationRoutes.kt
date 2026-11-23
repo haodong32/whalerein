@@ -18,8 +18,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.whalerein.android.AppDependencies
+import com.whalerein.android.state.conversation.ConversationFocusDispatch
 import com.whalerein.android.state.conversation.ConversationViewModel
 import com.whalerein.android.state.conversation.PendingEntryUiState
+import com.whalerein.android.state.conversation.dispatchConversationFocus
 import com.whalerein.android.state.conversation.PendingInputViewModel
 import com.whalerein.android.state.core.SessionRef
 import com.whalerein.android.state.conversation.SessionToolsViewModel
@@ -35,6 +37,7 @@ fun ConversationRoute(
     openPendingSheet: Boolean,
     onBack: () -> Unit,
     onOpenTools: () -> Unit,
+    onSaveAttachment: (String) -> Unit,
 ) {
     val conversation: ConversationViewModel = viewModel(
         factory = viewModelFactory {
@@ -75,6 +78,9 @@ fun ConversationRoute(
     LaunchedEffect(session) {
         conversation.open(session)
         pending.open(session)
+        // Record the authorized target for the next cold launch. This is the
+        // only place a conversation becomes the user's last destination.
+        dependencies.startup.recordTarget(session)
     }
     ObserveForeground(
         onVisible = conversation::onVisible,
@@ -82,6 +88,26 @@ fun ConversationRoute(
     )
     LaunchedEffect(focusItemId) {
         if (focusItemId != null) pending.openItem(focusItemId)
+    }
+    // A focus id may name a committed message rather than pending input. Resolve
+    // the pending lookup first; only a proven miss triggers the exact reread.
+    LaunchedEffect(focusItemId, pendingState.focusedItemId, pendingState.detail) {
+        when (
+            val dispatch = dispatchConversationFocus(
+                focusItemId,
+                pendingState.focusedItemId,
+                pendingState.detail,
+            )
+        ) {
+            is ConversationFocusDispatch.ExactMessage -> {
+                pending.dismissSheet()
+                conversation.loadExact(dispatch.messageId)
+            }
+
+            ConversationFocusDispatch.PendingInput,
+            ConversationFocusDispatch.None,
+            -> Unit
+        }
     }
     LaunchedEffect(openPendingSheet) {
         if (openPendingSheet) sheetRequested = true
@@ -116,6 +142,7 @@ fun ConversationRoute(
         onRecoverSend = conversation::recoverSend,
         onRetryContentRead = conversation::retryContentRead,
         onConsumeAnnouncement = conversation::consumeAnnouncement,
+        onSaveAttachment = onSaveAttachment,
         modifier = Modifier.fillMaxSize(),
     )
 

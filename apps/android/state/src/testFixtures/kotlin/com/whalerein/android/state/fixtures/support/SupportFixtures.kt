@@ -11,6 +11,7 @@ import com.whalerein.android.state.core.SessionId
 import com.whalerein.android.state.core.SessionRef
 import com.whalerein.android.state.support.AccountConnection
 import com.whalerein.android.state.support.AccountPort
+import com.whalerein.android.state.support.AccountRevocableTargets
 import com.whalerein.android.state.support.AccountStatus
 import com.whalerein.android.state.support.AppSessionInfo
 import com.whalerein.android.state.support.CloudAccountState
@@ -196,6 +197,9 @@ class FakeAccountPort(
         ),
     ),
     var sessionsOutcome: Outcome<List<AppSessionInfo>> = Outcome.Success(emptyList()),
+    var targetsOutcome: Outcome<AccountRevocableTargets> = Outcome.Success(
+        AccountRevocableTargets(),
+    ),
     var revokeOutcome: Outcome<RevocationReport>? = null,
     var forgetOutcome: Outcome<ForgetReport> = Outcome.Success(
         ForgetReport(ForgetMode.Ordinary, forgotten = true, remoteAuthorityRetained = false),
@@ -206,9 +210,13 @@ class FakeAccountPort(
     val signOutConnections = mutableListOf<AccountConnection>()
     var listSessionsCalls: Int = 0
         private set
+    var listTargetsCalls: Int = 0
+        private set
     val revokeSessionIds = mutableListOf<String?>()
     val revokedHostIds = mutableListOf<HostId>()
     val revokedDeviceIds = mutableListOf<String>()
+    var currentDeviceRevocations: Int = 0
+        private set
     val forgetModes = mutableListOf<ForgetMode>()
 
     override suspend fun status(instance: InstanceId): Outcome<AccountStatus> = statusOutcome
@@ -225,6 +233,13 @@ class FakeAccountPort(
     override suspend fun listAppSessions(instance: InstanceId): Outcome<List<AppSessionInfo>> {
         listSessionsCalls += 1
         return sessionsOutcome
+    }
+
+    override suspend fun revocableTargets(
+        instance: InstanceId,
+    ): Outcome<AccountRevocableTargets> {
+        listTargetsCalls += 1
+        return targetsOutcome
     }
 
     override suspend fun revokeAppSession(
@@ -248,6 +263,17 @@ class FakeAccountPort(
         return revokeOutcome ?: Outcome.Success(
             RevocationReport(
                 scope = com.whalerein.android.state.support.RevocationScope.CloudHostGrant(hostId),
+            ),
+        )
+    }
+
+    override suspend fun revokeCurrentDevice(
+        instance: InstanceId,
+    ): Outcome<RevocationReport> {
+        currentDeviceRevocations += 1
+        return revokeOutcome ?: Outcome.Success(
+            RevocationReport(
+                scope = com.whalerein.android.state.support.RevocationScope.CurrentDevice,
             ),
         )
     }

@@ -181,6 +181,16 @@ fun AppNavHost(
                     openPendingSheet = key.pendingSheet,
                     onBack = ::goBack,
                     onOpenTools = { navigate(RouteNavMapper.toKey(Route.SessionTools(RouteNavMapper.sessionRef(key)))) },
+                    onSaveAttachment = { attachmentId ->
+                        navigate(
+                            RouteNavMapper.toKey(
+                                Route.AttachmentSave(
+                                    session = RouteNavMapper.sessionRef(key),
+                                    attachmentId = attachmentId,
+                                ),
+                            ),
+                        )
+                    },
                 )
             }
             entry<SessionToolsKey>(

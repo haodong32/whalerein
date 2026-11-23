@@ -181,10 +181,9 @@ class NativeBridgeDeviceTest {
 
     @Test
     fun ac_06_tls_policy_platform_roots_and_scoped_private_ca_policy() {
-        val root = File(context.filesDir, "device-tests/trust").apply { deleteRecursively(); mkdirs() }
-        val pem = AndroidTrustRoots.install(root)
-        assertTrue(pem.isFile)
-        val text = pem.readText()
+        val pem = AndroidTrustRoots.platformPem()
+        assertTrue(pem.isNotEmpty())
+        val text = pem.toString(Charsets.US_ASCII)
         assertTrue(text.contains("-----BEGIN CERTIFICATE-----"))
         assertTrue(text.contains("-----END CERTIFICATE-----"))
 

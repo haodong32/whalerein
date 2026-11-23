@@ -168,14 +168,17 @@ impl std::fmt::Debug for AccessClient {
 impl AccessClient {
     #[cfg(test)]
     pub fn new(base: Url, token: Option<String>) -> Result<Self, AccessError> {
-        Self::with_ca(base, token, None, Arc::default())
+        Self::with_trust(base, token, None, None, Arc::default())
     }
 
-    /// `ca_pem` adds a private CA on top of the platform trust roots.
-    pub fn with_ca(
+    /// Open Access with both trust inputs: an explicit custom CA (which
+    /// replaces everything) and the platform anchors an app supplies when the
+    /// platform store cannot be enumerated by Rust.
+    pub fn with_trust(
         base: Url,
         token: Option<String>,
         ca_pem: Option<&[u8]>,
+        platform_roots: Option<&[u8]>,
         diagnostics: Arc<Diagnostics>,
     ) -> Result<Self, AccessError> {
         if !matches!(base.scheme(), "https" | "http")
@@ -186,27 +189,13 @@ impl AccessClient {
         {
             return Err(AccessError::protocol("invalid Access URL"));
         }
-        let mut builder = Client::builder()
+        // One trust decision for both transports: platform verification by
+        // default, or exactly the supplied CA bundle.
+        let tls = super::tls::client_config(ca_pem, platform_roots, &[])?;
+        let http = Client::builder()
             .timeout(DEFAULT_TIMEOUT)
-            .user_agent(concat!("whalerein-core/", env!("CARGO_PKG_VERSION")));
-        if let Some(ca) = ca_pem {
-            if !ca
-                .windows(27)
-                .any(|window| window == b"-----BEGIN CERTIFICATE-----")
-            {
-                return Err(AccessError::protocol("invalid CA certificate"));
-            }
-            let parsed: Vec<_> = rustls_pemfile::certs(&mut &ca[..])
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| AccessError::protocol("invalid CA certificate"))?;
-            if parsed.is_empty() {
-                return Err(AccessError::protocol("invalid CA certificate"));
-            }
-            let certificate = reqwest::Certificate::from_pem(ca)
-                .map_err(|_| AccessError::protocol("invalid CA certificate"))?;
-            builder = builder.add_root_certificate(certificate);
-        }
-        let http = builder
+            .user_agent(concat!("whalerein-core/", env!("CARGO_PKG_VERSION")))
+            .use_preconfigured_tls((*tls).clone())
             .build()
             .map_err(|_| AccessError::transport("HTTP client initialization failed"))?;
         let transport = TransportBudget::default();
@@ -1249,9 +1238,10 @@ mod transport_tests {
         }))
         .await;
         let sink = Arc::new(crate::diagnostics::journal::CapturingSink::default());
-        let client = AccessClient::with_ca(
+        let client = AccessClient::with_trust(
             server.url(),
             Some("device-token".into()),
+            None,
             None,
             Arc::new(Diagnostics::new(Some(sink.clone()))),
         )
@@ -1376,8 +1366,9 @@ mod transport_tests {
         }))
         .await;
         let sink = Arc::new(crate::diagnostics::journal::CapturingSink::default());
-        let client = AccessClient::with_ca(
+        let client = AccessClient::with_trust(
             server.url(),
+            None,
             None,
             None,
             Arc::new(Diagnostics::new(Some(sink.clone()))),
@@ -1430,8 +1421,9 @@ mod transport_tests {
         }))
         .await;
         let sink = Arc::new(crate::diagnostics::journal::CapturingSink::default());
-        let mut client = AccessClient::with_ca(
+        let mut client = AccessClient::with_trust(
             server.url(),
+            None,
             None,
             None,
             Arc::new(Diagnostics::new(Some(sink.clone()))),
@@ -1497,8 +1489,9 @@ mod transport_tests {
         }))
         .await;
         let sink = Arc::new(crate::diagnostics::journal::CapturingSink::default());
-        let mut client = AccessClient::with_ca(
+        let mut client = AccessClient::with_trust(
             server.url(),
+            None,
             None,
             None,
             Arc::new(Diagnostics::new(Some(sink.clone()))),
@@ -1530,8 +1523,9 @@ mod transport_tests {
             delay_ms: 0,
         }))
         .await;
-        let mut client = AccessClient::with_ca(
+        let mut client = AccessClient::with_trust(
             unavailable.url(),
+            None,
             None,
             None,
             Arc::new(Diagnostics::new(Some(sink.clone()))),
@@ -1556,10 +1550,11 @@ mod transport_tests {
 
     #[test]
     fn invalid_ca_is_rejected() {
-        let error = AccessClient::with_ca(
+        let error = AccessClient::with_trust(
             Url::parse("https://example.test").unwrap(),
             None,
             Some(b"not a certificate"),
+            None,
             Arc::default(),
         )
         .err()

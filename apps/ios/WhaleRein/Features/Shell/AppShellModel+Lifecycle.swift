@@ -10,6 +10,7 @@ extension AppShellModel {
     /// preferences lost the paired flag but Core still has authorized Hosts, the
     /// app adopts the Core pairing instead of stranding the user on onboarding.
     func launchRestore() async {
+        defer { finishLaunch() }
         guard !isRevoked else { return }
         let generation = activationGeneration
         if let cloudSignIn {
@@ -34,6 +35,13 @@ extension AppShellModel {
         let generation = activationGeneration
         didBootstrap = false
         isBootstrapping = false
+        // A locked Keychain also prevented the Cloud account restore. Retry it
+        // here so the same account and directory return after unlock instead of
+        // leaving a stale signed-out surface beside a restored conversation.
+        if let cloudSignIn {
+            await cloudSignIn.restore()
+            guard isCurrentActivation(generation) else { return }
+        }
         if !isPaired {
             await adoptExistingCorePairing()
         }
@@ -45,6 +53,7 @@ extension AppShellModel {
     /// a restore is in flight or after a conversation has been opened.
     func bootstrapConversation() async {
         guard isPaired, conversation == nil, !didBootstrap, !isBootstrapping else { return }
+        defer { finishLaunch() }
         let generation = activationGeneration
         isBootstrapping = true
         rootState = .restoring

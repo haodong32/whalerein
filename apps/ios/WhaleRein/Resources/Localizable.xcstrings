@@ -1548,6 +1548,23 @@
         }
       }
     },
+    "conversation.draftStorageWarning": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Draft storage is unavailable. This draft may not survive a restart."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "草稿存储不可用，此草稿可能在重新启动后丢失。"
+          }
+        }
+      }
+    },
     "conversation.empty": {
       "extractionState": "manual",
       "localizations": {

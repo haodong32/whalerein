@@ -19,4 +19,8 @@ struct AppShellState: Equatable, Sendable {
     var isSwitchingInstance = false
     var instanceErrorKey: L10nKey?
     var resumeMarker: AppResumeMarker?
+    /// False until the first launch restore finishes. A system deep link that
+    /// arrives before then is queued instead of being dropped.
+    var isLaunched = false
+    var pendingInvitationLink: URL?
 }

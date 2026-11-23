@@ -22,6 +22,36 @@ ANDROID_STATE_INPUTS = (
     "apps/android/gradlew.bat",
 )
 
+# Inputs that can change the native Android build. Device suites share them
+# with the Core bridge, so an explicitly requested full run must not skip a
+# Core, mobile-binding or protocol change. Ordinary PR pushes never reach this
+# filter unless the run-full-ci label event requests the heavy tier.
+ANDROID_DEVICE_INPUTS = (
+    "apps/android/",
+    "core/",
+    "apps/mobile-bindings/",
+    "proto/",
+    "tools/repo/src/repo/runners/android.py",
+    "tools/repo/src/repo/runners/kotlin.py",
+    ".github/workflows/full-ci.yml",
+)
+
+# The iOS workflow owns the application, its binding and the local stack. It
+# also reacts to the shared Rust/protocol inputs that feed the XCFramework.
+IOS_BUILD_INPUTS = (
+    "apps/ios/",
+    "apps/mobile-bindings/",
+    "core/",
+    "proto/",
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "tools/repo/",
+    "repo",
+    ".github/workflows/ios.yml",
+    ".github/actions/select-ios-simulator/",
+)
+
 
 def plan(root: Path, paths: list[str]) -> dict:
     entries = tomllib.loads((root / "tools/repo/projects.toml").read_text())["projects"]
@@ -116,6 +146,64 @@ def native_plan(root: Path, paths: list[str]) -> dict:
     }
 
 
+def _matches(path: str, inputs: tuple[str, ...]) -> bool:
+    return any(path == item or (item.endswith("/") and path.startswith(item)) for item in inputs)
+
+
+def android_device_selected(paths: list[str]) -> bool:
+    """Whether a path set requires the explicit Android device/bridge tier."""
+    return any(_matches(path, ANDROID_DEVICE_INPUTS) for path in paths)
+
+
+def android_device_changes(event: str, action: str, label: str, paths: list[str]) -> bool:
+    """Apply the label-versus-push policy to the Android device path filter."""
+    if event == "pull_request" and (action != "labeled" or label != "run-full-ci"):
+        return False
+    if event in ("pull_request", "merge_group"):
+        return android_device_selected(paths)
+    if event in ("workflow_dispatch", "schedule", "push"):
+        return True
+    return False
+
+
+def ios_build_selected(paths: list[str]) -> bool:
+    """Whether an iOS path set changes the app, its binding or the workflow."""
+    return any(_matches(path, IOS_BUILD_INPUTS) for path in paths)
+
+
+def ios_matrix(suite: str = "") -> dict:
+    """The native iOS job matrix for a workflow dispatch suite.
+
+    The stack integration plan has its own job and runner, so it is never part
+    of the native unit/UI matrix.
+    """
+    if suite == "integration":
+        return {"include": []}
+    jobs = [{"name": "unit", "target": "ios-unit", "shard": ""}]
+    if suite == "smoke":
+        jobs.append({"name": "smoke", "target": "ios-ui-smoke", "shard": ""})
+    elif suite != "unit":
+        for index in range(1, 5):
+            jobs.append({"name": f"ui-{index}", "target": "ios-ui", "shard": f"{index}/4"})
+    return {"include": jobs}
+
+
+def ios_changes(
+    event: str, action: str, label: str, suite: str, paths: list[str]
+) -> tuple[bool, bool]:
+    """Return ``(build, integration)`` for the iOS workflow event."""
+    if event == "pull_request" and (action != "labeled" or label != "run-full-ci"):
+        return False, False
+    if event in ("pull_request", "merge_group"):
+        build = ios_build_selected(paths)
+    elif event in ("workflow_dispatch", "schedule", "push"):
+        build = suite != "integration"
+    else:
+        build = False
+    integration = event == "schedule" or (event == "workflow_dispatch" and suite == "integration")
+    return build, integration
+
+
 def run_projects(root: Path, projects: list[str]) -> None:
     from .projects import load_projects, select_projects
     from .targets import project_target_name
@@ -205,9 +293,23 @@ def run_native(root: Path, matrix: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "operation", choices=("plan", "quick-plan", "native-plan", "run", "quick", "native")
+        "operation",
+        choices=(
+            "plan",
+            "quick-plan",
+            "native-plan",
+            "android-plan",
+            "ios-plan",
+            "run",
+            "quick",
+            "native",
+        ),
     )
     parser.add_argument("--kind", choices=("rust", "go", "node", "kotlin", "python"))
+    parser.add_argument("--event", default="")
+    parser.add_argument("--action", default="")
+    parser.add_argument("--label", default="")
+    parser.add_argument("--suite", default="")
     parser.add_argument("--base", default="")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--projects", default="[]")
@@ -221,6 +323,25 @@ def main() -> None:
         projects = next((g["projects"] for g in groups if g["kind"] == args.kind), [])
         print("selected=" + str(bool(projects)).lower())
         print("projects=" + json.dumps(projects))
+    elif args.operation == "android-plan":
+        paths = (
+            changed_paths(root, args.base, args.head)
+            if args.event in ("pull_request", "merge_group")
+            else []
+        )
+        build = android_device_changes(args.event, args.action, args.label, paths)
+        print("build=" + str(build).lower())
+    elif args.operation == "ios-plan":
+        paths = (
+            changed_paths(root, args.base, args.head)
+            if args.event in ("pull_request", "merge_group")
+            else []
+        )
+        build, integration = ios_changes(args.event, args.action, args.label, args.suite, paths)
+        matrix = ios_matrix(args.suite) if build else {"include": []}
+        print("build=" + str(build).lower())
+        print("integration=" + str(integration).lower())
+        print("matrix=" + json.dumps(matrix, separators=(",", ":")))
     elif args.operation in ("plan", "native-plan"):
         planner = plan if args.operation == "plan" else native_plan
         print(json.dumps(planner(root, changed_paths(root, args.base, args.head))))

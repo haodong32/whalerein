@@ -2,6 +2,7 @@
 
 pub mod http;
 pub mod mqtt;
+pub(crate) mod tls;
 pub(crate) mod transport;
 
 pub use http::{AccessClient, AccessError, AccessErrorKind};

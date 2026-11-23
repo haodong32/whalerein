@@ -32,6 +32,7 @@ def execute(tmp_path, workflow, step, **env):
     output.write_text("")
     result = subprocess.run(
         ["bash", "-e", "-c", script(workflow, step)],
+        cwd=ROOT,
         env={**os.environ, "GITHUB_OUTPUT": str(output), **env},
         capture_output=True,
         text=True,
@@ -48,6 +49,7 @@ GATE = {
     "CONTRACT_RESULT": "skipped",
     "DEPLOYMENT_RESULT": "skipped",
     "ANDROID_RESULT": "skipped",
+    "ANDROID_BRIDGE_RESULT": "skipped",
     "ANDROID_MATRIX": '{"include":[]}',
     "ANDROID_PERFORMANCE_RESULT": "skipped",
     "ANDROID_PERFORMANCE": "false",
@@ -66,7 +68,11 @@ def test_ordinary_pr_never_checks_out_or_builds_ios(tmp_path, action, label):
         LABEL=label,
     )
     assert code == 0
-    assert outputs == {"build": "false", "matrix": '{"include":[]}'}
+    assert outputs == {
+        "build": "false",
+        "integration": "false",
+        "matrix": '{"include":[]}',
+    }
 
 
 def test_requested_ios_detects_core_without_requiring_swift_changes(tmp_path):
@@ -95,10 +101,16 @@ def test_requested_ios_detects_core_without_requiring_swift_changes(tmp_path):
         ("ios-ui", "4/4"),
     ]
     assert len({job["name"] for job in jobs}) == len(jobs)
+    assert outputs["integration"] == "false"
 
 
 @pytest.mark.parametrize(
-    ("suite", "targets"), [("unit", ["ios-unit"]), ("smoke", ["ios-unit", "ios-ui-smoke"])]
+    ("suite", "targets"),
+    [
+        ("unit", ["ios-unit"]),
+        ("smoke", ["ios-unit", "ios-ui-smoke"]),
+        ("integration", []),
+    ],
 )
 def test_ios_dispatch_respects_selected_suite(tmp_path, suite, targets):
     code, outputs = execute(
@@ -110,6 +122,38 @@ def test_ios_dispatch_respects_selected_suite(tmp_path, suite, targets):
     )
     assert code == 0
     assert [job["target"] for job in json.loads(outputs["matrix"])["include"]] == targets
+    assert outputs["build"] == ("false" if suite == "integration" else "true")
+    assert outputs["integration"] == ("true" if suite == "integration" else "false")
+
+
+def test_ios_schedule_requests_stack_integration(tmp_path):
+    code, outputs = execute(tmp_path, "ios.yml", "Compare the tested revision", EVENT="schedule")
+    assert code == 0
+    assert outputs["build"] == "true"
+    assert outputs["integration"] == "true"
+    assert [job["target"] for job in json.loads(outputs["matrix"])["include"]] == [
+        "ios-unit",
+        "ios-ui",
+        "ios-ui",
+        "ios-ui",
+        "ios-ui",
+    ]
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
+def test_ios_gate_requires_selected_stack_integration(tmp_path, result):
+    code, _ = execute(
+        tmp_path,
+        "ios.yml",
+        "Check required results",
+        CHANGES_RESULT="success",
+        NATIVE_REQUIRED="false",
+        NATIVE_RESULT="skipped",
+        INTEGRATION_REQUIRED="true",
+        INTEGRATION_RESULT=result,
+        ARCHITECTURE_RESULT="success",
+    )
+    assert (code == 0) == (result == "success")
 
 
 @pytest.mark.parametrize("label,expected", [("run-integration", "true"), ("run-full-ci", "false")])
@@ -142,6 +186,8 @@ def test_ios_gate_requires_successful_selection_even_when_build_is_skipped(tmp_p
         CHANGES_RESULT=changes,
         NATIVE_REQUIRED="false",
         NATIVE_RESULT="skipped",
+        INTEGRATION_REQUIRED="false",
+        INTEGRATION_RESULT="skipped",
         ARCHITECTURE_RESULT="success",
     )
     assert (code == 0) == (changes == "success")
@@ -156,6 +202,8 @@ def test_requested_ios_full_ui_failure_blocks_gate(tmp_path, result):
         CHANGES_RESULT="success",
         NATIVE_REQUIRED="true",
         NATIVE_RESULT=result,
+        INTEGRATION_REQUIRED="false",
+        INTEGRATION_RESULT="skipped",
         ARCHITECTURE_RESULT="success",
     )
     assert (code == 0) == (result == "success")
@@ -170,6 +218,8 @@ def test_ios_architecture_gate_blocks_the_gate(tmp_path, result):
         CHANGES_RESULT="success",
         NATIVE_REQUIRED="false",
         NATIVE_RESULT="skipped",
+        INTEGRATION_REQUIRED="false",
+        INTEGRATION_RESULT="skipped",
         ARCHITECTURE_RESULT=result,
     )
     assert (code == 0) == (result == "success")
@@ -211,6 +261,18 @@ def test_full_gate_requires_selected_android_suites(tmp_path, result):
     code, _ = gate(
         tmp_path,
         ANDROID_RESULT=result,
+        ANDROID_BRIDGE_RESULT="success",
+        ANDROID_MATRIX='{"include":[{"target":"android-ui"}]}',
+    )
+    assert (code == 0) == (result == "success")
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
+def test_full_gate_requires_selected_bridge_jvm_suite(tmp_path, result):
+    code, _ = gate(
+        tmp_path,
+        ANDROID_RESULT="success",
+        ANDROID_BRIDGE_RESULT=result,
         ANDROID_MATRIX='{"include":[{"target":"android-ui"}]}',
     )
     assert (code == 0) == (result == "success")
@@ -289,6 +351,36 @@ def test_android_heavy_work_skips_unrelated_labeled_changes(tmp_path):
     )
     assert code == 0
     assert outputs["matrix"] == '{"include":[]}'
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "core/src/api.rs",
+        "apps/mobile-bindings/src/client.rs",
+        "proto/v1/whalerein.proto",
+    ],
+)
+def test_android_label_filter_includes_shared_native_inputs(tmp_path, path):
+    git = tmp_path / "git"
+    git.write_text(f"#!/bin/sh\nprintf '{path}\\n'\n")
+    git.chmod(0o755)
+    code, outputs = execute(
+        tmp_path,
+        "full-ci.yml",
+        "Select Android work",
+        EVENT="pull_request",
+        ACTION="labeled",
+        LABEL="run-full-ci",
+        BASE_SHA="base",
+        HEAD_SHA="head",
+        PATH=str(tmp_path) + os.pathsep + os.environ["PATH"],
+    )
+    assert code == 0
+    assert [job["target"] for job in json.loads(outputs["matrix"])["include"]] == [
+        "android-ui",
+        "android-integration",
+    ]
 
 
 def test_manual_android_dispatch_can_request_performance(tmp_path):

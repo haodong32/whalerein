@@ -35,6 +35,8 @@
     <string name="support_account_signed_out">Signed out</string>
     <string name="support_account_pending_sign_out">Local sign-out complete, remote sign-out pending</string>
     <string name="support_account_sign_out">Sign out</string>
+    <string name="support_account_revoke_current_device">Revoke this device</string>
+    <string name="support_account_current_device_hint">Revokes every grant held by this device. One selected Host grant or Standalone device is unaffected.</string>
     <string name="support_account_forget">Forget local identity</string>
     <string name="support_account_forget_local_only">Remove local identity only</string>
     <string name="support_account_local_only_hint">Removing only the local identity keeps the remote Cloud grant until it is revoked.</string>
@@ -52,6 +54,7 @@
     <string name="support_account_current_session">This device</string>
     <string name="support_account_load_failed">Could not load account status (%1$s).</string>
     <string name="support_account_sessions_failed">Could not load App Sessions (%1$s).</string>
+    <string name="support_account_targets_failed">Could not load revocable grants and devices (%1$s).</string>
     <string name="support_account_action_cancelled">Action cancelled. Nothing was changed.</string>
     <string name="support_account_sign_out_pending">Local sign-out completed. The remote sign-out is pending and will be retried.</string>
     <string name="support_account_retention_uncertain">Revocation recorded with retention uncertainty (%1$s).</string>
@@ -65,6 +68,7 @@
     <string name="support_scope_account">this account</string>
     <string name="support_scope_app_session">one Cloud App Session</string>
     <string name="support_scope_all_app_sessions">all Cloud App Sessions for this account</string>
+    <string name="support_scope_current_device">all grants held by this device</string>
     <string name="support_scope_cloud_grant">one Cloud Host grant</string>
     <string name="support_scope_standalone_device">one Standalone device</string>
     <string name="support_scope_local_identity">this device\'s local identity</string>

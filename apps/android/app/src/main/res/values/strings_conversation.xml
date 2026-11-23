@@ -38,6 +38,7 @@
     <string name="conversation_notice_default">Notice</string>
     <string name="conversation_attachment_available">Available</string>
     <string name="conversation_attachment_unavailable">Unavailable</string>
+    <string name="conversation_attachment_save">Save</string>
     <string name="conversation_tool_expand">Show full output</string>
     <string name="conversation_tool_collapse">Hide full output</string>
 

@@ -154,6 +154,27 @@ struct PairingModelTests {
         #expect(service.pairingDecideArguments.last?.fingerprint == FixtureCatalog.fingerprint)
     }
 
+    @Test("clipboard text fills the invitation field and submits the same link")
+    func clipboardPasteSubmits() async {
+        let service = StubSessionService()
+        service.pairingStartHandler = { _ in fixturePrompt() }
+        let model = PairingModel(service: service)
+        let link = FixtureCatalog.invitationURL(hostId: "studio-mac")
+
+        model.paste("  \(link.absoluteString)  ")
+        #expect(model.invitationText.contains(link.absoluteString))
+        await model.submit()
+        #expect(model.prompt?.hostId == "studio-mac")
+        #expect(service.pairingStartCount == 1)
+    }
+
+    @Test("pasting empty or whitespace-only clipboard text reports nothing")
+    func clipboardPasteEmpty() {
+        let model = PairingModel(service: StubSessionService())
+        model.paste("   \n ")
+        #expect(model.queuedLinkKey == .invitationPastedNothing)
+    }
+
     @Test("open URL handling fills the field and starts pairing")
     func openURLStartsPairing() async {
         let service = StubSessionService()

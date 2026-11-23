@@ -266,6 +266,7 @@ class SessionToolsViewModel(
             return
         }
         val actionId = ids.newId()
+        val submittedEdit = state.value.editDraft
         edit { copy(operation = ToolsOperationState.InFlight(operation)) }
         scope.launch {
             val result = try {
@@ -284,7 +285,7 @@ class SessionToolsViewModel(
                         is QueueUiState.Ready -> QueueUiState.Ready(
                             when (mutation) {
                                 is QueueMutation.Edited -> queue.items.map {
-                                    if (it.itemId == itemId) it.copy(text = editDraft) else it
+                                    if (it.itemId == itemId) it.copy(text = submittedEdit) else it
                                 }
 
                                 is QueueMutation.Removed -> queue.items.filterNot {
@@ -336,6 +337,9 @@ class SessionToolsViewModel(
                 edit {
                     copy(operation = ToolsOperationState.Unconfirmed(operation, outcome.failure))
                 }
+                // An ambiguous result is not an applied change. Refresh the
+                // authoritative Host queue and keep an edit draft recoverable.
+                loadQueue()
             }
 
             Outcome.Cancelled -> edit { copy(operation = ToolsOperationState.Idle) }

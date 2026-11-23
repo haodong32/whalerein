@@ -120,12 +120,15 @@ class FakeAppDependencies : AppDependencies {
 
     override val cloudAuth: CloudAuthPort = FakeCloudAuthPort()
     override val profiles: ProfilePort = FakeProfilePort()
-    override val directory: DirectoryPort = FakeDirectoryPort()
+    val fakeDirectory = FakeDirectoryPort()
+    override val directory: DirectoryPort = fakeDirectory
     override val pairing: PairingPort = FakePairingPort()
-    override val startup: StartupPort = object : StartupPort {
+    var startupOutcome: Outcome<StartupSnapshot> = Outcome.Success(StartupSnapshot())
+    val startupPort: StartupPort = object : StartupPort {
         override suspend fun restore(instance: InstanceId): Outcome<StartupSnapshot> =
-            Outcome.Success(StartupSnapshot())
+            startupOutcome
     }
+    override val startup: StartupPort = startupPort
     override val externalEntry: ExternalEntryPort = object : ExternalEntryPort {
         override suspend fun currentProfile(): Outcome<Profile?> = Outcome.Success(null)
 
@@ -150,6 +153,16 @@ class FakeAppDependencies : AppDependencies {
         override suspend fun load(scope: SessionRef): Outcome<String?> = Outcome.Success(null)
         override suspend fun save(scope: SessionRef, text: String): Outcome<Unit> = Outcome.Success(Unit)
         override suspend fun clear(scope: SessionRef): Outcome<Unit> = Outcome.Success(Unit)
+        override suspend fun savePendingSend(
+            scope: SessionRef,
+            record: com.whalerein.android.state.conversation.PendingSendRecord,
+        ): Outcome<Unit> = Outcome.Success(Unit)
+        override suspend fun loadPendingSend(
+            scope: SessionRef,
+        ): Outcome<com.whalerein.android.state.conversation.PendingSendRecord?> =
+            Outcome.Success(null)
+        override suspend fun clearPendingSend(scope: SessionRef): Outcome<Unit> =
+            Outcome.Success(Unit)
     }
     override val modelsQueue: ModelsQueuePort = FakeModelsQueuePort()
     override val sessionList: SessionListPort = FakeSessionListPort()
@@ -541,8 +554,11 @@ class FakeProfilePort : ProfilePort {
 }
 
 class FakeDirectoryPort : DirectoryPort {
+    var listOutcome: Outcome<List<DirectoryHostView>> = Outcome.Success(emptyList())
+    var sessionOutcome: Outcome<CloudSession?> = Outcome.Success(null)
+
     override suspend fun list(instance: InstanceId): Outcome<List<DirectoryHostView>> =
-        Outcome.Success(emptyList())
+        listOutcome
 
     override suspend fun connect(instance: InstanceId, hostId: HostId): Outcome<HostConnection> =
         Outcome.Failure(CoreFailure("unsupported", "unsupported"))
@@ -551,7 +567,7 @@ class FakeDirectoryPort : DirectoryPort {
         Outcome.Success(HostSelection(hostId))
 
     override suspend fun currentSession(instance: InstanceId): Outcome<CloudSession?> =
-        Outcome.Success(null)
+        sessionOutcome
 }
 
 class FakePairingPort : PairingPort {
