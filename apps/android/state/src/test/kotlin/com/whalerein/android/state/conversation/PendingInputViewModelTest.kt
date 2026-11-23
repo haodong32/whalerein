@@ -98,6 +98,39 @@ class PendingInputViewModelTest : ConversationTestBase() {
     }
 
     @Test
+    @DisplayName("AC-18.approvals a repeated decision while in flight issues one command")
+    fun repeatedApprovalWhileInFlightIsIgnored() = runTest(dispatcher) {
+        val h = Harness()
+        val approval = ConversationFixtures.approvalItem()
+        h.port.listResult = PendingListResult.Current(listOf(approval))
+        h.port.detailResult = PendingDetailResult.Found(approval)
+        h.model.open(h.scope)
+        advanceUntilIdle()
+        h.model.openItem(approval.itemId, PendingFocusOrigin.Live)
+        advanceUntilIdle()
+        val gate = CompletableDeferred<Unit>()
+        h.port.resolveGate = gate
+        h.model.approve()
+        advanceUntilIdle()
+        assertEquals(1, h.port.resolveCalls.size)
+        assertInstanceOf(
+            PendingActionUiState.InFlight::class.java,
+            h.model.state.value.action,
+        )
+
+        h.model.approve()
+        advanceUntilIdle()
+        assertEquals(1, h.port.resolveCalls.size)
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(
+            PendingActionUiState.Applied(PendingAction.Approve, approval.itemId),
+            h.model.state.value.action,
+        )
+    }
+
+    @Test
     @DisplayName("AC-18.answers structured open and continued answers and explicit cancel")
     fun ac18Answers() = runTest(dispatcher) {
         val h = Harness()
@@ -303,5 +336,123 @@ class PendingInputViewModelTest : ConversationTestBase() {
             ids = SequentialIdGenerator("answer"),
             diagnostics = diagnostics,
         )
+    }
+
+    @Test
+    @DisplayName("AC-18.approvals a decided approval stays hidden until the authoritative list drops it")
+    fun decidedApprovalDoesNotReappearFromStaleLiveSnapshot() = runTest(dispatcher) {
+        val h = Harness()
+        val approval = ConversationFixtures.approvalItem()
+        h.port.listResult = PendingListResult.Current(listOf(approval))
+        h.port.detailResult = PendingDetailResult.Found(approval)
+        h.model.open(h.scope)
+        advanceUntilIdle()
+        h.model.openItem(approval.itemId, PendingFocusOrigin.Live)
+        advanceUntilIdle()
+        h.model.approve()
+        advanceUntilIdle()
+        assertEquals(PendingEntryUiState.CurrentEmpty, h.model.state.value.entry)
+
+        h.model.observeLive(listOf(approval))
+        advanceUntilIdle()
+        assertEquals(PendingEntryUiState.CurrentEmpty, h.model.state.value.entry)
+
+        h.model.observeLive(emptyList())
+        advanceUntilIdle()
+        h.model.observeLive(listOf(approval))
+        advanceUntilIdle()
+        val visible = h.model.state.value.entry as PendingEntryUiState.Current
+        assertEquals(listOf(approval), visible.items)
+    }
+
+    @Test
+    @DisplayName("AC-18.answers repeated submit while in flight is ignored")
+    fun repeatedSubmitWhileInFlightIsIgnored() = runTest(dispatcher) {
+        val h = Harness()
+        val item = PendingItem.Questions(ConversationFixtures.questionBatch())
+        h.port.listResult = PendingListResult.Current(listOf(item))
+        h.port.detailResult = PendingDetailResult.Found(item)
+        h.model.open(h.scope)
+        advanceUntilIdle()
+        h.model.openItem(item.itemId, PendingFocusOrigin.Live)
+        advanceUntilIdle()
+        h.model.setAnswer("question-1", emptyList(), "only once")
+        val gate = CompletableDeferred<Unit>()
+        h.port.answerGate = gate
+        h.model.submitAnswers()
+        advanceUntilIdle()
+        assertEquals(1, h.port.answerCalls.size)
+        assertTrue(h.model.state.value.answerInFlight)
+
+        // A second tap must not issue another command or clear the draft.
+        h.model.submitAnswers()
+        advanceUntilIdle()
+        assertEquals(1, h.port.answerCalls.size)
+        assertTrue(h.model.state.value.answerInFlight)
+        assertEquals("only once", h.model.state.value.answers["question-1"]?.text)
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(
+            PendingActionUiState.Applied(PendingAction.Answer, item.itemId),
+            h.model.state.value.action,
+        )
+    }
+
+    @Test
+    @DisplayName("AC-18.answers an answered item stays hidden until the authoritative list drops it")
+    fun answeredItemDoesNotReappearFromStaleLiveSnapshot() = runTest(dispatcher) {
+        val h = Harness()
+        val item = PendingItem.Questions(ConversationFixtures.questionBatch())
+        h.port.listResult = PendingListResult.Current(listOf(item))
+        h.port.detailResult = PendingDetailResult.Found(item)
+        h.model.open(h.scope)
+        advanceUntilIdle()
+        h.model.openItem(item.itemId, PendingFocusOrigin.Live)
+        advanceUntilIdle()
+        h.model.setAnswer("question-1", emptyList(), "answered")
+        h.model.submitAnswers()
+        advanceUntilIdle()
+        assertEquals(PendingEntryUiState.CurrentEmpty, h.model.state.value.entry)
+
+        // The Host observation still carries the answered item for a moment.
+        h.model.observeLive(listOf(item))
+        advanceUntilIdle()
+        assertEquals(PendingEntryUiState.CurrentEmpty, h.model.state.value.entry)
+
+        // Once the authoritative list drops it, a genuinely new request with
+        // the same id is allowed to appear again.
+        h.model.observeLive(emptyList())
+        advanceUntilIdle()
+        assertEquals(PendingEntryUiState.CurrentEmpty, h.model.state.value.entry)
+        h.model.observeLive(listOf(item))
+        advanceUntilIdle()
+        val visible = h.model.state.value.entry as PendingEntryUiState.Current
+        assertEquals(listOf(item), visible.items)
+    }
+
+    @Test
+    @DisplayName("AC-18.answers a historical entry cannot reopen a locally answered item")
+    fun historicalEntryCannotReopenAnsweredItem() = runTest(dispatcher) {
+        val h = Harness()
+        val item = PendingItem.Questions(ConversationFixtures.questionBatch())
+        h.port.listResult = PendingListResult.Current(listOf(item))
+        h.port.detailResult = PendingDetailResult.Found(item)
+        h.model.open(h.scope)
+        advanceUntilIdle()
+        h.model.openItem(item.itemId, PendingFocusOrigin.Live)
+        advanceUntilIdle()
+        h.model.setAnswer("question-1", emptyList(), "answered")
+        h.model.submitAnswers()
+        advanceUntilIdle()
+        val getsBefore = h.port.getCalls.size
+
+        // A deep link or history entry points at the same answered item while
+        // the Host list has not caught up yet.
+        h.model.openItem(item.itemId, PendingFocusOrigin.Historical)
+        advanceUntilIdle()
+        assertEquals(getsBefore, h.port.getCalls.size)
+        assertEquals(PendingDetailUiState.Missing, h.model.state.value.detail)
+        assertFalse(h.model.state.value.sheetRequested)
     }
 }

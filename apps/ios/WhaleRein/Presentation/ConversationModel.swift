@@ -56,6 +56,18 @@ final class ConversationModel {
         get { state.question.review }
         set { state.question.review = newValue }
     }
+    var settledQuestionReviews: [String: QuestionReview] {
+        get { state.question.settledReviews }
+        set { state.question.settledReviews = newValue }
+    }
+    var settledQuestionAnswers: [String: QuestionAnswerState] {
+        get { state.question.settledAnswers }
+        set { state.question.settledAnswers = newValue }
+    }
+    var answeredQuestionBatchId: String? {
+        get { state.question.answeredBatchId }
+        set { state.question.answeredBatchId = newValue }
+    }
     var questionAnswerState: QuestionAnswerState {
         get { state.question.answer }
         set { state.question.answer = newValue }
@@ -278,6 +290,8 @@ final class ConversationModel {
 
     var consumeTask: Task<Void, Never>?
     var consumeGeneration = 0
+    let drafts: DraftService
+    var draftLease: DraftService.Lease?
     var draftSaveTask: Task<Void, Never>?
     var approvalExpiryTask: Task<Void, Never>?
     var scrollRequestCounter = 0
@@ -314,7 +328,8 @@ final class ConversationModel {
         onStatusChange: (() -> Void)? = nil,
         onFatalError: ((AppErrorCode) -> Void)? = nil,
         onReconnected: (() -> Void)? = nil,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        drafts: DraftService? = nil
     ) {
         self.hostId = hostId
         self.sessionId = sessionId
@@ -335,6 +350,7 @@ final class ConversationModel {
         self.onFatalError = onFatalError
         self.onReconnected = onReconnected
         self.now = now
+        self.drafts = drafts ?? DraftService(service: service)
         self.attachments = AttachmentTransferModel(
             service: service as? any AttachmentTransferService
         )
@@ -379,6 +395,13 @@ final class ConversationModel {
     var canInteractWithQuestions: Bool {
         questions.isCurrent && !watchEnded && connectivity.isOnline(hostId)
             && questionAnswerState != .submitting
+    }
+
+    /// An uncertain answer still owns its cancel identity. Do not let another
+    /// batch replace it before the original attempt settles.
+    var hasUncertainQuestionAnswer: Bool {
+        if case .uncertain = questionAnswerState { return true }
+        return false
     }
 
     var pendingApprovals: [Approval] {

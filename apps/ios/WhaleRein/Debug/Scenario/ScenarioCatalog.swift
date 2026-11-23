@@ -298,6 +298,18 @@ enum ScenarioCatalog {
                 notes: "A deterministic question batch arrives with the first watch.",
                 launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
                 fixture: FixtureScenario(initiallyPaired: true, questionsOnOpen: true)
+            ),
+            Scenario(
+                id: "questions.pending.slow-removal",
+                category: .questions,
+                title: "Pending questions with a slow Host removal",
+                notes: "The Host keeps the answered batch observable for a moment.",
+                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                fixture: FixtureScenario(
+                    initiallyPaired: true,
+                    questionsOnOpen: true,
+                    delayQuestionRemoval: true
+                )
             )
         ]
     }

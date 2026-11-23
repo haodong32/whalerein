@@ -39,6 +39,28 @@ final class QuestionsUITests: WhaleReinUITestCase {
         )
     }
 
+    func testSubmittedCardStaysReadOnlyUntilHostRemovesBatch() {
+        launchAndOpenConversation(scenario: "questions.pending.slow-removal")
+
+        let option = revealByScrolling("question.option.question-channel.0")
+        tap(option)
+        tap(revealByScrolling("question.review.\(Self.batchID)"))
+        tap(waitFor("question.submit.\(Self.batchID)"))
+
+        // The Host keeps the batch observable briefly. The reviewed card must
+        // stay in place, read-only, instead of falling back to an empty review.
+        XCTAssertTrue(waitFor("question.submitted.\(Self.batchID)").exists)
+        XCTAssertFalse(
+            app.descendants(matching: .any)
+                .matching(identifier: "question.submit.\(Self.batchID)").firstMatch.exists,
+            "a submitted card must not offer Submit again"
+        )
+        XCTAssertTrue(
+            waitForDisappearance("question.card.\(Self.batchID)"),
+            "the Host removal should close the answered batch"
+        )
+    }
+
     func testQuestionCardExposesAccessibleOptionLabels() {
         launchAndOpenConversation(scenario: "questions.pending")
         let option = revealByScrolling("question.option.question-channel.0")

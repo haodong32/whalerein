@@ -10,8 +10,43 @@ struct QuestionCardView: View {
     @Bindable var model: ConversationModel
     let batch: QuestionBatch
 
-    private var isReviewing: Bool {
-        model.questionReview?.guardValue.batchID == batch.batchID
+    private var activeReview: QuestionReview? {
+        guard let review = model.questionReview,
+              review.guardValue.batchID == batch.batchID else { return nil }
+        return review
+    }
+
+    private var settledReview: QuestionReview? {
+        model.settledQuestionReviews[batch.batchID]
+    }
+
+    private var effectiveReview: QuestionReview? {
+        activeReview ?? settledReview
+    }
+
+    /// The reviewed snapshot stays visible after submission. Its inputs and
+    /// actions are frozen until the Host observation removes or replaces the
+    /// batch, so the answered card cannot fall back to an editable blank state.
+    private var isAnswerLocked: Bool {
+        if settledReview != nil { return true }
+        guard activeReview != nil,
+              model.answeredQuestionBatchId == batch.batchID else { return false }
+        if case .submitting = model.questionAnswerState { return true }
+        return false
+    }
+
+    private var answerStateKey: L10nKey? {
+        if let settled = model.settledQuestionAnswers[batch.batchID] {
+            switch settled {
+            case .submitted:
+                return .questionsAnswerSubmitted
+            case .uncertain:
+                return .questionsAnswerUncertain
+            case .idle, .submitting, .failed:
+                return nil
+            }
+        }
+        return nil
     }
 
     var body: some View {
@@ -51,9 +86,10 @@ struct QuestionCardView: View {
                 }
             }
 
-            if isReviewing, let review = model.questionReview {
+            if let review = effectiveReview {
                 reviewSection(review)
-            } else if batch.canAnswer && model.canInteractWithQuestions {
+            } else if batch.canAnswer && model.canInteractWithQuestions
+                && !model.hasUncertainQuestionAnswer {
                 Button {
                     _ = model.beginQuestionReview(batchId: batch.batchID)
                 } label: {
@@ -104,6 +140,7 @@ struct QuestionCardView: View {
             )
             .lineLimit(1...4)
             .textFieldStyle(.roundedBorder)
+            .disabled(isAnswerLocked)
             .accessibilityIdentifier("question.custom.\(item.id)")
             .accessibilityLabel(L10nKey.questionsCustomPlaceholder.key)
         }
@@ -137,6 +174,7 @@ struct QuestionCardView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(isAnswerLocked)
         .accessibilityIdentifier("question.option.\(item.id).\(index)")
         .accessibilityLabel(Text(verbatim: "\(item.question) \(option.label)"))
         .accessibilityValue(
@@ -157,21 +195,33 @@ struct QuestionCardView: View {
                     .font(.footnote)
                     .accessibilityIdentifier("question.review.answer.\(answer.id)")
             }
-            HStack(spacing: 10) {
-                Button(L10nKey.questionsSubmit.key) {
-                    Task { await model.submitQuestionReview() }
+            if isAnswerLocked {
+                if let answerStateKey {
+                    Text(answerStateKey.key)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("question.submitted.\(batch.batchID)")
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityIdentifier("question.submitting.\(batch.batchID)")
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(model.questionAnswerState == .submitting)
-                .accessibilityIdentifier("question.submit.\(batch.batchID)")
-                .accessibilityLabel(L10nKey.questionsSubmit.key)
+            } else {
+                HStack(spacing: 10) {
+                    Button(L10nKey.questionsSubmit.key) {
+                        Task { await model.submitQuestionReview() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("question.submit.\(batch.batchID)")
+                    .accessibilityLabel(L10nKey.questionsSubmit.key)
 
-                Button(L10nKey.questionsKeepEditing.key) {
-                    model.cancelQuestionReview()
+                    Button(L10nKey.questionsKeepEditing.key) {
+                        model.cancelQuestionReview()
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("question.keepEditing.\(batch.batchID)")
+                    .accessibilityLabel(L10nKey.questionsKeepEditing.key)
                 }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("question.keepEditing.\(batch.batchID)")
-                .accessibilityLabel(L10nKey.questionsKeepEditing.key)
             }
         }
         .padding(10)

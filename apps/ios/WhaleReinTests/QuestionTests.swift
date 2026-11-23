@@ -175,11 +175,316 @@ struct QuestionTests {
         #expect(call?.2.guardValue == batch.guardValue)
         #expect(call?.3 == review?.answers)
         #expect(harness.model.questionAnswerState == .submitted(.confirmed))
+        // The answered card stays as reviewed until the Host observation
+        // removes or replaces the batch; clearing it here made the card fall
+        // back to an empty editable state.
+        #expect(harness.model.settledQuestionReviews[batch.batchID] == review)
         #expect(harness.model.questionReview == nil)
         #expect(
             harness.model.questionSelection(batchId: batch.batchID, itemId: "question-channel")
-                .isEmpty
+                == ["Beta"]
         )
+        #expect(
+            harness.model.questionCustomText(batchId: batch.batchID, itemId: "question-channel")
+                == " ship it "
+        )
+    }
+
+    @Test("the submitted card survives an unchanged observation and clears when the batch leaves")
+    func submittedCardWaitsForObservation() async -> Void {
+        var harness = await QuestionHarness()
+        let batch = questionBatch()
+        harness.emitQuestions(questionsState(.current, batches: [batch]))
+        await pump()
+        harness.model.toggleQuestionOption(
+            batchId: batch.batchID,
+            itemId: "question-channel",
+            label: "Beta"
+        )
+        _ = harness.model.beginQuestionReview(batchId: batch.batchID)
+        await harness.model.submitQuestionReview()
+        #expect(harness.model.questionAnswerState == .submitted(.confirmed))
+
+        // The same batch is re-delivered before the Host removes it.
+        harness.emitQuestions(questionsState(.current, batches: [batch], revision: 2))
+        await pump()
+        #expect(harness.model.settledQuestionReviews[batch.batchID] != nil)
+        #expect(harness.model.questionBatches.count == 1)
+
+        // The Host finally removes the answered batch.
+        harness.emitQuestions(questionsState(.current, batches: [], revision: 3))
+        await pump()
+        #expect(harness.model.questionReview == nil)
+        #expect(harness.model.questionAnswerState == .submitted(.confirmed))
+        #expect(harness.model.questionErrorKey == nil)
+        #expect(harness.model.questionEmptyIsCurrent)
+    }
+
+    @Test("an uncertain answer blocks a second batch until it settles")
+    func uncertainAnswerBlocksAnotherBatch() async -> Void {
+        var harness = await QuestionHarness()
+        let first = questionBatch()
+        let second = QuestionBatch(
+            sessionID: first.sessionID,
+            batchID: "question-release-s-002",
+            sourceEpoch: first.sourceEpoch,
+            version: first.version + 1,
+            digestHex: String(repeating: "b2", count: 32),
+            phase: first.phase,
+            questions: first.questions,
+            answerable: first.answerable,
+            contentUnavailable: first.contentUnavailable
+        )
+        harness.emitQuestions(questionsState(.current, batches: [first, second]))
+        await pump()
+        harness.model.toggleQuestionOption(
+            batchId: first.batchID,
+            itemId: "question-channel",
+            label: "Beta"
+        )
+        _ = harness.model.beginQuestionReview(batchId: first.batchID)
+        harness.service.answerQuestionHandler = { _, _, _, _ in
+            CommandReceipt(
+                commandId: "cmd-uncertain-batch",
+                requestId: "req-uncertain-batch",
+                status: .uncertain,
+                delivery: nil
+            )
+        }
+        await harness.model.submitQuestionReview()
+        #expect(harness.model.hasUncertainQuestionAnswer)
+
+        #expect(harness.model.beginQuestionReview(batchId: second.batchID) == nil)
+        #expect(harness.model.questionErrorKey == .questionsAnswerUncertain)
+
+        // The answered batch leaves the observation; the old uncertain state
+        // must not keep blocking the remaining card.
+        harness.emitQuestions(questionsState(.current, batches: [second], revision: 2))
+        await pump()
+        #expect(!harness.model.hasUncertainQuestionAnswer)
+        #expect(harness.model.questionAnswerState == .idle)
+        harness.model.toggleQuestionOption(
+            batchId: second.batchID,
+            itemId: "question-channel",
+            label: "Stable"
+        )
+        #expect(harness.model.beginQuestionReview(batchId: second.batchID) != nil)
+    }
+
+    @Test("two pending batches keep independent submitted cards")
+    func multipleBatchesKeepIndependentSettledCards() async -> Void {
+        var harness = await QuestionHarness()
+        let first = questionBatch()
+        let second = QuestionBatch(
+            sessionID: first.sessionID,
+            batchID: "question-release-s-002",
+            sourceEpoch: first.sourceEpoch,
+            version: first.version + 1,
+            digestHex: String(repeating: "b2", count: 32),
+            phase: first.phase,
+            questions: first.questions,
+            answerable: first.answerable,
+            contentUnavailable: first.contentUnavailable
+        )
+        harness.emitQuestions(questionsState(.current, batches: [first, second]))
+        await pump()
+
+        harness.model.toggleQuestionOption(
+            batchId: first.batchID,
+            itemId: "question-channel",
+            label: "Beta"
+        )
+        _ = harness.model.beginQuestionReview(batchId: first.batchID)
+        await harness.model.submitQuestionReview()
+        #expect(harness.model.settledQuestionReviews[first.batchID] != nil)
+
+        // Reviewing the second batch must not release the first settled card.
+        harness.model.toggleQuestionOption(
+            batchId: second.batchID,
+            itemId: "question-channel",
+            label: "Stable"
+        )
+        _ = harness.model.beginQuestionReview(batchId: second.batchID)
+        await harness.model.submitQuestionReview()
+        #expect(harness.model.settledQuestionReviews[first.batchID] != nil)
+        #expect(harness.model.settledQuestionReviews[second.batchID] != nil)
+        #expect(harness.model.questionReview == nil)
+
+        // Removing only the first batch leaves the second card settled.
+        harness.emitQuestions(questionsState(.current, batches: [second], revision: 2))
+        await pump()
+        #expect(harness.model.settledQuestionReviews[first.batchID] == nil)
+        #expect(harness.model.settledQuestionReviews[second.batchID] != nil)
+    }
+
+    @Test("a batch removed during submission settles without a stale guard error")
+    func removalDuringSubmissionSettlesCleanly() async -> Void {
+        var harness = await QuestionHarness()
+        let batch = questionBatch()
+        harness.emitQuestions(questionsState(.current, batches: [batch]))
+        await pump()
+        harness.model.toggleQuestionOption(
+            batchId: batch.batchID,
+            itemId: "question-channel",
+            label: "Beta"
+        )
+        _ = harness.model.beginQuestionReview(batchId: batch.batchID)
+
+        let gate = SuspendedResponse<CommandReceipt>()
+        harness.service.answerQuestionHandler = { _, _, _, _ in
+            try await gate.wait()
+        }
+        let task = Task { await harness.model.submitQuestionReview() }
+        await gate.waitUntilStarted()
+
+        // The Host observation removes the answered batch before the command
+        // response returns.
+        harness.emitQuestions(questionsState(.current, batches: [], revision: 2))
+        await pump()
+
+        gate.resume(
+            with: CommandReceipt(
+                commandId: "cmd-removed",
+                requestId: "req-removed",
+                status: .confirmed,
+                delivery: nil
+            )
+        )
+        await task.value
+        #expect(harness.model.questionAnswerState == .submitted(.confirmed))
+        #expect(harness.model.questionErrorKey == nil)
+        #expect(harness.model.questionReview == nil)
+    }
+
+    @Test("a submitted review stays locked across a watch replacement")
+    func submittedSurvivesWatchReplacement() async -> Void {
+        var harness = await QuestionHarness()
+        let batch = questionBatch()
+        harness.emitQuestions(questionsState(.current, batches: [batch]))
+        await pump()
+        harness.model.toggleQuestionOption(
+            batchId: batch.batchID,
+            itemId: "question-channel",
+            label: "Beta"
+        )
+        _ = harness.model.beginQuestionReview(batchId: batch.batchID)
+        await harness.model.submitQuestionReview()
+        #expect(harness.model.questionAnswerState == .submitted(.confirmed))
+
+        harness.model.preserveQuestionCancellation()
+        #expect(harness.model.questionAnswerState == .submitted(.confirmed))
+        #expect(harness.model.settledQuestionReviews[batch.batchID] != nil)
+    }
+
+    @Test("a new pending batch clears the previous submitted banner")
+    func newBatchClearsSubmittedStatus() async -> Void {
+        var harness = await QuestionHarness()
+        let batch = questionBatch()
+        harness.emitQuestions(questionsState(.current, batches: [batch]))
+        await pump()
+        harness.model.toggleQuestionOption(
+            batchId: batch.batchID,
+            itemId: "question-channel",
+            label: "Beta"
+        )
+        _ = harness.model.beginQuestionReview(batchId: batch.batchID)
+        await harness.model.submitQuestionReview()
+        #expect(harness.model.questionAnswerState == .submitted(.confirmed))
+
+        harness.emitQuestions(questionsState(.current, batches: [], revision: 2))
+        await pump()
+        #expect(harness.model.questionAnswerState == .submitted(.confirmed))
+
+        harness.emitQuestions(questionsState(.current, batches: [questionBatch(version: 3)], revision: 3))
+        await pump()
+        #expect(harness.model.questionAnswerState == .idle)
+        #expect(harness.model.questionErrorKey == nil)
+    }
+
+    @Test("a submitted review is dropped quietly when its guard changes")
+    func submittedCardGuardChangeIsQuiet() async -> Void {
+        var harness = await QuestionHarness()
+        let batch = questionBatch()
+        harness.emitQuestions(questionsState(.current, batches: [batch]))
+        await pump()
+        harness.model.toggleQuestionOption(
+            batchId: batch.batchID,
+            itemId: "question-channel",
+            label: "Beta"
+        )
+        _ = harness.model.beginQuestionReview(batchId: batch.batchID)
+        await harness.model.submitQuestionReview()
+        #expect(harness.model.questionAnswerState == .submitted(.confirmed))
+
+        harness.emitQuestions(questionsState(.current, batches: [questionBatch(version: 3)]))
+        await pump()
+        #expect(harness.model.questionReview == nil)
+        #expect(harness.model.questionAnswerState == .idle)
+        #expect(harness.model.questionErrorKey == nil)
+    }
+
+    @Test("a repeated submit while the first is in flight is ignored")
+    func repeatedSubmitIsIgnored() async -> Void {
+        var harness = await QuestionHarness()
+        let batch = questionBatch()
+        harness.emitQuestions(questionsState(.current, batches: [batch]))
+        await pump()
+        harness.model.toggleQuestionOption(
+            batchId: batch.batchID,
+            itemId: "question-channel",
+            label: "Beta"
+        )
+        _ = harness.model.beginQuestionReview(batchId: batch.batchID)
+
+        let gate = SuspendedResponse<CommandReceipt>()
+        harness.service.answerQuestionHandler = { _, _, _, _ in
+            try await gate.wait()
+        }
+        let first = Task { await harness.model.submitQuestionReview() }
+        await gate.waitUntilStarted()
+
+        // A second tap while the first request is still open must not clear the
+        // review, report a guard change, or issue another answer command.
+        await harness.model.submitQuestionReview()
+        #expect(harness.service.answerQuestionCalls.count == 1)
+        #expect(harness.model.questionAnswerState == .submitting)
+        #expect(harness.model.questionReview != nil)
+        #expect(harness.model.questionErrorKey == nil)
+
+        gate.resume(
+            with: CommandReceipt(
+                commandId: "cmd-repeat",
+                requestId: "req-repeat",
+                status: .confirmed,
+                delivery: nil
+            )
+        )
+        await first.value
+        #expect(harness.model.questionAnswerState == .submitted(.confirmed))
+    }
+
+    @Test("a fresh watch baseline clears the old question observation")
+    func watchResetClearsStaleQuestions() async -> Void {
+        var harness = await QuestionHarness()
+        let batch = questionBatch()
+        harness.emitQuestions(questionsState(.current, batches: [batch]))
+        await pump()
+        harness.model.toggleQuestionOption(
+            batchId: batch.batchID,
+            itemId: "question-channel",
+            label: "Beta"
+        )
+        _ = harness.model.beginQuestionReview(batchId: batch.batchID)
+        await harness.model.submitQuestionReview()
+        #expect(harness.model.settledQuestionReviews[batch.batchID] != nil)
+
+        harness.emit(.watchReset(messages: [], approvals: []))
+        await pump()
+        #expect(harness.model.questionsFreshness == .loading)
+        #expect(harness.model.questionBatches.isEmpty)
+        #expect(harness.model.questionReview == nil)
+        #expect(harness.model.settledQuestionReviews.isEmpty)
+        #expect(harness.model.questionAnswerState == .idle)
     }
 
     @Test("a changed guard is rejected before any submission")

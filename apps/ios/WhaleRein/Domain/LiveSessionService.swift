@@ -192,7 +192,7 @@ final class LiveSessionService: SessionService {
             }
 
         case .historyReset:
-            broadcast(.reset(messages: cachedHistory, approvals: latestApprovals), scope: scope)
+            broadcast(.watchReset(messages: cachedHistory, approvals: latestApprovals), scope: scope)
 
         case .message(let message, _, _):
             let mapped = Self.map(message: message)
@@ -1147,10 +1147,15 @@ final class LiveSessionService: SessionService {
             try core.cachedMessages(hostId: scope.hostId, sessionId: scope.sessionId)
         }) else { return }
         let mapped = cached.map(Self.map(message:))
-        guard mapped.map(\.messageId) != cachedHistory.map(\.messageId) else { return }
+        let refresh = CachedHistoryRefresh.resolve(previous: cachedHistory, current: mapped)
+        guard refresh != .unchanged else { return }
         cachedHistory = mapped
         cachedHistoryById = Dictionary(uniqueKeysWithValues: mapped.map { ($0.messageId, $0) })
-        broadcast(.reset(messages: mapped, approvals: latestApprovals), scope: scope)
+        // An append after a send stays incremental; only a genuinely different
+        // view replaces the whole transcript.
+        for event in refresh.events(current: mapped, approvals: latestApprovals) {
+            broadcast(event, scope: scope)
+        }
     }
 
     static func map(operationStatus status: CommandStatus) -> OperationStatus {

@@ -23,7 +23,9 @@ extension ConversationModel {
         // storage failure must never leave the user with a conversation that
         // never opens.
         do {
-            draft = try await service.loadDraft(hostId: hostId, sessionId: sessionId) ?? ""
+            let claim = try await drafts.claim(hostId: hostId, sessionId: sessionId)
+            draftLease = claim.lease
+            draft = claim.text
             draftLoadErrorKey = nil
         } catch {
             draftLoadErrorKey = .errorDraftUnavailable
@@ -113,19 +115,23 @@ extension ConversationModel {
         wait.close()
         draftSaveTask?.cancel()
         draftSaveTask = nil
-        closeDraftFlushDidComplete = false
-        closeDraftFlushErrorKey = nil
         let text = draft
         let hostId = hostId
         let sessionId = sessionId
         let service = service
-        // A draft is only 120 ms behind the keyboard. Flush it synchronously
-        // enough that switching sessions, leaving the app or killing it does
-        // not lose the last edit. The outcome is observable so a failed flush
-        // is not reported as a saved draft.
+        let lease = draftLease
+        closeDraftFlushDidComplete = false
+        closeDraftFlushErrorKey = nil
+        // The coordinator owns ordering and generation fencing. Releasing this
+        // lease is a final save only while this conversation still owns the
+        // session.
         Task { [weak self] in
             do {
-                try await service.saveDraft(hostId: hostId, sessionId: sessionId, text: text)
+                if let lease {
+                    try await self?.drafts.release(lease, text: text)
+                } else {
+                    try await service.saveDraft(hostId: hostId, sessionId: sessionId, text: text)
+                }
                 self?.closeDraftFlushErrorKey = nil
             } catch {
                 self?.closeDraftFlushErrorKey = .errorDraftUnavailable

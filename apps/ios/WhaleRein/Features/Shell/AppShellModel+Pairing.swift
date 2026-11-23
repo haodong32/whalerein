@@ -24,7 +24,8 @@ extension AppShellModel {
             onReconnected: { [weak self] in
                 guard let self, self.isCurrentActivation(generation) else { return }
                 Task { await self.refreshVisibleOperationResults() }
-            }
+            },
+            drafts: drafts
         )
         // Staged attachments belong to the active instance's data directory,
         // never to a process-wide root keyed only by Host and session.

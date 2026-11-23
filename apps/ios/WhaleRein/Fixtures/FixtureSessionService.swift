@@ -860,9 +860,22 @@ final class FixtureSessionService: SessionService {
               answers.allSatisfy({ questionIds.contains($0.id) }) else {
             throw SessionServiceError(.invalidInvitation, detail: "unknown question id")
         }
-        questionBatchesBySession[sessionId] = []
-        questionRevisionBySession[sessionId] = (questionRevisionBySession[sessionId] ?? 1) + 1
-        emitQuestionsForTesting(hostId: hostId, sessionId: sessionId)
+        if options.delayQuestionRemoval {
+            let task = Task { [weak self] in
+                guard let self else { return }
+                await self.clock.sleep(for: .milliseconds(1_500))
+                guard !Task.isCancelled else { return }
+                self.questionBatchesBySession[sessionId] = []
+                self.questionRevisionBySession[sessionId] =
+                    (self.questionRevisionBySession[sessionId] ?? 1) + 1
+                self.emitQuestionsForTesting(hostId: hostId, sessionId: sessionId)
+            }
+            lifecycleTasks.append(task)
+        } else {
+            questionBatchesBySession[sessionId] = []
+            questionRevisionBySession[sessionId] = (questionRevisionBySession[sessionId] ?? 1) + 1
+            emitQuestionsForTesting(hostId: hostId, sessionId: sessionId)
+        }
         commandCounter += 1
         let receipt = CommandReceipt(
             commandId: String(format: "cmd-answer-%04d", commandCounter),

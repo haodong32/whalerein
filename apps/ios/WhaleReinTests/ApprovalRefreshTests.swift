@@ -114,6 +114,24 @@ struct ApprovalRefreshTests {
         #expect(L10nKey.approvalStateKey(for: model.approvals[0].state) == .approvalUnavailable)
     }
 
+    @Test("a transient unavailable card becomes actionable when the Host reports it pending again")
+    func unavailableRecoversWhenHostReportsPending() async {
+        let service = StubSessionService()
+        let approval = testApproval()
+        let model = await modelWith(approval: approval, service: service)
+
+        service.approvalsHandler = { _, _ in throw SessionServiceError(.unavailable) }
+        await model.refreshApprovals()
+        #expect(model.approvals.first?.state == .unavailable)
+        #expect(!model.isApprovalActionable(model.approvals[0]))
+
+        // The Host is reachable again and still lists the same pending guard.
+        service.approvalsHandler = { _, _ in [approval] }
+        await model.refreshApprovals()
+        #expect(model.approvals.first?.state == .pending)
+        #expect(model.isApprovalActionable(model.approvals[0]))
+    }
+
     @Test("an unresolved pending request that disappears from the Host list becomes terminal")
     func missingPendingBecomesTerminal() async {
         let service = StubSessionService()

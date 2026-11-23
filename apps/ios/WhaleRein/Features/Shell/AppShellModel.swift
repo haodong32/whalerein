@@ -40,6 +40,9 @@ final class AppShellModel {
     var accountSettings: AccountSettingsModel?
 
     var conversation: ConversationModel?
+    /// Shared serialized draft owner. Conversation models take a lease; a
+    /// replacement invalidates the old lease before it can write.
+    var drafts: DraftService
     /// True while the app is not active. The root renders an opaque shield so
     /// the app-switcher snapshot never contains conversation content.
     /// Present after a background transition; used by tests and diagnostics to
@@ -102,6 +105,7 @@ final class AppShellModel {
         preferencesFactory: (@MainActor (AppInstance) -> PreferencesStore)? = nil
     ) {
         self.service = service
+        self.drafts = DraftService(service: service)
         self.preferences = preferences
         self.dataDirectory = dataDirectory
         self.options = options

@@ -310,6 +310,7 @@ struct CloudAccountSwitchTests {
         await waitUntil { app.conversation != nil }
         #expect(app.cloudSignIn?.account == accountA)
         #expect(app.conversation?.sessionId == "s-001")
+        await waitUntil { app.conversation?.loadState == .loaded }
 
         app.conversation?.draft = "draft only account A may see"
         await app.conversation?.suspendForBackground()
