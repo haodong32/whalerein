@@ -14,25 +14,6 @@ enum SessionSwitcherStyle {
 }
 
 /// Models and intents the switcher needs. The shell builds this once.
-struct SessionSwitcherModels {
-    let hosts: HostListModel
-    /// Authoritative Host status shared with the conversation chrome.
-    let connectivity: HostConnectivityModel
-    let sessions: SessionListModel
-    let management: SessionManagementModel
-    /// The conversation currently on screen, if any.
-    let currentConversation: SessionContext?
-}
-
-struct SessionSwitcherActions {
-    var refresh: () async -> Void
-    var selectHost: (String) async -> Void
-    var selectSession: (SessionSummary) -> Void
-    var openConversation: (String, SessionSummary) -> Void
-    var addHost: () -> Void
-    var close: () -> Void
-}
-
 struct SessionSwitcherView: View {
     let models: SessionSwitcherModels
     let actions: SessionSwitcherActions
