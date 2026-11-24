@@ -185,6 +185,13 @@ rewrites old settings. Removed selectors are rejected; the plugin accepts only
 the new connection selection contract. Core/CLI file configuration and the shared
 environment catalog contract are unchanged.
 
+The managed Host id is the persisted DSH profile id, not the hostname. Its
+signing and Noise keys belong to that profile and survive removal. A removed
+Host re-adds through a new enrollment generation and a fresh approval, keeping
+the same id and keys; the previous credentials and grants stay fenced. A
+removal that is still in flight blocks a new approval. `host_label` is display
+metadata only and never changes identity.
+
 The Host manager accepts read-only profile-owned snapshots. It never refreshes
 these from disk or accepts configuration/profile switching mutations in this
 mode. On startup, the profile selects an existing matching authority or a new
