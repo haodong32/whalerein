@@ -82,6 +82,11 @@ export class MqttAccess {
   #backoffMs
   #stopped = true
   #connected = false
+  // A trust failure is definitive only before this lane ever succeeded. After a
+  // successful connection the broker may still be rotating its leaf, so a trust
+  // error during reconnect is retried with bounded backoff instead of stopping
+  // the Host's only transport permanently.
+  #everConnected = false
   #reconnects = 0
   #attempts = 0
   #published = 0
@@ -453,6 +458,12 @@ export class MqttAccess {
 
   #failDefinitive(code, generation) {
     if (generation !== this.#generation || this.#terminalCode !== '') return
+    if (code === 'tls_trust' && this.#everConnected && !this.#stopped) {
+      this.#lastErrorCode = code
+      this.logger?.warn('mqtt_tls_rotation_retry', { code, generation })
+      this.#scheduleReconnect()
+      return
+    }
     this.#terminalCode = code
     this.#lastErrorCode = code
     this.#stopped = true
@@ -476,6 +487,7 @@ export class MqttAccess {
     this.#transport.brokerPacketBytes = this.#brokerPacketBytes
     this.#accessReceive = null
     this.#connected = true
+    this.#everConnected = true
     if (this.#attempts > 1) this.#reconnects++
     this.#lastErrorCode = ''
     // The host sets revocations_pending synchronously here, before the

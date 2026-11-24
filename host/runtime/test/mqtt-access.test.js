@@ -319,6 +319,41 @@ test('when the broker disconnects, MQTT Access reconnects with backoff and a fre
   await access.stop()
 })
 
+test('a trust failure after a successful connection retries instead of ending the MQTT lane', async () => {
+  const broker = new FakeBroker()
+  let failTrust = false
+  let attempts = 0
+  const connect = (url, options) => {
+    attempts++
+    const client = broker.connect(url, options)
+    if (failTrust) {
+      // Model a broker rotating its leaf: the first TLS handshake of the
+      // attempt fails closed, then a later attempt succeeds.
+      client.closed = true
+      queueMicrotask(() => {
+        client.emit('error', Object.assign(new Error('unable to verify leaf'), { code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' }))
+        client.emit('close')
+      })
+    }
+    return client
+  }
+  let failures = 0
+  const access = new MqttAccess({
+    url: 'mqtts://broker.test:8883', hostId: 'host-1', token: 'secret-token', connect,
+    reconnectMinMs: 20, reconnectMaxMs: 40,
+  })
+  access.start({ onFailure: () => failures++ })
+  await access.waitForConnected(2000)
+  failTrust = true
+  broker.disconnectClientId('whalerein-host-host-1')
+  await waitFor(() => attempts >= 3, 3000)
+  failTrust = false
+  await waitFor(() => access.connected === true, 5000)
+  assert.equal(failures, 0, 'a post-connection trust failure is retried, not terminal')
+  assert.ok(access.describe().reconnects >= 1)
+  await access.stop()
+})
+
 test('when MQTT Access stops, timers are released and a later restart succeeds', async () => {
   const { access } = makeAccess()
   access.start({})
