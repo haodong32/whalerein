@@ -338,7 +338,24 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 				ALTER TABLE pairing_outcomes ADD COLUMN commit_binding_verified boolean NOT NULL DEFAULT false,
 					ADD COLUMN host_confirmation_verified boolean NOT NULL DEFAULT false;
 				ALTER TABLE requests ADD COLUMN bodies_cleared boolean;
+				ALTER TABLE grants ADD COLUMN enrollment_generation bigint NOT NULL DEFAULT 0;
 				CREATE VIEW grant_authority AS SELECT * FROM grants WHERE false`); err != nil {
+				t.Fatal(err)
+			}
+			hash := bytes.Repeat([]byte{4}, 32)
+			if err := s.CreatePairingToken(ctx, hash, "host", now.Add(time.Minute), now); err != nil {
+				t.Fatal(err)
+			}
+			op, notice := fixturePairingOperation(t, s, hash, "host", "device", "claim", now, nil)
+			if accepted, err := s.CommitPairing(ctx, hash, "host", "device", fixtureKeyPin(3), authHash, now, notice, &op); err != nil || !accepted {
+				t.Fatalf("seed legacy commit: accepted=%v err=%v", accepted, err)
+			}
+			if missingBody {
+				if _, err := s.Pool().Exec(ctx, `UPDATE requests SET request_body=''::bytea WHERE request_id=$1`, notice.RequestId); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.Pool().Exec(ctx, `UPDATE pairing_outcomes SET host_confirmed=true,commit_binding_verified=false,host_confirmation_verified=false WHERE claim_id='claim'`); err != nil {
 				t.Fatal(err)
 			}
 			// Keep the later Cloud-session schema. Restore its trigger after the
@@ -354,6 +371,7 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
                 DROP VIEW IF EXISTS grant_authority;
                 ALTER TABLE pairing_outcomes DROP COLUMN commit_binding_verified, DROP COLUMN host_confirmation_verified;
                 ALTER TABLE requests DROP COLUMN bodies_cleared;
+                ALTER TABLE grants DROP COLUMN enrollment_generation;
                 DELETE FROM schema_migrations WHERE name IN ('010_pairing_commit_binding.sql','016_external_device_revocations.sql')`); err != nil {
 				t.Fatal(err)
 			}
@@ -367,8 +385,10 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 			if err := s.Migrate(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.Pool().Exec(ctx, activationTrigger); err != nil {
-				t.Fatal(err)
+			if activationTrigger != "" {
+				if _, err := s.Pool().Exec(ctx, activationTrigger); err != nil {
+					t.Fatal(err)
+				}
 			}
 			var legacyUnknown bool
 			if err := s.Pool().QueryRow(ctx, `SELECT bodies_cleared IS NULL FROM requests WHERE request_id=$1`, legacyEmptyID).Scan(&legacyUnknown); err != nil || !legacyUnknown {

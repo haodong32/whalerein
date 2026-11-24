@@ -198,7 +198,7 @@ class CutoverClient:
         exit_code, result = self.invoke(*commands, input_text=input_text)
         if exit_code != 0:
             code = result.get("error", {}).get("code", "unknown")
-            raise AssertionError(f"CLI {commands[:2]} failed with {code}")
+            raise AssertionError(f"CLI {commands[:2]} failed with {code}: {result}")
         return result["data"]
 
     @staticmethod

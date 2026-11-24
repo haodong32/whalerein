@@ -47,8 +47,13 @@ def test_storage(package, name, postgres):
     )
     exit_code = result.returncode
     locations = sorted(set(re.findall(r"[A-Za-z_]+_test.go:\d+", result.stdout)))
-    assert exit_code == 0, "Native database integration failed at " + ", ".join(
-        locations
+    assert exit_code == 0, (
+        "Native database integration failed at "
+        + ", ".join(locations)
+        + "\nstdout:\n"
+        + result.stdout[-4000:]
+        + "\nstderr:\n"
+        + result.stderr[-4000:]
     )
     if "SKIP" in result.stdout:
         raise AssertionError("Required database integration was skipped")
