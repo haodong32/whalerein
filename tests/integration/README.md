@@ -122,20 +122,30 @@ production TLS, external model quality and other DSH versions remain release wor
 
 ## Inline/reference relay
 
-The `transport` leaf includes the epoch-4 relay and live-class evidence.
-`test_relay_transport.py` runs the real Host `RelayTransport`/`MqttAccess`
-against the real broker and asserts the encoded PUBLISH boundary, one complete
-packet per message, a reference only after its object is readable, asymmetric
-hop budgets, retired-epoch rejection, the QoS 0 live topic without a preview on
-the control event topic, and the absence of fragment, receipt or device-ACK
-traffic. `test_relay_cutover.py` proves Access rejects epoch 0/2 and the retired
-epoch 3 with `protocol_version_incompatible`, accepts only epoch 4, and rejects
-mixed representations with no fallback. In the `chain` leaf,
-`test_relay_chain.py` observes the real broker to prove a preview travels only
-on the Host live topic and the Access device live topic at QoS 0, never on the
-control event topic; a committed message is delivered at QoS 1 over a missing
-preview; and a disconnected live receiver does not block a same-Device control
-send. Existing same-Device watch+send and AC-18 wait/gap cases remain.
+The `transport` leaf includes the epoch-5 relay, query-lane and live-class
+evidence. `test_relay_transport.py` runs the real Host
+`RelayTransport`/`MqttAccess` against the real broker and asserts the encoded
+PUBLISH boundary, one complete packet per message, a reference only after its
+object is readable, asymmetric hop budgets, retired-epoch rejection (epochs
+0/2/3/4), the QoS 0 Device live topic without a preview on the control event
+topic, and the absence of fragment, receipt or device-ACK traffic.
+`test_relay_cutover.py` proves Access rejects retired epochs with
+`protocol_version_incompatible`, admits only epoch 5 on the durable command
+route, rejects HTTP QUERY/HANDSHAKE with no durable row, and rejects mixed
+representations with no fallback. `test_relay_authorization.py` adds the
+Broker-level reserved-property rule (a Device-supplied `whalerein-connection`
+is denied while the same query without it is accepted) and the directed-reply
+target rule (a reply targeted at a replaced same-ID connection is dropped while
+the current target is delivered). In the `chain` leaf,
+`test_relay_chain.py` observes the real broker to prove a preview travels
+directly on the Device live topic at QoS 0 with no `whalerein-target` stamp and
+that the retired `h/{host}/live` topic stays empty; a committed message is
+delivered at QoS 1 over a missing preview; and a disconnected live receiver
+does not block a same-Device control send. `test_cli_contract.py` proves session
+list/history/watch traverse the four-hop MQTT query lane with Correlation Data,
+Response Topic and Message Expiry while creating no durable row, and that
+command submission and heartbeat stay on HTTPS. Existing same-Device watch+send
+and AC-18 wait/gap cases remain.
 `test_relay_authorization.py` and `test_relay_storage.py`
 exercise the real Access ciphertext directory, its scope checks and its quota
 limits. The real Host-to-Access reference and exact-bytes resolution case is

@@ -259,7 +259,7 @@ func (s *stack) hostClient(t *testing.T) *mqttClient {
 		HostId:            s.hostID,
 		ConnectedAtUnixMs: now,
 		Receive:           acceptanceAdvertisement(1),
-		RelayVersion:      relayEpochV4,
+		RelayVersion:      relayEpochV5,
 	})
 	if err != nil {
 		t.Fatalf("encode HostReady: %v", err)
@@ -270,7 +270,7 @@ func (s *stack) hostClient(t *testing.T) *mqttClient {
 		ResultBody:        ready,
 		CompletedAtUnixMs: now,
 		ProtocolVersion:   1,
-		RelayVersion:      relayEpochV4,
+		RelayVersion:      relayEpochV5,
 	})
 	if err != nil {
 		t.Fatalf("encode HostReady result: %v", err)
@@ -286,6 +286,13 @@ func (s *stack) deviceClient(t *testing.T, index int) *mqttClient {
 	device := s.devices[index]
 	c.connect(t, s.mqttAddr, "whalerein-device-"+device, "device:"+device, s.tokens[index])
 	s.root.Cleanup(c.close)
+	// An epoch-5 Device holds the four scoped subscriptions the Core owns:
+	// control event, result notice, query reply and derived live preview.
+	for _, suffix := range []string{"/event", "/notice", "/reply", "/live"} {
+		if err := c.subscribe(t, "whalerein/v1/h/"+s.hostID+"/d/"+device+suffix); err != nil {
+			t.Fatalf("device %s subscription: %v", suffix, err)
+		}
+	}
 	return c
 }
 
@@ -428,8 +435,8 @@ func waitNotReady(t *testing.T, accessURL string) {
 	t.Fatal("Access stayed ready on a read-only database")
 }
 
-// relayEpochV4 is the only relay contract Access admits (proto/v1/WIRE.md).
-const relayEpochV4 uint32 = 4
+// relayEpochV5 is the only relay contract Access admits (proto/v1/WIRE.md).
+const relayEpochV5 uint32 = 5
 
 // acceptanceAdvertisement is the Host receive budget the broker requires on
 // readiness; values mirror the packaged default transport profile.
@@ -442,7 +449,7 @@ func acceptanceAdvertisement(generation uint64) *whalereinv1.ReceiveAdvertisemen
 			TransferTimeoutMs: 120000,
 		},
 		ConnectionGeneration: generation,
-		RelayVersion:         relayEpochV4,
+		RelayVersion:         relayEpochV5,
 	}
 }
 
@@ -455,7 +462,7 @@ func eventPayload(hostID, deviceID string) []byte {
 		Ciphertext:      []byte("ciphertext-acceptance"),
 		TraceId:         "acceptance",
 		CreatedAtUnixMs: time.Now().UnixMilli(),
-		RelayVersion:    relayEpochV4,
+		RelayVersion:    relayEpochV5,
 	}
 	encoded, err := proto.Marshal(envelope)
 	if err != nil {

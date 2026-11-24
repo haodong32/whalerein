@@ -88,7 +88,7 @@ class AmbiguousHostRequestProxy:
     broker acknowledgement can come back. The command may therefore already
     have executed while the publish returns an error, which is exactly the
     documented ambiguous-delivery window. There is no application receipt in
-    epoch 4, so this proxy withholds the only remaining confirmation.
+    epoch 5, so this proxy withholds the only remaining confirmation.
     """
 
     def __init__(self, host_id, upstream=("127.0.0.1", 1883)):

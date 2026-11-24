@@ -58,7 +58,7 @@ test('AC-05 a two MiB result crosses the real broker as one reference packet wit
       result_body: body,
       completed_at_unix_ms: 1,
       protocol_version: 1,
-      relay_version: 4,
+      relay_version: 5,
     }))
     assert.equal(result.representation, 'reference')
     assert.ok(result.packetBytes <= limit)

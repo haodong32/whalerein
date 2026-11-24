@@ -256,7 +256,7 @@ def test_journey_stale_approval_card_after_a_second_operator(scenario, paired_de
 
 
 @pytest.mark.description(
-    "Across a simulated day boundary the 24 hour sweep removes expired invitations and query records while the uncertain command identity, its recovery and last night's cached history survive."
+    "Across a simulated day boundary the 24 hour sweep removes expired invitations and clears aged request bodies while the uncertain command identity, its recovery and last night's cached history survive; epoch-5 queries leave no durable row to sweep."
 )
 def test_journey_cross_day_cleanup_and_recovery(scenario, paired_device):
     """Retention cleans expired records but never the recovery identity."""
@@ -281,19 +281,11 @@ def test_journey_cross_day_cleanup_and_recovery(scenario, paired_device):
     wait_online(paired_device, scenario.host)
     assert any(record["operation_id"] == request_id for record in paired_device.call("operation", "list")["sends"])
 
-    # Record the read-only requests that this case already created; the next
-    # day's sweep must remove exactly those aged records. Requests created after
-    # the sweep are current, not expired.
-    stale_queries = [
-        value
-        for value in sql(
-            scenario.schema,
-            "SELECT coalesce(string_agg(request_id, ','), '') FROM requests "
-            "WHERE command_id='' AND kind=2",
-        ).split(",")
-        if value
-    ]
-    assert stale_queries, "the case must retain read-only requests to expire"
+    # Epoch 5 moved read-only queries onto the transient MQTT lane, so a
+    # session read must not create a durable request row for the sweep.
+    assert int(
+        sql(scenario.schema, "SELECT count(*) FROM requests WHERE kind=2")
+    ) == 0, "epoch-5 queries must not leave a durable row"
 
     # The next day: every retained timestamp is more than a day old.
     rewind_for_next_day(scenario.schema)
@@ -302,32 +294,15 @@ def test_journey_cross_day_cleanup_and_recovery(scenario, paired_device):
     restart_plugin(scenario)
     wait_online(paired_device, scenario.host)
 
-    # The sweep ran: expired invitations and the aged read-only query records
-    # are gone.
-    stale_filter = ",".join("'" + value + "'" for value in stale_queries)
+    # The sweep ran: expired invitations are gone and the transient query
+    # boundary still holds.
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        cleaned = (
-            row_count(scenario.schema, "pairing_tokens") == 0
-            and int(
-                sql(
-                    scenario.schema,
-                    f"SELECT count(*) FROM requests WHERE request_id IN ({stale_filter})",
-                )
-            )
-            == 0
-        )
-        if cleaned:
+        if row_count(scenario.schema, "pairing_tokens") == 0:
             break
         time.sleep(0.5)
-    remaining = int(
-        sql(
-            scenario.schema,
-            f"SELECT count(*) FROM requests WHERE request_id IN ({stale_filter})",
-        )
-    )
     assert row_count(scenario.schema, "pairing_tokens") == 0
-    assert remaining == 0
+    assert int(sql(scenario.schema, "SELECT count(*) FROM requests WHERE kind=2")) == 0
 
     # The control identity and its terminal outcome are retained.
     assert int(

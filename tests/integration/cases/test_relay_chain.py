@@ -50,12 +50,20 @@ def test_ac02_inline_result_stays_inline(scenario, paired_device):
     result = paired_device.call("session", "queue", "list", "--session", session)
     text = result["items"][0]["blocks"][0]["text"]
     assert len(text) == 512 and text == "x" * 512
-    with_reference = psql(
+    # Epoch-5 session reads are transient query-lane operations: no durable
+    # request row and no result object exist for an inline reply.
+    objects = psql(
+        scenario.schema,
+        f"SELECT count(*) FROM {scenario.schema}.temporary_ciphertext_objects "
+        "WHERE purpose='PAYLOAD_PURPOSE_RESULT'",
+    )
+    assert int(objects) == 0, "an inline result must not create a reference"
+    rows = psql(
         scenario.schema,
         f"SELECT count(*) FROM {scenario.schema}.requests "
-        "WHERE result_reference <> ''::bytea",
+        f"WHERE device_id='{paired_device.identity['device_id']}'",
     )
-    assert with_reference == "0", "an inline result must not create a reference"
+    assert int(rows) == 0, "an epoch-5 query must not create a durable request row"
 
 
 @pytest.mark.relay_directory
@@ -67,14 +75,15 @@ def test_ac01_above_result_uses_the_access_directory(scenario, paired_device):
     result = paired_device.call("session", "queue", "list", "--session", session)
     text = result["items"][0]["blocks"][0]["text"]
     assert len(text) == 100 * 1024 and text == "x" * (100 * 1024)
-    referenced = psql(
+    # The query result carries a reference, but the query itself is transient:
+    # the exact bytes live in the temporary object, not in a durable row.
+    rows = psql(
         scenario.schema,
         f"SELECT count(*) FROM {scenario.schema}.requests "
-        "WHERE result_reference <> ''::bytea AND status='succeeded'",
+        f"WHERE device_id='{paired_device.identity['device_id']}'",
     )
-    assert int(referenced) == 1, "the oversized result must be stored as a readable reference"
-    # The directory is real: the case root contains one ready RESULT object
-    # while the reference is retained.
+    assert int(rows) == 0, "an epoch-5 query must not create a durable request row"
+    # The directory is real: the case root contains one ready RESULT object.
     objects = psql(
         scenario.schema,
         f"SELECT count(*) FROM {scenario.schema}.temporary_ciphertext_objects "
@@ -93,9 +102,10 @@ def test_ac02_duplicate_result_read_is_harmless(scenario, paired_device):
     assert first["items"][0]["blocks"][0]["text"] == second["items"][0]["blocks"][0]["text"]
     rows = psql(
         scenario.schema,
-        f"SELECT count(*) FROM {scenario.schema}.requests WHERE kind=2",
+        f"SELECT count(*) FROM {scenario.schema}.requests WHERE kind=2 "
+        f"AND device_id='{paired_device.identity['device_id']}'",
     )
-    assert int(rows) >= 1
+    assert int(rows) == 0, "epoch-5 queries are transient and create no durable row"
 
 
 class LiveTopicObserver:
@@ -165,7 +175,7 @@ def _event_text(event):
 
 
 @pytest.mark.description(
-    "When an active Watch receives an incomplete live preview, the preview arrives only on the QoS 0 live topic, a concurrent HTTPS history read returns committed state, the control event topic carries no preview, and the committed message is still delivered once at QoS 1."
+    "When an active Watch receives an incomplete live preview, the Host publishes it directly on the Device QoS 0 live topic without Access republishing and without a whalerein-target stamp, the retired Host live topic stays empty, a concurrent HTTPS history read returns committed state, the control event topic carries no preview, and the committed message is still delivered once at QoS 1."
 )
 def test_ac15_live_preview_only_and_committed_authority(scenario, paired_device, session_id):
     """An incomplete live preview stays on the live class; the committed message supersedes it."""
@@ -177,17 +187,21 @@ def test_ac15_live_preview_only_and_committed_authority(scenario, paired_device,
         baseline = observer.snapshot()
         fixture.control("preview_start", session_id=session_id)
         fixture.control("preview_chunk", session_id=session_id, index=0, text="live-preview")
-        wait(lambda: len(observer.snapshot()["live"]) > len(baseline["live"]), timeout=10)
         wait(lambda: len(observer.snapshot()["device_live"]) > len(baseline["device_live"]), timeout=10)
         during = observer.snapshot()
-        assert len(during["live"]) > len(baseline["live"]), "the preview must arrive on the Host live topic"
+        # `h/{host}/live` is retired: the preview is published directly to the
+        # authorized Device topic and Access never republishes it.
+        assert len(during["live"]) == len(baseline["live"]), "the retired Host live topic must stay empty"
         device_live_topic = f"whalerein/v1/h/{scenario.host}/d/{paired_device.identity['device_id']}/live"
-        republished = during["device_live"][len(baseline["device_live"]):]
-        assert republished, "Access must republish the preview on the Device live topic"
-        assert all(entry["topic"] == device_live_topic for entry in republished), republished
-        assert all(entry["qos"] == 0 for entry in during["live"][len(baseline["live"]):]), during["live"]
-        assert all(entry["qos"] == 0 for entry in republished), republished
+        direct = during["device_live"][len(baseline["device_live"]):]
+        assert direct, "the preview must arrive on the Device live topic"
+        assert all(entry["topic"] == device_live_topic for entry in direct), direct
+        assert all(entry["qos"] == 0 for entry in direct), direct
+        # Access stamps whalerein-target when it delivers a preview itself; a
+        # direct Host publication carries no such reserved property.
+        assert all("whalerein-target" not in entry["properties"] for entry in direct), direct
         assert len(during["event"]) == len(baseline["event"]), "a preview must never appear on the control event topic"
+        assert len(during["device_event"]) == len(baseline["device_event"]), "a preview must never appear on the Device event topic"
         watcher.wait(
             lambda value: _event(value).get("type") == "preview"
             and "live-preview" in _event_text(_event(value)),
@@ -209,8 +223,9 @@ def test_ac15_live_preview_only_and_committed_authority(scenario, paired_device,
         after = observer.snapshot()
         assert len(after["event"]) > len(baseline["event"]), "the committed message must travel on the control event topic"
         assert all(entry["qos"] == 1 for entry in after["event"][len(baseline["event"]):]), after["event"]
-        assert all(entry["qos"] == 0 for entry in after["live"][len(baseline["live"]):]), after["live"]
-        assert len(after["live"]) >= len(during["live"])
+        assert all(entry["qos"] == 0 for entry in after["device_live"][len(baseline["device_live"]):]), after["device_live"]
+        assert len(after["live"]) == len(baseline["live"]), "the retired Host live topic must stay empty"
+        assert len(after["device_live"]) >= len(during["device_live"])
         assert [value for value in watcher.values if _event(value).get("type") == "message"][-1]
     finally:
         watcher.close()

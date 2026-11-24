@@ -35,7 +35,7 @@ function envelope(hostId, requestId, body) {
     result_body: body,
     completed_at_unix_ms: 1,
     protocol_version: 1,
-    relay_version: 4,
+    relay_version: 5,
   })
 }
 
@@ -51,7 +51,7 @@ function packetSize(topic, bodyLength, hostId) {
     result_body: new Uint8Array(bodyLength),
     completed_at_unix_ms: 1,
     protocol_version: 1,
-    relay_version: 4,
+    relay_version: 5,
   }).length
   return publishPacketBytes(topic, size)
 }

@@ -167,7 +167,7 @@ class RelayDirectory:
         purpose="PAYLOAD_PURPOSE_RESULT",
         part_id="",
         expires_at_ms=None,
-        epoch=4,
+        epoch=5,
         owner_node=None,
     ):
         import base64
@@ -205,7 +205,7 @@ class RelayDirectory:
             **(headers or {}),
         }
 
-    def upload(self, token, reservation, ciphertext, epoch=4, headers=None, owner_node=None):
+    def upload(self, token, reservation, ciphertext, epoch=5, headers=None, owner_node=None):
         status, response_headers, payload = relay_http(
             reservation["uploadPath"],
             "PUT",
@@ -221,7 +221,7 @@ class RelayDirectory:
         return status, response_headers, payload
 
     def finish(self, token, object_id, ciphertext, *, digest=None, declared_bytes=None,
-               epoch=4, owner_node=None):
+               epoch=5, owner_node=None):
         import base64
         import hashlib
 
@@ -247,7 +247,7 @@ class RelayDirectory:
             origin=self.origin,
         )
 
-    def fetch(self, token, object_id, epoch=4, owner_node=None):
+    def fetch(self, token, object_id, epoch=5, owner_node=None):
         return relay_http(
             f"/v1/relay/objects/{object_id}",
             "GET",
@@ -260,7 +260,7 @@ class RelayDirectory:
             origin=self.origin,
         )
 
-    def delete(self, token, object_id, epoch=4, owner_node=None):
+    def delete(self, token, object_id, epoch=5, owner_node=None):
         return relay_http(
             f"/v1/relay/objects/{object_id}",
             "DELETE",

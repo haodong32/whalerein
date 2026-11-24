@@ -1,7 +1,7 @@
-// Calculate the exact encoded epoch-4 request budget for fixture identities.
+// Calculate the exact encoded epoch-5 request budget for fixture identities.
 // No message contents, ciphertext or credential material are emitted.
 //
-// Epoch 4 keeps a small complete request inline and uploads a larger one as a
+// Epoch 5 keeps a small complete request inline and uploads a larger one as a
 // packet-sized body_reference. The admission bound is the complete sealed body
 // (the EncryptedFrame), not the plaintext. The reference envelope itself is
 // modeled too so a case can prove it is packet-sized and purpose-bound.

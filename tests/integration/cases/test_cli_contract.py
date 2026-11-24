@@ -1,10 +1,14 @@
 """CLI multi-process, signal and revocation contract acceptance."""
 
+import json
+import os
+import select
 import signal
 import subprocess
 
 import pytest
-from environment import wait
+from environment import ROOT, wait
+from journey_helpers import sql
 
 pytestmark = pytest.mark.chain
 
@@ -164,3 +168,213 @@ def test_revoke_during_session_watch_ends_with_authorization_error(
         assert result.stdout.strip().splitlines()[-1] == "0"
     finally:
         watcher.close()
+
+
+def _durable_requests(scenario, request_id):
+    """Count durable request rows for one lowercase-hex query correlation id."""
+    return int(
+        sql(
+            scenario.schema,
+            f"SELECT count(*) FROM requests WHERE request_id = '{request_id}'",
+        )
+    )
+
+
+class QueryLaneObserver:
+    """Record the four epoch-5 query-lane hops through the real broker."""
+
+    def __init__(self, scenario):
+        self.process = subprocess.Popen(
+            ["node", "tests/integration/drivers/transport/query-lane-observer.mjs"],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "WHALEREIN_MQTT_URL": "mqtt://127.0.0.1:1883",
+                "WHALEREIN_TEST_ACCESS_PASSWORD": scenario.env["WHALEREIN_BROKER_PASSWORD"],
+                "WHALEREIN_OBSERVER_HOST_ID": scenario.host,
+            },
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self.expect({"type": "ready"})
+
+    def _read(self, timeout=15):
+        ready, _, _ = select.select([self.process.stdout], [], [], timeout)
+        assert ready, "query lane observer produced no response"
+        line = self.process.stdout.readline()
+        assert line, "query lane observer produced no line"
+        return json.loads(line)
+
+    def expect(self, expected):
+        value = self._read()
+        assert value == expected, value
+        return value
+
+    def snapshot(self):
+        self.process.stdin.write(json.dumps({"op": "snapshot"}) + "\n")
+        self.process.stdin.flush()
+        value = self._read()
+        assert value.get("type") == "snapshot", value
+        return value
+
+    def close(self):
+        if self.process.poll() is None:
+            try:
+                self.process.stdin.write(json.dumps({"op": "stop"}) + "\n")
+                self.process.stdin.flush()
+                self.process.wait(timeout=10)
+            except (BrokenPipeError, subprocess.TimeoutExpired):
+                self.process.kill()
+                self.process.wait(timeout=5)
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+@pytest.mark.description(
+    "Session list, history and watch run over the MQTT 5 query lane: every Device query is admitted with the fixed reply topic, forwarded to the Host, answered by a Host result, and delivered back as a correlated reply with whalerein-target and Message Expiry, while no durable request row is created."
+)
+def test_cli_session_queries_use_the_mqtt_query_lane(scenario, paired_client, session_id):
+    """A CLI session query traverses query -> request -> result -> reply with exact MQTT 5 properties and no durable row."""
+    observer = QueryLaneObserver(scenario)
+    try:
+        baseline = observer.snapshot()
+        paired_client.call("session", "list", "--host", scenario.host)
+        paired_client.call("session", "history", session_id)
+        wait(
+            lambda: len(observer.snapshot()["request"]) >= len(baseline["request"]) + 2,
+            timeout=25,
+        )
+        # A watch is also a query-lane operation; its periodic CheckVersions
+        # adds another bounded query without a durable request row.
+        watcher = paired_client.watch("session", "watch", session_id, "--timeout", "20")
+        try:
+            watcher.wait(
+                lambda value: value.get("data", {}).get("event", {}).get("type") == "state",
+                timeout=20,
+            )
+            before_checks = len(observer.snapshot()["query"])
+            wait(lambda: len(observer.snapshot()["query"]) > before_checks, timeout=15)
+        finally:
+            watcher.close()
+        final = observer.snapshot()
+    finally:
+        observer.close()
+
+    device_id = paired_client.identity["device_id"]
+    query_topic = f"whalerein/v1/h/{scenario.host}/d/{device_id}/query"
+    reply_topic = f"whalerein/v1/h/{scenario.host}/d/{device_id}/reply"
+    result_topic = f"whalerein/v1/h/{scenario.host}/result"
+
+    replies = final["reply"][len(baseline["reply"]):]
+    # A directed reply is delivered only to its target Device; the Access
+    # observer sees the other three hops and must not consume the Device reply.
+    assert not replies, "a directed reply must not reach a third-party subscriber"
+    # Only deadline-bound query publications carry Message Expiry. A HostReady
+    # or other uncorrelated control result on the same topic is not part of the
+    # query lane asserted here.
+    starts = {lane: len(baseline[lane]) for lane in ("query", "request", "result")}
+    query_ids = {
+        entry["correlation"]
+        for entry in final["request"][starts["request"]:]
+        if entry.get("correlation")
+    }
+    def _correlation(entry):
+        return entry.get("correlation") or entry.get("request_id")
+
+    for lane in ("query", "request"):
+        entries = [
+            entry
+            for entry in final[lane][starts[lane]:]
+            if entry.get("correlation") in query_ids
+        ]
+        assert entries, f"the query lane emitted no correlated {lane} publication"
+        assert all(entry["qos"] == 1 for entry in entries), (lane, entries)
+        assert all(
+            isinstance(entry["expiry_interval"], int) and entry["expiry_interval"] > 0
+            for entry in entries
+        ), (lane, entries)
+    # The result lane carries the Host answer. Correlation/expiry on this hop
+    # are asserted at the Host publish boundary in the host unit suite; here the
+    # observer proves the HostResult for every admitted request reached Access.
+    results_by_request = [
+        entry
+        for entry in final["result"][starts["result"]:]
+        if _correlation(entry) in query_ids
+    ]
+    assert results_by_request, "the query lane emitted no correlated result"
+    assert all(entry["qos"] == 1 for entry in results_by_request), results_by_request
+
+    requests = final["request"][len(baseline["request"]):]
+    assert len(requests) >= 3, requests
+    assert len(results_by_request) >= 3, results_by_request
+    assert any(entry["topic"] == query_topic for entry in final["query"]), final["query"]
+    assert any(entry["response_topic"] == reply_topic for entry in final["query"]), final["query"]
+    assert any(entry["response_topic"] == result_topic for entry in final["request"]), requests
+    # The request topic is shared with non-query control requests; every
+    # correlated query publication still creates no durable row.
+    for correlation in query_ids:
+        assert _durable_requests(scenario, correlation) == 0, (
+            "a query must not create a durable request row"
+        )
+
+
+@pytest.mark.description(
+    "An in-flight command is submitted and heartbeated over the durable HTTPS route: the request row is a COMMAND with a moving client lease, and the command request id never appears on the MQTT query ingress."
+)
+def test_command_submission_and_heartbeat_stay_on_https(scenario, paired_client, session_id):
+    """A hold-open send renews its exact HTTP lease without using the MQTT query lane."""
+    fixture = scenario.dsh.process
+    observer = QueryLaneObserver(scenario)
+    try:
+        fixture.control("hold_next_send_turn", session_id=session_id)
+        sender = paired_client.watch(
+            "session", "send", session_id, "https command fixture", "--timeout", "30"
+        )
+        try:
+            def row():
+                raw = sql(
+                    scenario.schema,
+                    "SELECT coalesce((SELECT request_id || '|' || kind::text || '|' "
+                    "|| status || '|' || relay_version::text || '|' "
+                    "|| coalesce(extract(epoch from client_lease_until)::text, '') "
+                    "FROM requests WHERE command_id <> '' "
+                    "ORDER BY created_at DESC LIMIT 1), 'absent')",
+                )
+                if not raw or raw == "absent":
+                    return None
+                request_id, kind, status, relay_version, lease = raw.split("|")
+                return {
+                    "request_id": request_id,
+                    "kind": int(kind),
+                    "status": status,
+                    "relay_version": int(relay_version),
+                    "lease": float(lease) if lease else None,
+                }
+
+            wait(lambda: row() is not None, timeout=20)
+            admitted = row()
+            assert admitted["kind"] == 3, admitted
+            assert admitted["relay_version"] == 5, admitted
+            first_lease = admitted["lease"]
+            assert first_lease is not None
+            wait(lambda: (row() or {}).get("lease", 0) > first_lease, timeout=15)
+        finally:
+            fixture.control("finish_send_turn", session_id=session_id)
+            assert sender.wait_exit(timeout=15) == 0
+            sender.close()
+
+        during = observer.snapshot()
+        command_queries = [
+            entry for entry in during["query"] if entry["correlation"] == admitted["request_id"]
+        ]
+        assert not command_queries, "the command request id must never use the MQTT query ingress"
+    finally:
+        observer.close()
+
+    wait(lambda: (row() or {}).get("status") == "succeeded", timeout=15)
+    completed = row()
+    assert completed["status"] == "succeeded", completed
