@@ -429,7 +429,10 @@ func writePairedDevice(ctx context.Context, tx pgx.Tx, hostID, deviceID, publicK
 		ON CONFLICT (device_id) DO UPDATE
 		SET public_key_fingerprint = EXCLUDED.public_key_fingerprint,
 		    updated_at = EXCLUDED.updated_at
-        WHERE devices.public_key_fingerprint = EXCLUDED.public_key_fingerprint`,
+        WHERE devices.public_key_fingerprint = EXCLUDED.public_key_fingerprint
+           OR NOT EXISTS (
+               SELECT 1 FROM grants g
+               WHERE g.device_id = EXCLUDED.device_id AND g.revoked_at IS NULL)`,
 		deviceID, publicKeyFingerprint, at); err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("register device: %w", ErrConflict)
