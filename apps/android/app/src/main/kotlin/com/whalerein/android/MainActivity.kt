@@ -28,6 +28,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Debug builds defer the production graph so the Gallery can cold start
+        // without Core. The graph must exist before platform services attach or
+        // an App Link is dispatched.
+        val container = (application as WhaleReinApplication).ensureGraph()
         platform = ActivityPlatform(this, container.diagnostics.sink)
         container.platform.attach(platform)
         container.appLinks.dispatch(intent)
