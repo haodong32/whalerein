@@ -986,6 +986,8 @@ static void handle_remove(struct request *request, char *body, size_t body_len)
 	char kick[16];
 	struct wclient *client;
 	uint64_t conn_id = 0;
+	uint64_t fence_conn = 0;
+	bool have_conn;
 
 	if (!line_value(request, "client", client_id, sizeof(client_id))) {
 		set_reply_error(body, body_len, "invalid_argument", "missing client");
@@ -994,11 +996,17 @@ static void handle_remove(struct request *request, char *body, size_t body_len)
 	if (!line_value(request, "kick", kick, sizeof(kick))) {
 		kick[0] = '\0';
 	}
+	{
+		char conn_value[64];
+
+		have_conn = line_value(request, "conn", conn_value, sizeof(conn_value)) &&
+			    line_uint(request, "conn", &fence_conn, true);
+	}
 	pthread_mutex_lock(&lock);
 	client = client_find_locked(client_id);
-	if (!client) {
+	if (!client || (have_conn && client->conn_id != fence_conn)) {
 		pthread_mutex_unlock(&lock);
-		snprintf(body, body_len, "ok\nseq %llu\n", (unsigned long long)next_seq);
+		snprintf(body, body_len, "ok\nabsent 1\nseq %llu\n", (unsigned long long)next_seq);
 		return;
 	}
 	conn_id = client->conn_id;
@@ -1022,7 +1030,9 @@ static void handle_deny(struct request *request, char *body, size_t body_len)
 	uint64_t generation = 0;
 	uint64_t order = 0;
 	uint64_t matched = 0;
+	uint64_t fence_conn = 0;
 	bool have_host;
+	bool have_conn;
 	struct fence *fence;
 	struct wclient *client;
 	char kick_ids[16][128];
@@ -1035,6 +1045,12 @@ static void handle_deny(struct request *request, char *body, size_t body_len)
 		return;
 	}
 	have_host = line_value(request, "host", host_id, sizeof(host_id));
+	{
+		char conn_value[64];
+
+		have_conn = line_value(request, "conn", conn_value, sizeof(conn_value)) &&
+			    line_uint(request, "conn", &fence_conn, true);
+	}
 	if (!line_value(request, "kick", kick, sizeof(kick))) {
 		kick[0] = '\0';
 	}
@@ -1068,6 +1084,9 @@ static void handle_deny(struct request *request, char *body, size_t body_len)
 		bool scope_match = false;
 
 		if (!client->device_id || strcmp(client->device_id, device_id) != 0) {
+			continue;
+		}
+		if (have_conn && client->conn_id != fence_conn) {
 			continue;
 		}
 		for (i = 0; i < client->acl_count; i++) {
@@ -1144,10 +1163,29 @@ static void handle_kick(struct request *request, char *body, size_t body_len)
 {
 	char client_id[MAX_LINE];
 	char username[MAX_LINE];
+	uint64_t fence_conn = 0;
+	bool have_conn;
+	bool absent = false;
 	int rc = MOSQ_ERR_NOT_FOUND;
 
 	if (line_value(request, "client", client_id, sizeof(client_id))) {
-		rc = mosquitto_kick_client_by_clientid(client_id, false);
+		{
+			char conn_value[64];
+
+			have_conn = line_value(request, "conn", conn_value, sizeof(conn_value)) &&
+				    line_uint(request, "conn", &fence_conn, true);
+		}
+		if (have_conn) {
+			struct wclient *client;
+
+			pthread_mutex_lock(&lock);
+			client = client_find_locked(client_id);
+			absent = !client || client->conn_id != fence_conn;
+			pthread_mutex_unlock(&lock);
+		}
+		if (!absent) {
+			rc = mosquitto_kick_client_by_clientid(client_id, false);
+		}
 	} else if (line_value(request, "username", username, sizeof(username))) {
 		rc = mosquitto_kick_client_by_username(username, false);
 	} else {
@@ -1849,12 +1887,12 @@ static int basic_auth_callback(int event, void *event_data, void *userdata)
 			{ACL_WRITE, "whalerein/v1/h/+/request"},
 			{ACL_WRITE, "whalerein/v1/h/+/d/+/event"},
 			{ACL_WRITE, "whalerein/v1/h/+/d/+/notice"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/live"},
+			{ACL_WRITE, "whalerein/v1/h/+/d/+/reply"},
 			{ACL_WRITE, "whalerein/v1/h/+/presence"},
 			{ACL_WRITE, "$CONTROL/whalerein/v1"},
 			{ACL_READ, "whalerein/v1/h/+/result"},
 			{ACL_READ, "whalerein/v1/h/+/event"},
-			{ACL_READ, "whalerein/v1/h/+/live"},
+			{ACL_READ, "whalerein/v1/h/+/d/+/query"},
 			{ACL_READ, "whalerein/v1/h/+/d/+/ready"},
 			{ACL_READ, "whalerein/v1/presence/device/+"},
 			{ACL_READ, "whalerein/v1/control/reply"},
@@ -2156,12 +2194,12 @@ static int acl_check_callback(int event, void *event_data, void *userdata)
 			{ACL_WRITE, "whalerein/v1/h/+/request"},
 			{ACL_WRITE, "whalerein/v1/h/+/d/+/event"},
 			{ACL_WRITE, "whalerein/v1/h/+/d/+/notice"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/live"},
+			{ACL_WRITE, "whalerein/v1/h/+/d/+/reply"},
 			{ACL_WRITE, "whalerein/v1/h/+/presence"},
 			{ACL_WRITE, "$CONTROL/whalerein/v1"},
 			{ACL_READ, "whalerein/v1/h/+/result"},
 			{ACL_READ, "whalerein/v1/h/+/event"},
-			{ACL_READ, "whalerein/v1/h/+/live"},
+			{ACL_READ, "whalerein/v1/h/+/d/+/query"},
 			{ACL_READ, "whalerein/v1/h/+/d/+/ready"},
 			{ACL_READ, "whalerein/v1/presence/device/+"},
 			{ACL_READ, "whalerein/v1/control/reply"},

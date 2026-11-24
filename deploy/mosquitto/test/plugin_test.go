@@ -1270,3 +1270,139 @@ func TestNativeBrokerEpochChangesAcrossRestart(t *testing.T) {
 		t.Fatalf("broker epoch did not change across restart: %q then %q", first, second)
 	}
 }
+
+// nextConnectionIdentity returns the Broker reference and numeric connection
+// id from the ordered lifecycle event for one accepted connection.
+func nextConnectionIdentity(t *testing.T, control *client, clientID string) (string, string) {
+	t.Helper()
+	event := nextEventContaining(t, control, "event connected", clientID)
+	ref := ""
+	conn := ""
+	for _, line := range strings.Split(string(event), "\n") {
+		switch {
+		case strings.HasPrefix(line, "ref "):
+			ref = strings.TrimPrefix(line, "ref ")
+		case strings.HasPrefix(line, "conn "):
+			conn = strings.TrimPrefix(line, "conn ")
+		}
+	}
+	if ref == "" || conn == "" {
+		t.Fatalf("connect event lacks connection identity: %s", event)
+	}
+	return ref, conn
+}
+
+func TestNativeBrokerSameIDReplacementIsolation(t *testing.T) {
+	if _, err := exec.LookPath("cc"); err != nil {
+		t.Skip("C compiler not available")
+	}
+	policy := newAuthPolicy()
+	auth := httptest.NewServer(policy)
+	t.Cleanup(auth.Close)
+	policy.set("device:dev1", `whalerein/1
+ok
+kind device
+device dev1
+revision 6
+ready 1
+acl write 6 host1 whalerein/v1/h/host1/d/dev1/query
+acl subscribe 6 host1 whalerein/v1/h/host1/d/dev1/reply
+acl read 6 host1 whalerein/v1/h/host1/d/dev1/reply
+acl write 6 host1 whalerein/v1/h/host1/d/dev1/ready
+`)
+
+	port := freePort(t)
+	b := startBroker(t, port, auth.URL+"/internal/broker/connect", 30*time.Second)
+	control := controlClient(t, b)
+
+	first, _, err := dial(t, b.address, "whalerein-device-dev1", "device:dev1", "device-token")
+	if err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+	if err := first.subscribe(t, "whalerein/v1/h/host1/d/dev1/reply"); err != nil {
+		t.Fatalf("first subscribe: %v", err)
+	}
+	firstRef, firstConn := nextConnectionIdentity(t, control, "whalerein-device-dev1")
+
+	// A replacement after a fresh grant carries a higher generation.
+	policy.set("device:dev1", `whalerein/1
+ok
+kind device
+device dev1
+revision 7
+ready 1
+acl write 7 host1 whalerein/v1/h/host1/d/dev1/query
+acl subscribe 7 host1 whalerein/v1/h/host1/d/dev1/reply
+acl read 7 host1 whalerein/v1/h/host1/d/dev1/reply
+acl write 7 host1 whalerein/v1/h/host1/d/dev1/ready
+`)
+	second, _, err := dial(t, b.address, "whalerein-device-dev1", "device:dev1", "device-token")
+	if err != nil {
+		t.Fatalf("replacement connect: %v", err)
+	}
+	defer second.close()
+	if err := second.subscribe(t, "whalerein/v1/h/host1/d/dev1/reply"); err != nil {
+		t.Fatalf("replacement subscribe: %v", err)
+	}
+	secondRef, _ := nextConnectionIdentity(t, control, "whalerein-device-dev1")
+	if firstRef == secondRef {
+		t.Fatalf("replacement reused connection reference %q", firstRef)
+	}
+
+	t.Run("stale_target_cannot_deliver_to_the_replacement", func(t *testing.T) {
+		properties := expiry(30)
+		properties.User.Add("whalerein-target", firstRef)
+		if err := control.publishWith(t, "whalerein/v1/h/host1/d/dev1/reply", 1, properties, []byte("stale")); err != nil {
+			t.Fatalf("publish stale target: %v", err)
+		}
+		second.expectNoMessage(t, "whalerein/v1/h/host1/d/dev1/reply", 300*time.Millisecond)
+
+		properties = expiry(30)
+		properties.User.Add("whalerein-target", secondRef)
+		if err := control.publishWith(t, "whalerein/v1/h/host1/d/dev1/reply", 1, properties, []byte("current")); err != nil {
+			t.Fatalf("publish current target: %v", err)
+		}
+		if got := string(second.next(t, "whalerein/v1/h/host1/d/dev1/reply")); got != "current" {
+			t.Fatalf("delivered %q", got)
+		}
+	})
+
+	t.Run("stale_kick_cannot_close_the_replacement", func(t *testing.T) {
+		fields := sendControl(t, control, "kick-stale", "kick",
+			"client whalerein-device-dev1\nconn "+firstConn+"\n")
+		if fields["absent"] != "1" {
+			t.Fatalf("stale kick was not reported absent: %v", fields)
+		}
+		if err := second.publish(t, "whalerein/v1/h/host1/d/dev1/ready", []byte("alive")); err != nil {
+			t.Fatalf("replacement was closed by a stale kick: %v", err)
+		}
+	})
+
+	t.Run("stale_deny_scope_cannot_revoke_the_replacement", func(t *testing.T) {
+		fields := sendControl(t, control, "deny-stale", "deny",
+			"device dev1\ngeneration 6\nhost host1\nconn "+firstConn+"\nkick 1\n")
+		if fields["matched"] != "0" {
+			t.Fatalf("stale connection-scoped deny matched %q", fields["matched"])
+		}
+		if err := second.publish(t, "whalerein/v1/h/host1/d/dev1/ready", []byte("still-authorized")); err != nil {
+			t.Fatalf("replacement lost authority from a stale deny: %v", err)
+		}
+	})
+
+	t.Run("revocation_fences_final_delivery_without_kicking", func(t *testing.T) {
+		fields := sendControl(t, control, "deny-current", "deny",
+			"device dev1\ngeneration 7\nhost host1\nkick 0\n")
+		if fields["matched"] != "1" {
+			t.Fatalf("current deny matched %q", fields["matched"])
+		}
+		properties := expiry(30)
+		properties.User.Add("whalerein-target", secondRef)
+		if err := control.publishWith(t, "whalerein/v1/h/host1/d/dev1/reply", 1, properties, []byte("after-revoke")); err != nil {
+			t.Fatalf("publish after revoke: %v", err)
+		}
+		second.expectNoMessage(t, "whalerein/v1/h/host1/d/dev1/reply", 300*time.Millisecond)
+		if err := second.publish(t, "whalerein/v1/h/host1/d/dev1/ready", []byte("after-revoke")); err == nil {
+			t.Fatal("revoked connection still publishes")
+		}
+	})
+}
