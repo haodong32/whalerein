@@ -98,6 +98,8 @@ func TestOperationAdmittedPastTheDeadlineIsFencedWithoutMutation(t *testing.T) {
 	}
 }
 
+// A replacement admitted before its authorization deadline may still commit
+// after expiry and replay without returning the one-time secret.
 func TestReplacementAdmittedBeforeDeadlineCommitsAfterExpiryAndReplaysWithoutASecret(t *testing.T) {
 	s, _ := storetest.New(t)
 	ctx := context.Background()
