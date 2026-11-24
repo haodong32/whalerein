@@ -124,6 +124,10 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	if m.sessionPolicy != nil && snapshot.Fields["session_capability"] != "1" {
 		return errors.New("line: broker does not support managed device sessions")
 	}
+	if snapshot.Epoch == "" {
+		return errors.New("line: broker does not report a process epoch")
+	}
+	m.presence.SetBrokerEpoch(snapshot.Epoch)
 	m.presence.ApplySnapshot(snapshot.Clients, snapshot.Sequence)
 
 	/* Only live broker connections need a policy projection. Historical or

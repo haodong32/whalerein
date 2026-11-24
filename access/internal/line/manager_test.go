@@ -112,6 +112,9 @@ func newTestControl(t *testing.T, respond func(request recordedRequest) (extra s
 		if err != nil {
 			return err
 		}
+		if request.op == "snapshot" && !strings.Contains(extra, "epoch ") {
+			extra = "epoch test-broker-epoch\n" + extra
+		}
 		reply := "whalerein/1\nid " + id + "\nok\n" + extra
 		control.HandleMessage(broker.ControlReplyFilter, []byte(reply))
 		return nil

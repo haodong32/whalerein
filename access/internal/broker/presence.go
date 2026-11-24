@@ -63,10 +63,13 @@ type presenceEntry struct {
 // broker connection notifications, a broker snapshot, the device last will or
 // a Host Ready signal. It never queries a database heartbeat.
 type Presence struct {
-	mu                   sync.RWMutex
-	hosts                map[string]presenceEntry
-	devices              map[string]presenceEntry
-	connections          map[string]map[ConnectionRef]struct{}
+	mu          sync.RWMutex
+	hosts       map[string]presenceEntry
+	devices     map[string]presenceEntry
+	connections map[string]map[ConnectionRef]struct{}
+	// epoch is the broker-process epoch the current snapshot belongs to. A
+	// changed epoch invalidates every tracked connection reference.
+	epoch                string
 	cacheTTL             time.Duration
 	available            bool
 	lastSeq              uint64
@@ -457,6 +460,15 @@ func (p *Presence) noteConnectionLocked(deviceID string, ref ConnectionRef, onli
 
 // HandleNotification applies one ordered broker connection notification.
 func (p *Presence) HandleNotification(notification *Notification) {
+	if notification == nil {
+		return
+	}
+	p.mu.Lock()
+	epoch := p.epoch
+	p.mu.Unlock()
+	if epoch != "" && notification.Epoch != "" && notification.Epoch != epoch {
+		return
+	}
 	if notification == nil || notification.Sequence == 0 {
 		return
 	}
@@ -511,6 +523,24 @@ func (p *Presence) HandleNotification(notification *Notification) {
 	}
 	p.mu.Unlock()
 	p.publishCounts()
+}
+
+// SetBrokerEpoch records the broker-process epoch of the current snapshot.
+// A change invalidates every tracked connection reference, so delayed events
+// from the previous process cannot affect the rebuilt presence. It returns
+// true when the epoch changed.
+func (p *Presence) SetBrokerEpoch(epoch string) bool {
+	if epoch == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.epoch == epoch {
+		return false
+	}
+	p.epoch = epoch
+	p.connections = make(map[string]map[ConnectionRef]struct{}, len(p.devices))
+	return true
 }
 
 // ApplySnapshot replaces presence with the broker's current connection set at
