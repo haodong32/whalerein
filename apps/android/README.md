@@ -124,6 +124,38 @@ effective page size and emulator flag when `adb` exposes them. The
 `android-bridge-jvm` target accepts `--only` and `--json`; it does not support
 `--list`, because Gradle has no body-free discovery mode for that suite.
 
+## Debug state gallery
+
+Debug builds have a second launcher entry, **WhaleRein State Gallery**. It lists
+deterministic scenarios that render the production Compose screens with
+in-memory fakes, so a scenario opens without sign-in, pairing, a Host, or the
+native Core graph. The catalog lives in `app/src/debug` and is the same list the
+`StateGalleryTest` instrumentation cases open.
+
+| Scenario ID | What it shows |
+|---|---|
+| `sessions.empty` | Empty session list, refresh and create-session entry |
+| `sessions.populated` | Selecting a session plus narrow back and wide list-detail |
+| `conversation.streaming` | Incremental output, final replacement and scroll position |
+| `conversation.approval` | Pending indicator and approval sheet with decision feedback |
+| `conversation.question` | Question options, open answer, submission and feedback |
+
+Each row starts a fresh `ScenarioActivity`, so leaving the scenario disposes its
+back stack, view models and observation subscriptions; opening it again builds
+new fixtures. Debug builds defer the production graph to the first production
+caller (`MainActivity`), while Release builds open it in
+`WhaleReinApplication.onCreate()` as before.
+
+Targeted instrumentation (a device is required):
+
+```bash
+./repo test android-ui --only StateGallery
+```
+
+Release artifacts must not contain the gallery Activity, its launcher entry,
+the scenario catalog or the fake dependencies. Verify the merged manifests and
+compiled classes for both product flavors before publishing a build.
+
 ## CI
 
 Ordinary push CI runs only JDK-only `android-state` static checks and tests. It
