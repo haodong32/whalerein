@@ -82,8 +82,19 @@ func (s *Store) SetHostAuthorizationKey(ctx context.Context, hostID string, publ
 // A missing host or a host that has not registered a key returns ErrNotFound.
 func (s *Store) HostAuthorizationKey(ctx context.Context, hostID string) ([]byte, error) {
 	var key []byte
+	// A removed or disabled enrollment must not keep acting through the legacy
+	// Host signature key. Standalone hosts have no external enrollment row.
 	err := s.db.QueryRow(ctx, `
-		SELECT authorization_public_key FROM hosts WHERE host_id = $1`, hostID).Scan(&key)
+		SELECT h.authorization_public_key FROM hosts h
+		WHERE h.host_id = $1
+		  AND (
+			NOT EXISTS (SELECT 1 FROM external_enrollments e WHERE e.host_id = h.host_id)
+			OR EXISTS (
+				SELECT 1 FROM external_enrollments e
+				WHERE e.host_id = h.host_id
+				  AND e.disabled_at IS NULL
+				  AND e.state <> 'enrollment_disabled')
+		  )`, hostID).Scan(&key)
 	if err != nil {
 		if errors.Is(wrapRequestScan(err), ErrNotFound) {
 			return nil, ErrNotFound
@@ -241,7 +252,7 @@ func (s *Store) CreatePairedDevice(ctx context.Context, hostID, deviceID, public
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := writePairedDevice(ctx, tx, hostID, deviceID, publicKeyFingerprint, authHash, at); err != nil {
+	if err := writePairedDevice(ctx, tx, hostID, deviceID, publicKeyFingerprint, authHash, 0, at); err != nil {
 		return err
 	}
 
@@ -411,14 +422,17 @@ func (s *Store) CountActiveGrants(ctx context.Context, deviceID string) (int, er
 }
 
 // writePairedDevice never rebinds an existing device ID to another public key.
-func writePairedDevice(ctx context.Context, tx pgx.Tx, hostID, deviceID, publicKeyFingerprint string, authHash []byte, at time.Time) error {
+func writePairedDevice(ctx context.Context, tx pgx.Tx, hostID, deviceID, publicKeyFingerprint string, authHash []byte, enrollmentGeneration int64, at time.Time) error {
 	if command, err := tx.Exec(ctx, `
 		INSERT INTO devices (device_id, public_key_fingerprint, created_at, updated_at)
         VALUES ($1, $2, $3, $3)
 		ON CONFLICT (device_id) DO UPDATE
 		SET public_key_fingerprint = EXCLUDED.public_key_fingerprint,
 		    updated_at = EXCLUDED.updated_at
-        WHERE devices.public_key_fingerprint = EXCLUDED.public_key_fingerprint`,
+        WHERE devices.public_key_fingerprint = EXCLUDED.public_key_fingerprint
+           OR NOT EXISTS (
+               SELECT 1 FROM grants g
+               WHERE g.device_id = EXCLUDED.device_id AND g.revoked_at IS NULL)`,
 		deviceID, publicKeyFingerprint, at); err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("register device: %w", ErrConflict)
@@ -442,11 +456,13 @@ func writePairedDevice(ctx context.Context, tx pgx.Tx, hostID, deviceID, publicK
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO grants (host_id, device_id, created_at, updated_at, revoked_at, replayed_at, grant_generation)
-		VALUES ($1, $2, $3, $3, NULL, NULL, 1)
+		INSERT INTO grants (host_id, device_id, created_at, updated_at, revoked_at, replayed_at, grant_generation, enrollment_generation)
+		VALUES ($1, $2, $3, $3, NULL, NULL, 1, $4)
 		ON CONFLICT (host_id, device_id) DO UPDATE
-		SET updated_at = EXCLUDED.updated_at, revoked_at = NULL, replayed_at = NULL, grant_generation = grants.grant_generation + 1`,
-		hostID, deviceID, at); err != nil {
+		SET updated_at = EXCLUDED.updated_at, revoked_at = NULL, replayed_at = NULL,
+		    grant_generation = grants.grant_generation + 1,
+		    enrollment_generation = EXCLUDED.enrollment_generation`,
+		hostID, deviceID, at, enrollmentGeneration); err != nil {
 		return fmt.Errorf("create grant: %w", err)
 	}
 
@@ -539,7 +555,11 @@ func commitPairing(ctx context.Context, begin func(context.Context) (pgx.Tx, err
 	if command.RowsAffected() != 1 {
 		return false, nil
 	}
-	if err := writePairedDevice(ctx, tx, hostID, deviceID, fingerprint, authHash, at); err != nil {
+	enrollmentGeneration := int64(0)
+	if cloud {
+		enrollmentGeneration = revisionGeneration(operation.CloudEnrollmentRevision)
+	}
+	if err := writePairedDevice(ctx, tx, hostID, deviceID, fingerprint, authHash, enrollmentGeneration, at); err != nil {
 		return false, err
 	}
 	var committedBody []byte

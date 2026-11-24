@@ -78,7 +78,7 @@ LEAVES = {
     ),
     "native-dsh": Leaf(
         (
-            "client_cutover",
+            "native_client_recovery",
             "global_pair_commit_race",
             "global_pending_pairing_revoke",
             "gx03_stress",

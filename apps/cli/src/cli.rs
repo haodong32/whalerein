@@ -695,6 +695,8 @@ enum DeviceArgs {
         #[arg(long)]
         local_only: bool,
     },
+    /// Rotate this client's key while preserving its client id.
+    Rotate,
 }
 
 impl DeviceArgs {
@@ -702,6 +704,7 @@ impl DeviceArgs {
         match self {
             Self::Revoke { host } => (Command::Revoke, host),
             Self::Forget { local_only } => (Command::Forget { local_only }, None),
+            Self::Rotate => (Command::RotateDevice, None),
         }
     }
 }
@@ -916,6 +919,10 @@ pub enum Command {
         local_only: bool,
     },
 
+    /// Rotate this client's key while preserving its client id. Every Host
+    /// grant is revoked and every Host must be re-paired.
+    RotateDevice,
+
     /// Show the paired Access address and local unfinished command counts.
     Doctor {
         /// Remove the last failure's local diagnostic metadata.
@@ -1091,6 +1098,7 @@ impl Command {
             Self::Queue { .. } => "session.queue",
             Self::Revoke => "device.revoke",
             Self::Forget { .. } => "device.forget",
+            Self::RotateDevice => "device.rotate",
             Self::Doctor { .. } => "doctor",
         }
     }

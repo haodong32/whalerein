@@ -54,11 +54,12 @@ user-initiated connect or resume, and once after a definitive broker
 authentication refusal. Only an active removal is polled to completion
 (`removalPollMs`); a healthy connected profile has no background removal poll.
 A terminal removal stops the transport, drops the transport credential and
-projects `removed`; reconnecting from that state starts a fresh browser
-approval for the same Host identity. Cloud allocates the next enrollment
-revision and resets that workspace's removal intent on approval, so the old
-grant is never revived. A rejected removal leaves the live binding and
-credential intact. `snapshot().action` projects the runtime-selected next
+projects `removed`. The Host id is the DSH profile id and never changes.
+Reconnecting starts a fresh browser approval for the next enrollment
+generation; Access re-enables the same Host id only for a strictly higher
+revision with identical workspace and keys. Old credentials, grants and
+revocation fences remain fenced to their generation, so the old grant is never
+revived. A rejected removal leaves the live binding and credential intact. `snapshot().action` projects the runtime-selected next
 action; settings refresh never starts or changes a connection and never
 performs the removal read.
 

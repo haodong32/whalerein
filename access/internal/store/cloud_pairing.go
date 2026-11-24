@@ -49,7 +49,9 @@ func verifyCloudPairing(ctx context.Context, tx pgx.Tx, op *PairingOperation, ho
 	eligibility := `
 		SELECT EXISTS(SELECT 1 FROM external_enrollments
 			WHERE host_id=$1 AND workspace_id=$3 AND enrollment_revision=$4 AND state='enrollment_ready' AND disabled_at IS NULL)
-		AND NOT EXISTS(SELECT 1 FROM external_device_revocations WHERE host_id=$1 AND device_id=$2)`
+		AND NOT EXISTS(SELECT 1 FROM external_device_revocations r
+			WHERE r.host_id=$1 AND r.device_id=$2
+			  AND r.generation=(SELECT generation FROM external_enrollments WHERE host_id=$1))`
 	if op.CloudSessionID == "" {
 		eligibility += ` AND NOT EXISTS(SELECT 1 FROM grants WHERE host_id=$1 AND device_id=$2)`
 	} else {
@@ -101,6 +103,7 @@ func (s *Store) CloudDeviceGrantStatus(ctx context.Context, workspaceID, hostID,
 		FROM external_enrollments e
 		LEFT JOIN grants g ON g.host_id=e.host_id AND g.device_id=$3
 		LEFT JOIN external_device_revocations r ON r.host_id=e.host_id AND r.device_id=$3
+			AND r.generation=e.generation
 		WHERE e.workspace_id=$1 AND e.host_id=$2`, workspaceID, hostID, deviceID).Scan(&status)
 	if err != nil {
 		return "", wrapRequestScan(err)
@@ -171,8 +174,9 @@ func (s *Store) BeginCloudDeviceRevocation(ctx context.Context, workspaceID, hos
 	if err != nil {
 		return false, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO external_device_revocations(host_id,device_id,revoked_at) VALUES($1,$2,$3)
-		ON CONFLICT(host_id,device_id) DO NOTHING`, hostID, deviceID, now)
+	_, err = tx.Exec(ctx, `INSERT INTO external_device_revocations(host_id,device_id,generation,revoked_at)
+		SELECT $1,$2,generation,$3 FROM external_enrollments WHERE host_id=$1
+		ON CONFLICT(host_id,device_id,generation) DO NOTHING`, hostID, deviceID, now)
 	if err != nil {
 		return false, fmt.Errorf("record Device revocation: %w", err)
 	}

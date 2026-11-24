@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -77,6 +78,7 @@ type ExternalEnrollment struct {
 	HostID                       string
 	WorkspaceID                  string
 	EnrollmentRevision           string
+	Generation                   int64
 	HostSigningPublicKey         []byte
 	HostNoisePublicKey           []byte
 	OperationID                  string
@@ -131,6 +133,7 @@ type removalRow struct {
 	WorkspaceID           string
 	EnrollmentOperationID string
 	EnrollmentRevision    string
+	Generation            int64
 	DisabledAt            time.Time
 	EnforcedAt            *time.Time
 	Revocations           map[string]uint64
@@ -174,6 +177,11 @@ func (s *Store) EnrollHost(
 		if loadErr != nil {
 			return ExternalEnrollment{}, "", false, loadErr
 		}
+		if existing.OperationID != admitted.OperationID {
+			// A replay of an old generation's authorization must never return
+			// the current generation's status or credential.
+			return ExternalEnrollment{}, "", false, ErrOperationConflict
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return ExternalEnrollment{}, "", false, fmt.Errorf("commit: %w", err)
 		}
@@ -207,18 +215,38 @@ func (s *Store) EnrollHost(
 	// refusal journal row can still commit.
 	err = scanEnrollment(tx.QueryRow(ctx, `
 		INSERT INTO external_enrollments
-			(host_id, workspace_id, enrollment_revision, host_signing_public_key,
+			(host_id, workspace_id, enrollment_revision, generation, host_signing_public_key,
 			 host_noise_public_key, broker_credential_hash, operation_id, state,
 			 current_credential_operation_id, credential_generation)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'enrollment_pending', $7, 1)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'enrollment_pending', $8, 1)
 		ON CONFLICT (host_id) DO NOTHING
 		RETURNING `+enrollmentColumns,
 		enrollment.HostID, admitted.WorkspaceID, admitted.EnrollmentRevision,
-		enrollment.HostSigningPublicKey, enrollment.HostNoisePublicKey,
+		revisionGeneration(admitted.EnrollmentRevision), enrollment.HostSigningPublicKey, enrollment.HostNoisePublicKey,
 		hashCredential(credential), admitted.OperationID), &recorded)
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, loadErr := loadEnrollment(ctx, tx, enrollment.HostID)
-		if loadErr == nil && (existing.DisabledAt != nil || existing.State == "enrollment_disabled") {
+		if loadErr != nil {
+			return ExternalEnrollment{}, "", false, loadErr
+		}
+		if existing.DisabledAt == nil && existing.State != "enrollment_disabled" {
+			if err := markOperationOutcome(ctx, tx, admitted.OperationID, OperationRefused, "duplicate_host"); err != nil {
+				return ExternalEnrollment{}, "", false, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return ExternalEnrollment{}, "", false, fmt.Errorf("commit refusal: %w", err)
+			}
+			return ExternalEnrollment{}, "", false, ErrDuplicateHost
+		}
+		// A removed enrollment is terminal for its generation, not for the
+		// Host identity. A fresh Cloud authorization with a strictly higher
+		// revision starts the next generation and re-enables the same Host id.
+		// The workspace and both Host keys must be identical: a different key
+		// for a leaked host id is a takeover, not a re-enable.
+		if existing.WorkspaceID != admitted.WorkspaceID ||
+			!bytes.Equal(existing.HostSigningPublicKey, enrollment.HostSigningPublicKey) ||
+			!bytes.Equal(existing.HostNoisePublicKey, enrollment.HostNoisePublicKey) ||
+			!higherRevision(admitted.EnrollmentRevision, existing.EnrollmentRevision) {
 			if err := markOperationOutcome(ctx, tx, admitted.OperationID, OperationRefused, "enrollment_disabled"); err != nil {
 				return ExternalEnrollment{}, "", false, err
 			}
@@ -227,13 +255,26 @@ func (s *Store) EnrollHost(
 			}
 			return ExternalEnrollment{}, "", false, ErrEnrollmentDisabled
 		}
-		if err := markOperationOutcome(ctx, tx, admitted.OperationID, OperationRefused, "duplicate_host"); err != nil {
-			return ExternalEnrollment{}, "", false, err
+		err = scanEnrollment(tx.QueryRow(ctx, `
+			UPDATE external_enrollments
+			SET enrollment_revision = $2,
+			    generation = $3,
+			    host_signing_public_key = $4,
+			    host_noise_public_key = $5,
+			    broker_credential_hash = $6,
+			    operation_id = $7,
+			    state = 'enrollment_pending',
+			    disabled_at = NULL,
+			    current_credential_operation_id = $7,
+			    credential_generation = credential_generation + 1
+			WHERE host_id = $1
+			RETURNING `+enrollmentColumns,
+			enrollment.HostID, admitted.EnrollmentRevision, revisionGeneration(admitted.EnrollmentRevision),
+			enrollment.HostSigningPublicKey, enrollment.HostNoisePublicKey,
+			hashCredential(credential), admitted.OperationID), &recorded)
+		if err != nil {
+			return ExternalEnrollment{}, "", false, fmt.Errorf("re-enable enrollment: %w", err)
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return ExternalEnrollment{}, "", false, fmt.Errorf("commit refusal: %w", err)
-		}
-		return ExternalEnrollment{}, "", false, ErrDuplicateHost
 	}
 	if err != nil {
 		return ExternalEnrollment{}, "", false, fmt.Errorf("record enrollment: %w", err)
@@ -344,8 +385,30 @@ func (s *Store) Enrollment(ctx context.Context, hostID string) (ExternalEnrollme
 	if err != nil {
 		return ExternalEnrollment{}, err
 	}
+	if removal != nil && removal.Generation != enrollment.Generation {
+		// The removal belongs to an earlier generation. It remains durable
+		// history and must not disable the current enrollment.
+		removal = nil
+	}
 	applyRemoval(&enrollment, removal)
 	return enrollment, nil
+}
+
+func higherRevision(candidate, current string) bool {
+	candidateValue, candidateErr := strconv.ParseUint(candidate, 10, 64)
+	currentValue, currentErr := strconv.ParseUint(current, 10, 64)
+	if candidateErr != nil || currentErr != nil {
+		return false
+	}
+	return candidateValue > currentValue
+}
+
+func revisionGeneration(revision string) int64 {
+	value, err := strconv.ParseInt(revision, 10, 64)
+	if err != nil || value < 1 {
+		return 1
+	}
+	return value
 }
 
 const enrollmentColumns = `host_id, workspace_id, enrollment_revision, host_signing_public_key,
@@ -362,11 +425,15 @@ type querier interface {
 }
 
 func scanEnrollment(row rowScanner, enrollment *ExternalEnrollment) error {
-	return row.Scan(
+	if err := row.Scan(
 		&enrollment.HostID, &enrollment.WorkspaceID, &enrollment.EnrollmentRevision,
 		&enrollment.HostSigningPublicKey, &enrollment.HostNoisePublicKey,
 		&enrollment.OperationID, &enrollment.State, &enrollment.DisabledAt,
-		&enrollment.CurrentCredentialOperationID, &enrollment.CredentialGeneration)
+		&enrollment.CurrentCredentialOperationID, &enrollment.CredentialGeneration); err != nil {
+		return err
+	}
+	enrollment.Generation = revisionGeneration(enrollment.EnrollmentRevision)
+	return nil
 }
 
 func loadEnrollment(ctx context.Context, q querier, hostID string) (ExternalEnrollment, error) {
@@ -581,12 +648,13 @@ func (s *Store) DisableEnrollmentWithTarget(
 	err = tx.QueryRow(ctx, `
 		INSERT INTO external_removals
 			(removal_operation_id, host_id, workspace_id, enrollment_operation_id,
-			 enrollment_revision, disabled_at, revocations)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 enrollment_revision, generation, disabled_at, revocations)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (removal_operation_id) DO NOTHING
 		RETURNING removal_operation_id`,
 		newID, hostID, effective.WorkspaceID, effective.EnrollmentOperationID,
-		effective.EnrollmentRevision, *disabledAt, revocationsJSON).Scan(&frozenID)
+		effective.EnrollmentRevision, revisionGeneration(effective.EnrollmentRevision),
+		*disabledAt, revocationsJSON).Scan(&frozenID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		stored, loadErr := loadRemoval(ctx, tx, newID)
 		if loadErr != nil {
@@ -866,6 +934,7 @@ func admissionMatches(recorded, incoming ExternalOperation) bool {
 		recorded.Purpose == incoming.Purpose &&
 		recorded.WorkspaceID == incoming.WorkspaceID &&
 		recorded.HostID == incoming.HostID &&
+		recorded.EnrollmentRevision == incoming.EnrollmentRevision &&
 		recorded.ExpectedWorkspaceID == incoming.ExpectedWorkspaceID &&
 		recorded.ExpectedEnrollmentRevision == incoming.ExpectedEnrollmentRevision &&
 		bytes.Equal(recorded.PayloadDigest, incoming.PayloadDigest)
@@ -894,6 +963,7 @@ func loadRemoval(ctx context.Context, q querier, removalOperationID string) (rem
 	if err != nil {
 		return removalRow{}, fmt.Errorf("load removal: %w", err)
 	}
+	removal.Generation = revisionGeneration(removal.EnrollmentRevision)
 	removal.Revocations = map[string]uint64{}
 	if len(revocations) > 0 {
 		if err := json.Unmarshal(revocations, &removal.Revocations); err != nil {
@@ -920,6 +990,7 @@ func loadLatestRemoval(ctx context.Context, q querier, hostID string) (*removalR
 	if err != nil {
 		return nil, fmt.Errorf("load latest removal: %w", err)
 	}
+	removal.Generation = revisionGeneration(removal.EnrollmentRevision)
 	removal.Revocations = map[string]uint64{}
 	if len(revocations) > 0 {
 		if err := json.Unmarshal(revocations, &removal.Revocations); err != nil {
@@ -963,17 +1034,6 @@ func disabledFromRemoval(removal removalRow) DisabledEnrollment {
 		EnforcedAt:  removal.EnforcedAt,
 		Revocations: revocations,
 	}
-}
-
-// NextEnrollmentRevision returns the next revision for a workspace.
-func (s *Store) NextEnrollmentRevision(ctx context.Context, workspaceID string) (string, error) {
-	var count int
-	if err := s.db.QueryRow(ctx,
-		`SELECT count(*) FROM external_enrollments WHERE workspace_id = $1`,
-		workspaceID).Scan(&count); err != nil {
-		return "", fmt.Errorf("count enrollments: %w", err)
-	}
-	return fmt.Sprintf("%d", count+1), nil
 }
 
 func newCredential() (string, error) {

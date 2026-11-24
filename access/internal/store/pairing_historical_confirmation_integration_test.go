@@ -329,27 +329,49 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 			if _, err := s.EnsureHost(ctx, "host"); err != nil {
 				t.Fatal(err)
 			}
-			publicKey := bytes.Repeat([]byte{3}, 32)
-			keyHash := sha256.Sum256(publicKey)
 			authHash := bytes.Repeat([]byte{5}, 32)
-			if err := s.CreatePairedDevice(ctx, "host", "device", hex.EncodeToString(keyHash[:]), authHash, now); err != nil {
+			seedLegacyDevice(t, s, "host", "device")
+			// The pre-010 schema has no Cloud-session trigger or authority
+			// view. Create disposable stand-ins so this test can rewind them
+			// while exercising the production migration path.
+			if _, err := s.Pool().Exec(ctx, `
+				ALTER TABLE pairing_outcomes ADD COLUMN commit_binding_verified boolean NOT NULL DEFAULT false,
+					ADD COLUMN host_confirmation_verified boolean NOT NULL DEFAULT false;
+				ALTER TABLE requests ADD COLUMN bodies_cleared boolean;
+				ALTER TABLE grants ADD COLUMN enrollment_generation bigint NOT NULL DEFAULT 0;
+				CREATE VIEW grant_authority AS SELECT * FROM grants WHERE false`); err != nil {
+				t.Fatal(err)
+			}
+			hash := bytes.Repeat([]byte{4}, 32)
+			if err := s.CreatePairingToken(ctx, hash, "host", now.Add(time.Minute), now); err != nil {
+				t.Fatal(err)
+			}
+			op, notice := fixturePairingOperation(t, s, hash, "host", "device", "claim", now, nil)
+			if accepted, err := s.CommitPairing(ctx, hash, "host", "device", fixtureKeyPin(3), authHash, now, notice, &op); err != nil || !accepted {
+				t.Fatalf("seed legacy commit: accepted=%v err=%v", accepted, err)
+			}
+			if missingBody {
+				if _, err := s.Pool().Exec(ctx, `UPDATE requests SET request_body=''::bytea WHERE request_id=$1`, notice.RequestId); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.Pool().Exec(ctx, `UPDATE pairing_outcomes SET host_confirmed=true,commit_binding_verified=false,host_confirmation_verified=false WHERE claim_id='claim'`); err != nil {
 				t.Fatal(err)
 			}
 			// Keep the later Cloud-session schema. Restore its trigger after the
 			// 010 rewind recreates the Host confirmation columns.
 			var activationTrigger string
-			if err := s.Pool().QueryRow(ctx, `
+			_ = s.Pool().QueryRow(ctx, `
 				SELECT pg_get_triggerdef(oid)
 				FROM pg_trigger
 				WHERE tgrelid = 'pairing_outcomes'::regclass
-				  AND tgname = 'session_pairing_activation' AND NOT tgisinternal`).Scan(&activationTrigger); err != nil {
-				t.Fatal(err)
-			}
+				  AND tgname = 'session_pairing_activation' AND NOT tgisinternal`).Scan(&activationTrigger)
 			// Recreate the 009 fields in this disposable test schema.
-			if _, err := s.Pool().Exec(ctx, `DROP TRIGGER session_pairing_activation ON pairing_outcomes;
-                DROP VIEW grant_authority;
+			if _, err := s.Pool().Exec(ctx, `DROP TRIGGER IF EXISTS session_pairing_activation ON pairing_outcomes;
+                DROP VIEW IF EXISTS grant_authority;
                 ALTER TABLE pairing_outcomes DROP COLUMN commit_binding_verified, DROP COLUMN host_confirmation_verified;
                 ALTER TABLE requests DROP COLUMN bodies_cleared;
+                ALTER TABLE grants DROP COLUMN enrollment_generation;
                 DELETE FROM schema_migrations WHERE name IN ('010_pairing_commit_binding.sql','016_external_device_revocations.sql')`); err != nil {
 				t.Fatal(err)
 			}
@@ -363,8 +385,10 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 			if err := s.Migrate(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.Pool().Exec(ctx, activationTrigger); err != nil {
-				t.Fatal(err)
+			if activationTrigger != "" {
+				if _, err := s.Pool().Exec(ctx, activationTrigger); err != nil {
+					t.Fatal(err)
+				}
 			}
 			var legacyUnknown bool
 			if err := s.Pool().QueryRow(ctx, `SELECT bodies_cleared IS NULL FROM requests WHERE request_id=$1`, legacyEmptyID).Scan(&legacyUnknown); err != nil || !legacyUnknown {

@@ -49,16 +49,16 @@ test('the settings snapshot keeps the removal-confirmation target after remove()
     registry.ensure()
     const id = registry.active().id
     registry.setBindings(id, {
-      hostId: 'host-1',
+      hostId: id,
       operationId: 'op-1',
       accessOrigin: 'https://access.example',
       enrollmentRevision: '1',
     })
     const store = new ProfileCredentialStore({ credentials, profileId: id, installationId: 'test-install' })
     await store.setJson(CREDENTIAL_PURPOSES.transportCredential, {
-      hostId: 'host-1',
+      hostId: id,
       mqttUrl: 'mqtts://broker.example:8883',
-      username: 'host:host-1',
+      username: `host:${id}`,
       password: 'transport-secret',
       accessOrigin: 'https://access.example',
       enrollmentRevision: '1',

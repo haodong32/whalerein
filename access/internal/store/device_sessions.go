@@ -121,6 +121,7 @@ func (s *Store) DeviceSessionPairingStatus(ctx context.Context, permission Devic
 		LEFT JOIN pairing_outcomes o ON o.claim_id=p.claim_id
 		LEFT JOIN grants g ON g.host_id=p.host_id AND g.device_id=p.device_id
 		LEFT JOIN external_device_revocations r ON r.host_id=p.host_id AND r.device_id=p.device_id
+			AND r.generation=e.generation
 		WHERE p.claim_id=$1 AND p.host_id=$2 AND p.device_id=$3 AND p.workspace_id=$4
 		AND prior.key_fingerprint=$5`, claimID, hostID, permission.DeviceID, permission.WorkspaceID,
 		permission.KeyFingerprint, permission.AuthorityRevision).Scan(&state)

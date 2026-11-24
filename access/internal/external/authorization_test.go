@@ -174,6 +174,7 @@ func enrollmentFixtureWithKey(t *testing.T) (issuer, *whalereinv1.ExternalAuthor
 
 	auth := baseAuth("fixture://issuer/a")
 	auth.HostPublicKeys = [][]byte{signingPublic, noisePublic}
+	auth.EnrollmentRevision = "1"
 	signer.authorize(t, auth)
 
 	request := &whalereinv1.HostEnrollmentRequest{

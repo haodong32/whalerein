@@ -439,19 +439,6 @@ func TestOperationLookupDistinguishesMissingRows(t *testing.T) {
 	}
 }
 
-func TestNextEnrollmentRevisionCountsExistingRows(t *testing.T) {
-	db := &fakeDB{t: t, queryRowFn: func(context.Context, string, ...any) pgx.Row {
-		return externalRow{values: []any{4}}
-	}}
-	revision, err := newStore(db).NextEnrollmentRevision(context.Background(), "ws-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if revision != "5" {
-		t.Fatalf("expected the next revision, got %q", revision)
-	}
-}
-
 func TestNewOperationIDIsUniqueAndPrefixed(t *testing.T) {
 	first := NewOperationID()
 	second := NewOperationID()
@@ -960,4 +947,33 @@ func TestReplaceHostCredentialRejectsReplayAndChangedState(t *testing.T) {
 			t.Fatal("a recorded refusal must not commit a new mutation")
 		}
 	})
+}
+
+func TestHigherRevisionUsesNumericOrdering(t *testing.T) {
+	for _, tc := range []struct {
+		candidate, current string
+		want               bool
+	}{
+		{"10", "9", true},
+		{"9", "10", false},
+		{"2", "1", true},
+		{"1", "1", false},
+		{"", "1", false},
+		{"2", "", false},
+	} {
+		if got := higherRevision(tc.candidate, tc.current); got != tc.want {
+			t.Fatalf("higherRevision(%q, %q) = %v, want %v", tc.candidate, tc.current, got, tc.want)
+		}
+	}
+}
+
+func TestRevisionGenerationIsPositive(t *testing.T) {
+	for _, tc := range []struct {
+		revision string
+		want     int64
+	}{{"1", 1}, {"9", 9}, {"10", 10}, {"", 1}, {"not-a-number", 1}, {"0", 1}} {
+		if got := revisionGeneration(tc.revision); got != tc.want {
+			t.Fatalf("revisionGeneration(%q) = %d, want %d", tc.revision, got, tc.want)
+		}
+	}
 }

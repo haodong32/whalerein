@@ -76,12 +76,15 @@ There is no silent fallback from system verification to custom roots.
 | PostgreSQL table | Contents |
 |---|---|
 | `hosts` | Host identity, protocol metadata, pinned authorization public key. |
+| `external_enrollments` | Current generation, keys, broker credential hash, operation and disabled state. |
+| `external_removals` | Generation-scoped removal target, frozen revocations and enforcement receipt. |
+| `external_device_revocations` | Generation-scoped client revocation fences; never cleared by a re-add. |
 | `devices` | Pinned device identity; credentials have a single authority in `device_credentials`. |
 | `device_credentials` | Independently issued transport-token hashes for a device. |
 | `pairing_operations` | Opaque HELLO reply, FINISH digest, token-free receipt and committed grant generation. |
 | `pairing_outcomes` | Retained FINISH identity, grant binding and verified COMMIT confirmation metadata. |
 | `schema_migrations` | Applied migration names and SHA-256 checksums. |
-| `grants` | Host/device authorization, revocation, replay acknowledgement. |
+| `grants` | Host/device authorization, enrollment generation, revocation and replay acknowledgement. |
 | `pairing_tokens` | Invitation hash, expiry, use marker, failure count. |
 | `requests` | Bodies/status, relay epoch, inline or opaque reference representation, command identity/digest, forwarding lease/retries, exact client-lease state/deadline, pending cancellation replay and durable notice intent. |
 | `temporary_ciphertext_objects` | Node-owned temporary ciphertext reservation, scope, state, exact length/digest, hard expiry, reader count, cleanup retries and grant fence revisions. |
@@ -97,6 +100,14 @@ deletion: partial, ready and pending-cleanup bytes count against per-object,
 per-host and per-node limits, and only a committed object is readable.
 Migrations remove the former fixed `local` workspace table and the duplicate
 `devices.auth_hash`; no account/tenant model is pre-installed in Standalone mode.
+
+An external enrollment is a stable Host id plus a generation. Removing a
+generation disables it and revokes its grants; a fresh approval may re-enable
+the same id only with a strictly higher revision, the same workspace and the
+same Host keys. Old credentials, grants and device revocation fences remain
+bound to the removed generation. A grant records its enrollment generation and
+the authority view refuses a grant whose generation is not the current ready
+one. Standalone grants use generation zero.
 
 Pairing operation receipts are durable. Transient MQTT correlation, presence
 caches and signature replay windows remain in memory. A still-valid host signature

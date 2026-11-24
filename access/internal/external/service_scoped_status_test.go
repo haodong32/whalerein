@@ -85,13 +85,6 @@ func (h *hookStore) ConsumeHostProofNonce(ctx context.Context, nonceHash []byte,
 	return h.fakeStore.ConsumeHostProofNonce(ctx, nonceHash, purpose, at)
 }
 
-func (h *hookStore) NextEnrollmentRevision(ctx context.Context, workspaceID string) (string, error) {
-	if h.nextRevisionHook != nil {
-		return h.nextRevisionHook(ctx, workspaceID)
-	}
-	return h.fakeStore.NextEnrollmentRevision(ctx, workspaceID)
-}
-
 func enrollReadyHost(t *testing.T) harness {
 	t.Helper()
 	h := newHarness(t)
@@ -542,12 +535,13 @@ func TestEnrollHostAssignsAnOperationIDForALegacyAuthorization(t *testing.T) {
 	}
 }
 
-func TestEnrollHostRefusesAStateOnlyDisabledEnrollment(t *testing.T) {
+func TestEnrollHostRefusesAStateOnlyDisabledEnrollmentWithoutAHigherRevision(t *testing.T) {
 	h := newHarness(t)
 	request := h.data.request
 	h.data.enrollments[request.GetHostId()] = store.ExternalEnrollment{
-		HostID: request.GetHostId(),
-		State:  "enrollment_disabled",
+		HostID:             request.GetHostId(),
+		EnrollmentRevision: "1",
+		State:              "enrollment_disabled",
 	}
 	if _, err := h.service.EnrollHost(context.Background(), request); !errors.Is(err, ErrEnrollmentDisabled) {
 		t.Fatalf("expected a disabled refusal, got %v", err)
@@ -573,11 +567,6 @@ func TestEnrollHostSurfacesStoreFailures(t *testing.T) {
 		"load": func(hooks *hookStore) {
 			hooks.enrollmentHook = func(context.Context, string) (store.ExternalEnrollment, error) {
 				return store.ExternalEnrollment{}, boom
-			}
-		},
-		"revision": func(hooks *hookStore) {
-			hooks.nextRevisionHook = func(context.Context, string) (string, error) {
-				return "", boom
 			}
 		},
 	} {

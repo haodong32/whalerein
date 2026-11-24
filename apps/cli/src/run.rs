@@ -1429,6 +1429,21 @@ async fn dispatch(
                 },
             }
         }
+        Command::RotateDevice => {
+            if let Err(outcome) = require_destructive_confirmation(
+                command,
+                cli,
+                "Rotate this client key? Every Host grant will be revoked and every Host must be re-paired.",
+            ) {
+                return Ok(outcome);
+            }
+            core.rotate_device().await?;
+            Ok(CliOutcome::success(
+                command,
+                json!({ "client_key_rotated": true, "re_pair_required": true }),
+                "Client key rotated. Revoke is complete; re-pair every Host.",
+            ))
+        }
         Command::Forget { local_only } => {
             if let Err(outcome) =
                 require_destructive_confirmation(command, cli, "Forget this local device identity?")
