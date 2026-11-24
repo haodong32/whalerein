@@ -421,6 +421,8 @@ pub struct FakeHost {
     pub question_error: Option<ErrorCode>,
     pub question_reads: usize,
     pub history_reads: usize,
+    /// Requested byte bound for each online history read, in order.
+    pub history_request_bytes: Vec<u32>,
     pub heartbeats: Vec<String>,
     pub pending_result_polls: usize,
     pub settled_command_status: OnlineStatus,
@@ -814,6 +816,7 @@ impl FakeHost {
             question_error: None,
             question_reads: 0,
             history_reads: 0,
+            history_request_bytes: Vec::new(),
             heartbeats: Vec::new(),
             pending_result_polls: 0,
             settled_command_status: OnlineStatus::Succeeded,
@@ -1569,6 +1572,7 @@ impl FakeHost {
             Some(Payload::ReadHistory(read)) => {
                 use whalerein_proto::*;
                 self.history_reads += 1;
+                self.history_request_bytes.push(read.max_bytes);
                 let session = Some(SessionKey {
                     host_id: "host-1".into(),
                     session_id: read.session_id.clone(),

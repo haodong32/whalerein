@@ -1173,6 +1173,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_visible_page_fits_the_inline_reply_budget_and_continuations_keep_the_caller_bound(
+    ) {
+        let (_directory, core, access) = paired().await;
+        access.host.lock().unwrap().history_messages =
+            vec![history_message("m1", "one"), history_message("m2", "two")];
+        let session = key(&core);
+        let mut first = HistoryPageRequest::new(session.clone());
+        first.max_messages = 1;
+        first.max_bytes = 64 * 1024;
+        let page = core.history_page(&first).await.unwrap();
+        let reads = access.host.lock().unwrap().history_request_bytes.clone();
+        assert_eq!(reads.len(), 1);
+        assert!(
+            reads[0] < 64 * 1024,
+            "first page is fitted to the MQTT reply budget: {}",
+            reads[0]
+        );
+        assert!(reads[0] >= 1024);
+        let continuation = page
+            .continuation
+            .expect("two messages with max one per page");
+        let mut next = HistoryPageRequest::new(session);
+        next.continuation = Some(continuation);
+        next.max_bytes = 12_345;
+        core.history_page(&next).await.unwrap();
+        let reads = access.host.lock().unwrap().history_request_bytes.clone();
+        assert_eq!(
+            reads.last().copied(),
+            Some(12_345),
+            "a continuation keeps the caller bound"
+        );
+    }
+
+    #[tokio::test]
     async fn page_budgets_change_packing_not_canonical_content_or_identity() {
         let (_directory, core, access) = paired().await;
         access.host.lock().unwrap().history_messages = vec![
