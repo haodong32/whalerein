@@ -360,6 +360,9 @@ export class RelayTransport {
       partId: scope.partId,
       ciphertext: body,
       expiresAt: scope.expiresAt,
+      requestId: scope.requestId,
+      connectionRef: scope.connectionRef,
+      enrollmentGeneration: scope.enrollmentGeneration,
     })
     let finished = false
     try {
@@ -417,6 +420,11 @@ export class RelayTransport {
       sessionId: typeof options.sessionId === 'string' ? options.sessionId : '',
       partId: typeof options.partId === 'string' ? options.partId : '',
       expiresAt,
+      requestId: typeof options.requestId === 'string' ? options.requestId : '',
+      connectionRef: typeof options.connectionRef === 'string' ? options.connectionRef : '',
+      enrollmentGeneration: Number.isSafeInteger(options.enrollmentGeneration)
+        ? options.enrollmentGeneration
+        : 0,
     }
   }
 

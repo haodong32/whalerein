@@ -809,6 +809,8 @@ export class HostRuntime {
       expiresAt: Number(request.expires_at_unix_ms) || undefined,
       upstreamExpirySeconds: request.upstreamExpirySeconds,
       sessionId: request.sessionId,
+      connectionRef: request.connection_ref,
+      enrollmentGeneration: Number(request.enrollment_generation) || 0,
     }
     try {
       await this.#access.publishResult(encoded, replyOptions)
