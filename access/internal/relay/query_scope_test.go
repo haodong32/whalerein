@@ -156,7 +156,7 @@ func TestRelayDeviceFetchRequiresItsOwnIssuedObject(t *testing.T) {
 	object.RequestID = "request-1"
 	object.MessageID = ""
 	object.ConnectionRef = "0123456789abcdef:7"
-	object.AppSession = ""
+	object.AppSession = "application-session"
 	issuedAt := testNow.Add(-time.Second)
 	object.IssuedAt = &issuedAt
 	metadata.objects[object.ObjectID] = object

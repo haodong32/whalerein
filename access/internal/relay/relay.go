@@ -586,21 +586,6 @@ func (s *Service) Finish(ctx context.Context, req FinishRequest) (Object, error)
 // and closes the returned reader.
 func (s *Service) Fetch(ctx context.Context, req ObjectRequest) (FetchResult, error) {
 	object, err := s.loadObject(ctx, req, func(object store.PayloadObject) error {
-		if req.BearerToken != "" {
-			// A paired Device resolves an issued result/history object with its
-			// transport token. Unissued ciphertext never leaves the directory.
-			identity, err := s.auth.AuthenticateDeviceToken(ctx, req.BearerToken)
-			if err != nil {
-				return ErrUnauthorized
-			}
-			if identity.DeviceID == "" || identity.DeviceID != object.DeviceID {
-				return ErrForbidden
-			}
-			if object.IssuedAt == nil || object.RequestID == "" || object.ConnectionRef == "" {
-				return ErrForbidden
-			}
-			return nil
-		}
 		return s.verifyHost(ctx, auth.RelayAuthObject, req, auth.RelayFields{
 			RelayVersion:   req.RelayVersion,
 			HostID:         object.HostID,
@@ -744,7 +729,7 @@ func (s *Service) checkDeviceScope(ctx context.Context, identity auth.Identity, 
 	// session-bound reader of the same Device therefore cannot be denied here
 	// for that empty field, and still cannot decrypt another channel's
 	// ciphertext. An object reserved under a concrete session must match it.
-	if object.AppSession != "" && identity.SessionID != object.AppSession {
+	if object.RequestID == "" && object.AppSession != "" && identity.SessionID != object.AppSession {
 		return ErrForbidden
 	}
 	if err := s.auth.AuthorizeHost(ctx, identity, object.HostID); err != nil {
