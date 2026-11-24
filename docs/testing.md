@@ -13,6 +13,17 @@ integration group adds actual DSH services and headless Chromium with a local
 deterministic model; its pinned Linux configuration does not establish behavior
 for every DSH version, external model, desktop shell or platform SecretStore. An integration or tooling-harness pass is not release validation.
 
+Every native scenario records provenance before a case runs. The connector
+driver reports the files it actually loaded and a content digest of
+`host/runtime/src` and `host/dsh/src`; the harness compares those digests with
+the mounted worktree and requires each loaded entry to resolve inside
+`/workspace`. A cached, copied or registry bundle therefore fails the scenario
+instead of producing results for code that was never edited. The driver also
+writes transport counters (adapter events, live preview attempts and accepted
+or rejected publishes, and native stream frame phases) next to the provenance
+record so a failing case can separate "nothing was produced" from "production
+was dropped".
+
 ## Platform-specific tests
 
 The local host is not a substitute for every target OS. When a test requires an

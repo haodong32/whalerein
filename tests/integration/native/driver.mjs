@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
+import { collectProvenance } from './provenance.mjs'
 import { createRequire } from 'node:module'
 import { codec } from '../../../host/runtime/src/protocol.js'
 const installed = createRequire('/opt/native/node_modules/@deepseek-ai/dsh/package.json')
@@ -125,6 +126,82 @@ let channelQueueBarrier = null
     const keysOf = value => value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value).sort() : []
     const streamFrames = []
     const toolRuns = []
+    // Transport counters describe what the running connector produced, not what
+    // the fixture asked for. They are written next to the provenance record so
+    // a failing case can separate "no preview generated" from "preview dropped".
+    const transportCounters = {
+      attached: false,
+      events: {},
+      live: { attempts: 0, accepted: 0, rejected: 0 },
+      liveTargets: {},
+      updatedAt: 0,
+    }
+    const traceDirectory = () => process.env.WHALEREIN_NATIVE_STATE_DIR || countersDirectory
+    const countersPath = () => {
+      const directory = traceDirectory()
+      return directory ? path.join(directory, 'native-counters.json') : ''
+    }
+    let countersDirectory = ''
+    let countersTimer = null
+    const countersSnapshot = () => ({
+      ...transportCounters,
+      frames: streamFrames.length,
+      framePhases: streamFrames.reduce((counts, frame) => {
+        counts[frame.phase] = (counts[frame.phase] ?? 0) + 1
+        return counts
+      }, {}),
+      at: Date.now(),
+    })
+    const attachTransportCounters = () => {
+      if (transportCounters.attached) return true
+      const current = host()
+      if (!current?.adapter || typeof current.adapter.subscribeEvents !== 'function') return false
+      current.adapter.subscribeEvents((event) => {
+        const type = String(event?.type ?? 'unknown')
+        transportCounters.events[type] = (transportCounters.events[type] ?? 0) + 1
+        transportCounters.updatedAt = Date.now()
+      })
+      const access = current.access
+      const original = access?.publishLive?.bind(access)
+      if (typeof original === 'function') {
+        access.publishLive = async (...args) => {
+          transportCounters.live.attempts += 1
+          const target = args[1]?.deviceId ?? ''
+          const topic = typeof access.deviceLiveTopic === 'function' ? access.deviceLiveTopic(target) : ''
+          const key = topic || ('device:' + String(target))
+          transportCounters.liveTargets[key] = (transportCounters.liveTargets[key] ?? 0) + 1
+          const accepted = await original(...args)
+          if (accepted) transportCounters.live.accepted += 1
+          else transportCounters.live.rejected += 1
+          transportCounters.updatedAt = Date.now()
+          return accepted
+        }
+      }
+      transportCounters.attached = true
+      transportCounters.updatedAt = Date.now()
+      return true
+    }
+    {
+      // The seeded process is replaced by one more boot, so the trace cannot be
+      // started from the seed handler alone. The state directory arrives in the
+      // process environment precisely so this timer survives every boot. The
+      // first write is deferred so a slow or failing diagnostics path can never
+      // delay the control socket that answers the boot probe.
+      const directory = traceDirectory()
+      if (directory) {
+        setTimeout(() => {
+          try {
+            fs.mkdirSync(directory, { recursive: true })
+            fs.writeFileSync(path.join(directory, 'native-provenance.json'), JSON.stringify(collectProvenance(), null, 2))
+            countersTimer = setInterval(() => {
+              attachTransportCounters()
+              try { fs.writeFileSync(countersPath(), JSON.stringify(countersSnapshot(), null, 2)) } catch { /* diagnostics only */ }
+            }, 500)
+            countersTimer.unref?.()
+          } catch { /* diagnostics only */ }
+        }, 0).unref?.()
+      }
+    }
     const blockShape = block => {
       const type = block?.type
       const shape = { type, keys: keysOf(block) }
@@ -337,7 +414,27 @@ let channelQueueBarrier = null
           }
           if (method === 'seed') {
             await ctx.settings.update('whalerein-dsh', config)
+            if (typeof config?.state_dir === 'string' && config.state_dir !== '') {
+              try {
+                fs.mkdirSync(config.state_dir, { recursive: true })
+                fs.writeFileSync(path.join(config.state_dir, 'native-provenance.json'), JSON.stringify(collectProvenance(), null, 2))
+                countersDirectory = config.state_dir
+                attachTransportCounters()
+                if (countersTimer === null) {
+                  countersTimer = setInterval(() => {
+                    attachTransportCounters()
+                    try { fs.writeFileSync(countersPath(), JSON.stringify(countersSnapshot(), null, 2)) } catch { /* diagnostics only */ }
+                  }, 500)
+                  countersTimer.unref?.()
+                }
+              } catch { /* diagnostics only */ }
+            }
             return { seeded: true }
+          }
+          if (method === 'native-provenance') return collectProvenance()
+          if (method === 'native-stats') {
+            attachTransportCounters()
+            return countersSnapshot()
           }
           if (method === 'connection-settings') {
             const row = ctx.settings.describe({redactSecrets: true}).find((value) => value.ns === 'whalerein-dsh')

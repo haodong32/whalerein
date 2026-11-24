@@ -1,6 +1,7 @@
 """Isolated native DSH journeys; no personal profile, external model or host runtime."""
 
 import concurrent.futures
+import hashlib
 import http.server
 import json
 import os
@@ -12,6 +13,26 @@ import threading
 from pathlib import Path
 
 from environment import ROOT, Process, Scenario, wait
+
+
+def source_digest(root: Path) -> str:
+    """Digest a source tree exactly like tests/integration/native/provenance.mjs.
+
+    Each regular file contributes ``sha256(relativePath + NUL + bytes)`` and the
+    sorted contribution digests are hashed again. Node and Python therefore
+    agree on one value without transferring file lists between processes.
+    """
+    digests = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if "node_modules" in path.parts or ".git" in path.parts:
+            continue
+        relative = path.relative_to(root).as_posix()
+        digests.append(
+            hashlib.sha256(relative.encode() + b"\0" + path.read_bytes()).hexdigest()
+        )
+    return hashlib.sha256("".join(sorted(digests)).encode()).hexdigest()
 
 
 class Model:
@@ -387,6 +408,7 @@ class NativeScenario(Scenario):
             {
                 "DSH_HOME": str(self.home),
                 "WHALEREIN_NATIVE_SOCKET": str(self.socket),
+                "WHALEREIN_NATIVE_STATE_DIR": str(self.directory / "plugin"),
                 "NATIVE_MODEL_KEY": "sk-" + "0" * 48,
                 "DSH_PERMISSION_MODE": "workspace-write",
             },
@@ -467,6 +489,7 @@ class NativeScenario(Scenario):
             if self.short_approvals:
                 config["approval_ttl_ms"] = 3000
             assert self.request("seed", config=config)["seeded"]
+            self.assert_loaded_worktree()
             self.native.close()
             self.prepared = True
         self._boot()
@@ -480,6 +503,38 @@ class NativeScenario(Scenario):
             ),
             timeout=30,
             process=self.native,
+        )
+
+    def assert_loaded_worktree(self):
+        """Fail fast when the native runtime did not load the mounted sources.
+
+        A copied or cached connector bundle would make every native result
+        describe code nobody edited. The driver reports the files it actually
+        loaded; this check compares their digests with the mounted worktree and
+        requires the loaded entries to live under it.
+        """
+        provenance = self.request("native-provenance")
+        expected = {
+            "host/runtime/src": source_digest(
+                Path(ROOT) / "host" / "runtime" / "src"
+            ),
+            "host/dsh/src": source_digest(Path(ROOT) / "host" / "dsh" / "src"),
+        }
+        for name, digest in expected.items():
+            loaded = provenance.get("hashes", {}).get(name)
+            assert loaded == digest, (
+                f"native runtime loaded a different {name} than the mounted worktree "
+                f"(loaded {loaded}, expected {digest}); restage the integration "
+                "workspace instead of trusting cached connector bytes"
+            )
+        for entry in ("driverEntry", "hostRuntime", "dshAdapter"):
+            value = provenance.get(entry, {})
+            assert value.get("insideWorkspace") is True, (
+                f"native {entry} resolved outside /workspace: {value.get('real') or value}"
+            )
+        self.provenance = provenance
+        (self.directory / "native-provenance.json").write_text(
+            json.dumps(provenance, indent=2) + "\n"
         )
 
     def create(self):
