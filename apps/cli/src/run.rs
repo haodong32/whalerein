@@ -1394,28 +1394,41 @@ async fn dispatch(
                 text,
             ))
         }
-        Command::Revoke => match require_destructive_confirmation(
-            command,
-            cli,
-            "Revoke this device's grants and clear local authorization material?",
-        ) {
-            Err(outcome) => Ok(outcome),
-            Ok(()) => match core.revoke().await {
-                Ok(outcome) => {
-                    let unverified = matches!(
-                        outcome.retention,
-                        whalerein_core::api::RevocationRetention::Unverified
-                    );
-                    let human = revoke_human(unverified);
-                    Ok(CliOutcome::success(
-                        command,
-                        json!({ "device_id":outcome.device_id, "revoked":true, "revoked_retention_unverified":unverified }),
-                        human,
-                    ))
-                }
-                Err(error) => Err(error),
-            },
-        },
+        Command::Revoke => {
+            // The Host selector is a Cloud-scoped promise. On a Standalone
+            // profile this command revokes this device's own pairing, so a
+            // named Host cannot be honored and must never be silently ignored.
+            if cli.host.is_some() {
+                return Ok(CliOutcome::local_failure(
+                    command,
+                    "invalid_argument",
+                    "--host selects a WhaleRein Cloud Host and is not available for this profile; omit it to revoke this device",
+                    2,
+                ));
+            }
+            match require_destructive_confirmation(
+                command,
+                cli,
+                "Revoke this device's grants and clear local authorization material?",
+            ) {
+                Err(outcome) => Ok(outcome),
+                Ok(()) => match core.revoke().await {
+                    Ok(outcome) => {
+                        let unverified = matches!(
+                            outcome.retention,
+                            whalerein_core::api::RevocationRetention::Unverified
+                        );
+                        let human = revoke_human(unverified);
+                        Ok(CliOutcome::success(
+                            command,
+                            json!({ "device_id":outcome.device_id, "revoked":true, "revoked_retention_unverified":unverified }),
+                            human,
+                        ))
+                    }
+                    Err(error) => Err(error),
+                },
+            }
+        }
         Command::Forget { local_only } => {
             if let Err(outcome) =
                 require_destructive_confirmation(command, cli, "Forget this local device identity?")

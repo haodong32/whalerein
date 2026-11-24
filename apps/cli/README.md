@@ -75,7 +75,8 @@ Session IDs belong to the selected Host.
 - `account sessions` lists Cloud App sessions. `account revoke-session ID`
   signs out an individual App session, and `account revoke-all-sessions`
   signs out all App sessions in the selected Cloud environment.
-- `device revoke` applies Device revocation.
+- `device revoke` applies Device revocation. `--host <id>` is Cloud-only; a
+  Standalone profile rejects it instead of ignoring the named Host.
   `device forget` clears local pairing identity. Review prompts or supply
   `--yes` for non-interactive destructive commands.
 - `session show <id>` remains a finite metadata summary. `session fork <id>`,
@@ -87,7 +88,9 @@ Session IDs belong to the selected Host.
   history; an expired, stale or wrong-scope token fails with `snapshot_required`
   and asks you to restart without `--continuation`. The human page prints the
   exact command for that token. `--cache` reads the eligible encrypted local
-  cache explicitly (an empty cache says so), `--message <reference>` resolves
+  cache explicitly (an empty cache says so); a cache-sourced continuation must
+  also be read with `--cache` (the printed command includes it),
+  `--message <reference>` resolves
   one exact committed message, and `--max-messages` / `--max-bytes` bound the
   page.
 - `session download <reference> --to <dir> --session <id>` saves one verified

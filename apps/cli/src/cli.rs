@@ -245,7 +245,8 @@ enum SessionArgs {
         #[arg(long)]
         cache: bool,
         /// Continue toward older history with a token from a previous page.
-        #[arg(long, value_name = "TOKEN", conflicts_with_all = ["message", "cache"])]
+        /// Combine with --cache to continue a cache-sourced page.
+        #[arg(long, value_name = "TOKEN", conflicts_with = "message")]
         continuation: Option<String>,
         /// Resolve one exact committed-message reference shown by send or history.
         #[arg(
@@ -682,6 +683,8 @@ impl QuestionArgs {
 enum DeviceArgs {
     /// Revoke this device and clear local authorization material.
     Revoke {
+        /// Select the Cloud Host to revoke (WhaleRein Cloud profiles only;
+        /// rejected on a Standalone profile).
         #[arg(long, value_name = "HOST_ID")]
         host: Option<String>,
     },
@@ -1181,16 +1184,27 @@ mod tests {
             "--cache"
         ])
         .is_err());
-        assert!(Cli::try_parse_from([
+        // A cache-sourced continuation is read with `--cache`; the combination
+        // is the only shape that can page older cached history.
+        let cached = Cli::try_parse_from([
             "whalerein",
             "session",
             "history",
             "s",
+            "--cache",
             "--continuation",
             "c",
-            "--cache"
         ])
-        .is_err());
+        .unwrap();
+        let (command, _) = cached.into_command();
+        assert!(matches!(
+            command,
+            Command::History {
+                cache: true,
+                continuation: Some(ref token),
+                ..
+            } if token.as_str() == "c"
+        ));
         assert!(Cli::try_parse_from([
             "whalerein",
             "session",

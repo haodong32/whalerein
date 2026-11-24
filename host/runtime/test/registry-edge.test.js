@@ -119,3 +119,50 @@ test('registry rejects corrupt stored service descriptors on read', async () => 
     rmSync(stateRoot, { recursive: true, force: true })
   }
 })
+
+test('registry persists and validates the retained removal confirmation target', async () => {
+  const { readFileSync, writeFileSync } = await import('node:fs')
+  const { registry, stateRoot } = registryFixture()
+  try {
+    const profileId = registry.read().active
+    const url = 'https://app.whalerein.com/hosts/host-1?removal=1'
+    registry.setPending(profileId, { removalUrl: url })
+    assert.equal(registry.get(profileId).pending.removalUrl, url)
+    // Clearing the handoff removes the key instead of persisting a false value.
+    registry.setPending(profileId, { removalUrl: null })
+    assert.equal(registry.get(profileId).pending.removalUrl, undefined)
+    for (const invalid of [
+      'javascript:alert(1)',
+      'https://user:pass@app.whalerein.com/hosts/host-1?removal=1',
+      'not a url',
+    ]) {
+      assert.throws(
+        () => registry.setPending(profileId, { removalUrl: invalid }),
+        (error) => error.code === 'registry_corrupt',
+        invalid,
+      )
+    }
+
+    const path = registry.filePath
+    const baseline = readFileSync(path, 'utf8')
+    for (const [name, value] of [
+      ['credential-bearing URL', 'https://user:pass@app.whalerein.com/hosts/host-1?removal=1'],
+      ['non-http scheme', 'file:///etc/passwd'],
+      ['oversized URL', `https://app.whalerein.com/${'a'.repeat(2048)}`],
+      ['non-string value', 42],
+    ]) {
+      const document = JSON.parse(baseline)
+      document.profiles[0].pending.removalUrl = value
+      writeFileSync(path, JSON.stringify(document))
+      assert.throws(
+        () => new HostProfileRegistry({ stateRoot }).read(),
+        (error) => error.code === 'registry_corrupt',
+        name,
+      )
+    }
+    writeFileSync(path, baseline)
+    assert.equal(new HostProfileRegistry({ stateRoot }).get(profileId).pending.removalUrl, undefined)
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true })
+  }
+})

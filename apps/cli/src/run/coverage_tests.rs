@@ -448,3 +448,42 @@ async fn grouped_send_signal_retains_uncertain_operation_without_echoing_message
         operation
     );
 }
+
+/// HOST-3: an incomplete cache page must print a continuation command that
+/// runs. The printed shape includes `--cache`, the parser accepts
+/// `--cache --continuation`, and a cache-sourced token is only readable that way.
+#[test]
+fn cache_history_continuation_guidance_is_executable() {
+    use whalerein_core::history::{HistoryContinuation, HistoryPage, HistorySource};
+
+    let key = whalerein_core::api::SessionKey::new("host-1", "session-1").unwrap();
+    let page = HistoryPage {
+        source: HistorySource::Cache,
+        projection: "projection-1".into(),
+        complete: false,
+        messages: Vec::new(),
+        activities: Vec::new(),
+        continuation: Some("cache-token".parse::<HistoryContinuation>().unwrap()),
+    };
+    let human = crate::output::render_history_page(&key, &page, false);
+    assert!(
+        human.contains("--cache"),
+        "cached history must be continued with --cache:\n{human}"
+    );
+
+    let accepted = Cli::try_parse_from([
+        "whalerein",
+        "session",
+        "history",
+        "session-1",
+        "--host",
+        "host-1",
+        "--cache",
+        "--continuation",
+        "cache-token",
+    ]);
+    assert!(
+        accepted.is_ok(),
+        "the printed cache continuation must be accepted: {accepted:?}"
+    );
+}
