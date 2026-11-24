@@ -191,19 +191,16 @@ function validatePending(pending) {
   if (pending.removal !== undefined && !REMOVAL_STATES.has(pending.removal)) fail('registry_corrupt', 'profile removal state is invalid')
   if (pending.removalUrl !== undefined) {
     // The retained browser-confirmation target is a credential-free web URL.
+    if (typeof pending.removalUrl !== 'string' || pending.removalUrl.length > 2048) {
+      fail('registry_corrupt', 'profile pending removal URL is invalid')
+    }
     let url
     try {
       url = new URL(pending.removalUrl)
     } catch {
       fail('registry_corrupt', 'profile pending removal URL is invalid')
     }
-    if (
-      typeof pending.removalUrl !== 'string'
-      || pending.removalUrl.length > 2048
-      || !['http:', 'https:'].includes(url.protocol)
-      || url.username !== ''
-      || url.password !== ''
-    ) {
+    if (!['http:', 'https:'].includes(url.protocol) || url.username !== '' || url.password !== '') {
       fail('registry_corrupt', 'profile pending removal URL is invalid')
     }
   }
