@@ -17,6 +17,7 @@ func TestBuildHostPolicyListsOnlyItsOwnScopedTopics(t *testing.T) {
 		{Access: "read", Filter: "whalerein/v1/h/h1/request"},
 		{Access: "subscribe", Filter: "whalerein/v1/h/h1/presence"},
 		{Access: "subscribe", Filter: "whalerein/v1/h/h1/request"},
+		{Access: "write", Filter: "whalerein/v1/h/h1/d/+/live"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/event"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/result"},
 	}
@@ -36,6 +37,7 @@ func TestBuildHostPolicyEmitsGrantScopedDirectPreviewWrites(t *testing.T) {
 		{Access: "read", Filter: "whalerein/v1/h/h1/request"},
 		{Access: "subscribe", Filter: "whalerein/v1/h/h1/presence"},
 		{Access: "subscribe", Filter: "whalerein/v1/h/h1/request"},
+		{Access: "write", Filter: "whalerein/v1/h/h1/d/+/live"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/event"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/result"},
 		{Access: "write", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/live"},
@@ -133,6 +135,7 @@ func TestFormatRendersTheVersionedHostAndDevicePolicy(t *testing.T) {
 				"acl read 0 - whalerein/v1/h/h1/request\n" +
 				"acl subscribe 0 - whalerein/v1/h/h1/presence\n" +
 				"acl subscribe 0 - whalerein/v1/h/h1/request\n" +
+				"acl write 0 - whalerein/v1/h/h1/d/+/live\n" +
 				"acl write 0 - whalerein/v1/h/h1/event\n" +
 				"acl write 0 - whalerein/v1/h/h1/result\n",
 		},

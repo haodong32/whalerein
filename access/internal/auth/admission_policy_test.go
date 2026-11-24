@@ -129,7 +129,7 @@ func TestBrokerPolicyBuildsDeviceGrantsAndHostPreviewScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if host.Kind != policy.KindHost || host.HostID != "h1" || len(host.Entries) != 7 {
+	if host.Kind != policy.KindHost || host.HostID != "h1" || len(host.Entries) != 8 {
 		t.Fatalf("host policy = %+v", host)
 	}
 	if fs.listCalls != 2 {

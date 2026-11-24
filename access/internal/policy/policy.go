@@ -70,6 +70,11 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 			{Access: "read", Filter: topicRoot + hostID + "/presence"},
 			{Access: "write", Filter: topicRoot + hostID + "/result"},
 			{Access: "write", Filter: topicRoot + hostID + "/event"},
+			// Direct previews target a granted device. The publisher filter is
+			// scoped to this Host's device subtree; Broker delivery still
+			// requires the receiving device's own grant, so an unscoped topic
+			// cannot reach a device without one.
+			{Access: "write", Filter: topicRoot + hostID + "/d/+/live"},
 		}
 		// Direct QoS 0 previews are published by the Host for each Device it
 		// is currently authorized for. The retired h/{host}/live relay entry
