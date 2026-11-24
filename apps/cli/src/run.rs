@@ -1428,7 +1428,7 @@ async fn dispatch(
                     Err(error) => Err(error),
                 },
             }
-        },
+        }
         Command::RotateDevice => {
             if let Err(outcome) = require_destructive_confirmation(
                 command,
@@ -1443,7 +1443,7 @@ async fn dispatch(
                 json!({ "client_key_rotated": true, "re_pair_required": true }),
                 "Client key rotated. Revoke is complete; re-pair every Host.",
             ))
-        },
+        }
         Command::Forget { local_only } => {
             if let Err(outcome) =
                 require_destructive_confirmation(command, cli, "Forget this local device identity?")

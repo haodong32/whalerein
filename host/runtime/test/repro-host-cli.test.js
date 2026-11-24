@@ -72,7 +72,7 @@ async function seedBoundProfile(stateRoot, credentials) {
   registry.ensure()
   const id = registry.active().id
   registry.setBindings(id, {
-    hostId: 'host-1',
+    hostId: id,
     operationId: 'op-1',
     accessOrigin: 'https://access.example',
     enrollmentRevision: '1',
@@ -83,9 +83,9 @@ async function seedBoundProfile(stateRoot, credentials) {
     installationId: 'test-install',
   })
   await store.setJson(CREDENTIAL_PURPOSES.transportCredential, {
-    hostId: 'host-1',
+    hostId: id,
     mqttUrl: 'mqtts://broker.example:8883',
-    username: 'host:host-1',
+    username: `host:${id}`,
     password: 'transport-secret',
     accessOrigin: 'https://access.example',
     enrollmentRevision: '1',
