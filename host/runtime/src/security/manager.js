@@ -722,8 +722,16 @@ export class SecurityManager {
         && channel.connectionRef !== request.connection_ref) {
       return { ok: false, code: 'unauthorized', reason: 'connection_changed' }
     }
-    const grantGeneration = requestGeneration(request.grant_generation)
-    const enrollmentGeneration = requestGeneration(request.enrollment_generation)
+    // Top-level generations are Access-filled for query-lane requests only.
+    // A durable command carries no such stamp and must not be compared against
+    // the channel's admission scope. An explicit zero remains a valid
+    // Standalone generation and is still compared.
+    const grantGeneration = request.grant_generation === undefined || request.grant_generation === null
+      ? null
+      : requestGeneration(request.grant_generation)
+    const enrollmentGeneration = request.enrollment_generation === undefined || request.enrollment_generation === null
+      ? null
+      : requestGeneration(request.enrollment_generation)
     if ((grantGeneration !== null && grantGeneration !== channel.grantGeneration)
         || (enrollmentGeneration !== null && enrollmentGeneration !== channel.enrollmentGeneration)) {
       return { ok: false, code: 'unauthorized', reason: 'authorization_scope_changed' }

@@ -371,6 +371,27 @@ test('when request frame channel/MAC/AAD checks pass, results are sealed to that
   const authenticate = (request, body) => security.withRequest({ ...request, body }, result => result)
   const opened = await authenticate(request, body)
   assert.equal(opened.ok, true)
+  // A durable command has no Access-filled query scope; absent generations
+  // must not be treated as a zero generation mismatch.
+  const command = { ...request, kind: 'REQUEST_KIND_COMMAND', command_id: 'c-1' }
+  const commandAad = requestAad({
+    requestId: command.request_id,
+    hostId,
+    deviceId: 'device-1',
+    kind: command.kind,
+    commandId: command.command_id,
+    expiresAt: command.expires_at_unix_ms,
+  })
+  const commandSealed = seal(device.c2h, commandAad, plaintext)
+  const commandBody = codec.encode('whalerein.v1.EncryptedFrame', {
+    channel_id: device.channelId,
+    nonce: commandSealed.nonce,
+    ciphertext: commandSealed.ciphertext,
+  })
+  delete command.grant_generation
+  delete command.enrollment_generation
+  const commandOpened = await authenticate(command, commandBody)
+  assert.equal(commandOpened.ok, true)
   assert.deepEqual([...opened.plaintext], [...plaintext])
 
   assert.equal((await authenticate({ ...request, channel_id: 'other' }, body)).ok, false)
