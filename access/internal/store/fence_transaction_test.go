@@ -154,7 +154,7 @@ func (tx *revokeGrantTx) Exec(_ context.Context, sql string, args ...any) (pgcon
 			tx.t.Fatal("wrong device scope")
 		}
 	case "grant":
-		if len(args) != 4 || args[0] != "host" || args[1] != "device" {
+		if len(args) != 3 || args[0] != "host" || args[1] != "device" {
 			tx.t.Fatal("wrong grant scope")
 		}
 	}
