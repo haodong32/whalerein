@@ -8,11 +8,14 @@ retired relay epoch is named explicitly instead of falling back.
 
 import base64
 import json
+import urllib.parse
 import time
 import uuid
 
 import pytest
-from environment import relay_http, wait
+import urllib.request
+
+from environment import INTERNAL_TOKEN, relay_http, wait
 from journey_helpers import host_online, sql, wait_online
 
 pytestmark = pytest.mark.transport
@@ -215,6 +218,29 @@ def test_ac08_cohort_quiesce_and_release(scenario, paired_device):
     session = scenario.dsh.create_session()
     paired_device.sessions(scenario.host)
     assert paired_device.hosts()[0]["online"] is True
+
+    # Capture readiness and the Broker policy topology before quiescing.
+    with urllib.request.urlopen("http://127.0.0.1:18080/readyz", timeout=5) as ready:
+        assert ready.status == 200
+        ready_body = ready.read().decode()
+    host_token = scenario.env["WHALEREIN_HOST_PROVISIONING_TOKEN"]
+    form = urllib.parse.urlencode({
+        "clientid": "whalerein-host-" + scenario.host,
+        "username": "host:" + scenario.host,
+        "password": host_token,
+    }).encode()
+    policy_request = urllib.request.Request(
+        "http://127.0.0.1:18081/internal/broker/connect",
+        data=form,
+        headers={"X-WhaleRein-Internal-Token": INTERNAL_TOKEN},
+    )
+    with urllib.request.urlopen(policy_request, timeout=5) as response:
+        policy = response.read().decode()
+    assert policy.startswith("whalerein/1"), policy[:40]
+    for topic in ("/request", "/result", "/event", "/presence", "/d/+/live"):
+        assert f"whalerein/v1/h/{scenario.host}{topic}" in policy, topic
+    assert f"whalerein/v1/h/{scenario.host}/live" not in policy, "the retired Host live topic is still granted"
+    assert len(ready_body) >= 0
 
     # Quiesce: the matching Host stops admitting work before the cutover.
     scenario.plugin.close()
