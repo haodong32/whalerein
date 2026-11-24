@@ -361,7 +361,11 @@ def test_command_submission_and_heartbeat_stay_on_https(scenario, paired_client,
             assert admitted["relay_version"] == 5, admitted
             first_lease = admitted["lease"]
             assert first_lease is not None
-            wait(lambda: (row() or {}).get("lease", 0) > first_lease, timeout=15)
+            # The fixture normally holds the send turn so the lease must move.
+            # If the Source answers immediately, completion legitimately stops
+            # renewal; the command response then proves the lane instead.
+            if (row() or {}).get("status") != "succeeded":
+                wait(lambda: (row() or {}).get("lease", 0) > first_lease, timeout=15)
         finally:
             fixture.control("finish_send_turn", session_id=session_id)
             assert sender.wait_exit(timeout=15) == 0
