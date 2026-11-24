@@ -2224,9 +2224,6 @@ static int acl_check_callback(int event, void *event_data, void *userdata)
 		return rc;
 	}
 	rc = acl_decide_locked(client, access, ed->topic);
-	if (rc != MOSQ_ERR_SUCCESS && access == ACL_WRITE) {
-		mosquitto_log_printf(MOSQ_LOG_ERR, "whalerein: acl deny write %s for %s kind=%d conn=%d", ed->topic, client_id, client ? client->kind : -1, client ? client->connected : -1);
-	}
 	pthread_mutex_unlock(&lock);
 	return rc;
 }
