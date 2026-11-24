@@ -613,8 +613,13 @@ test('wait state rejects an oversized encrypted HostResult for a valid request',
     ctx.adapter.readWaitState = async () => ({active:true,running:false,queueAvailable:true,pendingInput:[]})
     ctx.adapter.waitSession = async () => ({reason:'idle',state:{active:true,running:false,queueAvailable:true,pendingInput:[]}})
     let wireSize = 0
+    const replyOptions = []
     const publish = ctx.access.publishResult.bind(ctx.access)
-    ctx.access.publishResult = async bytes => { wireSize=bytes.length; await publish(bytes) }
+    ctx.access.publishResult = async (bytes, options = {}) => {
+      wireSize=bytes.length
+      replyOptions.push(options)
+      await publish(bytes, options)
+    }
     const query = async (size, waiting) => {
       const payload = waiting ? {wait_session:{session_id:'x'.repeat(size),wait_id:'w',timeout_ms:1000}} : {read_wait_state:{session_id:'x'.repeat(size)}}
       const request=encryptedQuery({security:ctx.host.security,store:ctx.store,channel,payload,overrides:{request_id:'wait-boundary'}})
@@ -634,6 +639,11 @@ test('wait state rejects an oversized encrypted HostResult for a valid request',
       assert.equal(oversized.result.status,'succeeded')
       assert.ok(oversized.result.result_reference, 'the oversized result travels by reference')
       assert.equal(oversized.result.result_body?.length ?? 0, 0)
+      const scoped = replyOptions.at(-1)
+      assert.ok(typeof scoped.requestId === 'string' && scoped.requestId !== '', 'query result keeps its request id')
+      assert.equal(scoped.connectionRef, channel.connectionRef, 'query result keeps its admitted connection')
+      assert.equal(scoped.enrollmentGeneration, 1, 'query result keeps its enrollment generation')
+      assert.ok(scoped.sessionId, 'query result keeps its application session')
       const recovered = await query(2, waiting)
       assert.equal(recovered.result.status, 'succeeded')
       assert.ok(recovered.result.result_body?.length)
