@@ -106,6 +106,31 @@ func validResourceID(value string) bool {
 	return resourceIDPattern.MatchString(value)
 }
 
+// Wire identifier bounds for client-supplied fields that Access persists and
+// logs (proto/v1/WIRE.md). A request whose identifier violates them is
+// invalid_argument and is never forwarded.
+const (
+	maxChannelIdentifierBytes = 128
+	maxTraceIdentifierBytes   = 64
+)
+
+// validWireIdentifier checks one client identifier against its wire bound:
+// at most maxBytes, printable ASCII, and without the "|" AAD separator. An
+// empty value is valid because the contract defines an absent channel id while
+// a channel is being established and an absent client trace id.
+func validWireIdentifier(value string, maxBytes int) bool {
+	if len(value) > maxBytes {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		character := value[i]
+		if character < 0x21 || character > 0x7e || character == '|' {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request, _ map[string]string) {
 	if s.deps.RequireDeviceSession {
 		s.writeError(w, r, auth.ErrForbidden)
@@ -204,7 +229,9 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request, params map
 	// Client-generated identities become durable keys and later path
 	// parameters, so they obey the same bounded contract as route ids.
 	if !validResourceID(request.GetRequestId()) ||
-		(request.GetCommandId() != "" && !validResourceID(request.GetCommandId())) {
+		(request.GetCommandId() != "" && !validResourceID(request.GetCommandId())) ||
+		!validWireIdentifier(request.GetChannelId(), maxChannelIdentifierBytes) ||
+		!validWireIdentifier(request.GetTraceId(), maxTraceIdentifierBytes) {
 		s.writeError(w, r, auth.ErrBadRequest)
 		return
 	}
@@ -219,7 +246,9 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request, params map
 	request.HostId = hostID
 	request.DeviceId = identity.DeviceID
 	if request.GetTraceId() == "" {
-		if meta := requestMetaFrom(r.Context()); meta != nil {
+		// The HTTP correlation id is bounded more loosely than the wire
+		// trace_id; never copy a value that would violate the wire bound.
+		if meta := requestMetaFrom(r.Context()); meta != nil && len(meta.traceID) <= maxTraceIdentifierBytes {
 			request.TraceId = meta.traceID
 		}
 	}

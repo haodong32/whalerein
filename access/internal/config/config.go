@@ -7,6 +7,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
@@ -483,8 +484,14 @@ func (c Config) validateExternal() []string {
 		} else {
 			seen[key.ID] = true
 		}
-		if _, err := base64.RawURLEncoding.DecodeString(key.PublicKey); err != nil {
+		if material, err := base64.RawURLEncoding.DecodeString(key.PublicKey); err != nil {
 			problems = append(problems, label+".public_key must be raw URL base64")
+		} else if len(material) != ed25519.PublicKeySize {
+			// Startup builds the trust store from the same decoded material, so
+			// check-config must refuse a key the server would refuse rather than
+			// report a preflight success and then crash-loop.
+			problems = append(problems, fmt.Sprintf(
+				"%s.public_key must decode to a %d-byte Ed25519 public key", label, ed25519.PublicKeySize))
 		}
 		if !key.NotBefore.Time().IsZero() && !key.NotAfter.Time().IsZero() &&
 			!key.NotBefore.Time().Before(key.NotAfter.Time()) {
@@ -500,7 +507,13 @@ func (c Config) Validate() error {
 	var problems []string
 	switch c.Mode {
 	case "standalone":
-		if len(c.External.VerificationKeys) > 0 || c.External.Issuer != "" {
+		// External mode owns these settings. Accepting one in Standalone but
+		// ignoring it would silently drop an operator's enforcement request,
+		// which matters most for the Device-session cutover.
+		if len(c.External.VerificationKeys) > 0 || c.External.Issuer != "" ||
+			c.External.RequireDeviceSession || c.External.SessionEnvironment != "" ||
+			c.External.SessionAuthorityRevision != "" || c.External.ServiceIdentity != "" ||
+			c.External.Region != "" || c.External.MQTTURL != "" || c.External.ClockSkew != 0 {
 			problems = append(problems, "external settings are only valid in external mode")
 		}
 	case "external":
@@ -521,8 +534,14 @@ func (c Config) Validate() error {
 	require("public_url", c.PublicURL)
 	if c.PublicURL != "" {
 		u, err := url.Parse(c.PublicURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		switch {
+		case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "":
 			problems = append(problems, "public_url must be an absolute http(s) URL")
+		case u.User != nil:
+			// This endpoint is copied into client-visible pairing URIs, so an
+			// embedded credential would be disclosed. Use a dedicated secret
+			// setting instead.
+			problems = append(problems, "public_url must not embed credentials (userinfo)")
 		}
 	}
 	require("database_url", c.DatabaseURL)
@@ -531,9 +550,13 @@ func (c Config) Validate() error {
 	require("broker.url", c.Broker.URL)
 	if c.Broker.PublicURL != "" {
 		u, err := url.Parse(c.Broker.PublicURL)
-		if err != nil || u.Host == "" {
+		switch {
+		case err != nil || u.Host == "":
 			problems = append(problems, "broker.public_url must be an absolute URL")
-		} else {
+		case u.User != nil:
+			// The advertised broker endpoint is copied into pairing URIs.
+			problems = append(problems, "broker.public_url must not embed credentials (userinfo)")
+		default:
 			switch u.Scheme {
 			case "mqtt", "mqtts", "tcp", "tls", "ssl":
 			default:
@@ -543,32 +566,35 @@ func (c Config) Validate() error {
 	}
 	if c.Broker.URL != "" {
 		u, err := url.Parse(c.Broker.URL)
-		switch u.Scheme {
-		case "tcp", "tls", "mqtt", "mqtts", "ssl":
-		default:
-			problems = append(problems, "broker.url must use tcp, tls, mqtt, mqtts or ssl")
-		}
 		if err != nil || u.Host == "" {
+			// url.Parse returns a nil URL for several malformed inputs, so the
+			// absolute-URL check must run before any field access.
 			problems = append(problems, "broker.url must be an absolute URL")
-		}
-		switch {
-		case tlsBrokerScheme(u.Scheme):
-			if c.Broker.InsecureSkipVerify {
-				if !loopbackHost(u.Hostname()) {
-					problems = append(problems, "broker.insecure_skip_verify is only allowed for a loopback broker; configure broker.ca_file for a remote TLS broker")
+		} else {
+			switch u.Scheme {
+			case "tcp", "tls", "mqtt", "mqtts", "ssl":
+			default:
+				problems = append(problems, "broker.url must use tcp, tls, mqtt, mqtts or ssl")
+			}
+			switch {
+			case tlsBrokerScheme(u.Scheme):
+				if c.Broker.InsecureSkipVerify {
+					if !loopbackHost(u.Hostname()) {
+						problems = append(problems, "broker.insecure_skip_verify is only allowed for a loopback broker; configure broker.ca_file for a remote TLS broker")
+					}
+					if c.Broker.CAFile != "" {
+						problems = append(problems, "broker.ca_file has no effect while broker.insecure_skip_verify is true")
+					}
 				}
 				if c.Broker.CAFile != "" {
-					problems = append(problems, "broker.ca_file has no effect while broker.insecure_skip_verify is true")
+					if err := validateCAFile(c.Broker.CAFile); err != nil {
+						problems = append(problems, "broker.ca_file: "+err.Error())
+					}
 				}
-			}
-			if c.Broker.CAFile != "" {
-				if err := validateCAFile(c.Broker.CAFile); err != nil {
-					problems = append(problems, "broker.ca_file: "+err.Error())
+			default:
+				if c.Broker.CAFile != "" || c.Broker.ServerName != "" || c.Broker.InsecureSkipVerify {
+					problems = append(problems, "broker.ca_file, broker.server_name and broker.insecure_skip_verify require a TLS broker.url")
 				}
-			}
-		default:
-			if c.Broker.CAFile != "" || c.Broker.ServerName != "" || c.Broker.InsecureSkipVerify {
-				problems = append(problems, "broker.ca_file, broker.server_name and broker.insecure_skip_verify require a TLS broker.url")
 			}
 		}
 	}

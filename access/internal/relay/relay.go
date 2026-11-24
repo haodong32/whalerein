@@ -4,9 +4,12 @@
 // It sits between the public HTTP surface and access/internal/payload. The HTTP
 // layer extracts headers and bodies; this package authenticates the Host
 // signature or Device bearer, validates the exact scope, length, digest and
-// expiry, rechecks the active grant revisions, and only then calls the payload
-// store. It never inspects ciphertext and never logs an object id, path or
-// content.
+// expiry, and rechecks the active grant revisions before releasing bytes. A
+// Device bearer is verified before any object read. A Host proof is verified
+// against the key of the Host stored on the object, so the owner is read first,
+// but a missing object never answers differently from a rejected proof for an
+// unauthenticated caller. It never inspects ciphertext and never logs an object
+// id, path or content.
 package relay
 
 import (
@@ -538,18 +541,31 @@ func (s *Service) loadObject(ctx context.Context, req ObjectRequest, verify func
 	if !useDevice && len(req.Signature) == 0 {
 		return store.PayloadObject{}, ErrUnauthorized
 	}
+	// Authenticate a Device bearer before touching the store: an invalid
+	// credential must answer the same way whether or not the object exists.
+	var identity auth.Identity
+	if useDevice {
+		resolved, err := s.auth.AuthenticateDeviceToken(ctx, req.BearerToken)
+		if err != nil {
+			return store.PayloadObject{}, translateAuth(err)
+		}
+		identity = resolved
+	}
 	object, err := s.store.GetPayload(ctx, req.ObjectID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return store.PayloadObject{}, ErrNotFound
+			if useDevice {
+				return store.PayloadObject{}, ErrNotFound
+			}
+			// A Host proof is verified against the key of the Host stored on
+			// the object, so a missing object cannot be authenticated without
+			// first learning that it exists. Answer every unauthenticated Host
+			// request the same way to keep object existence out of the status.
+			return store.PayloadObject{}, ErrUnauthorized
 		}
 		return store.PayloadObject{}, err
 	}
 	if useDevice {
-		identity, err := s.auth.AuthenticateDeviceToken(ctx, req.BearerToken)
-		if err != nil {
-			return store.PayloadObject{}, translateAuth(err)
-		}
 		if err := s.checkDeviceScope(ctx, identity, object); err != nil {
 			return store.PayloadObject{}, err
 		}
