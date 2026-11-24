@@ -974,6 +974,15 @@ export class RealDshAdapter extends DshAdapter {
     }
   }
 
+  // Avoid the full session listing: the live controller state is the cheap,
+  // per-session run marker. A missing live state falls back to the summary.
+  async versionRunPhase(sessionId, { signal } = {}) {
+    const state = await this.#stateOf(sessionId, signal)
+    if (state) return state.running === true ? 'RUNNING' : 'IDLE'
+    const summary = await this.#summaryFor(sessionId, signal)
+    return summary?.running === true ? 'RUNNING' : 'IDLE'
+  }
+
   async #summaryFor(sessionId, signal) {
     if (signal?.aborted) throw new AdapterError('unavailable')
     const controller = this.#service('sessionController')

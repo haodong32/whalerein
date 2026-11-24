@@ -6,7 +6,6 @@ import { randomUUID } from 'node:crypto'
 import { ERROR_CODES, PluginError } from '../errors.js'
 import {
   BROKER_PACKET_LIMIT_BYTES,
-  MESSAGE_BYTES,
   RELAY_VERSION,
   effectivePacketBytes,
   maxPlaintextBytes,
@@ -32,6 +31,9 @@ const BATCH_SEEN_LIMIT = 512
 // a preview instead of letting it consume unbounded memory or delay control.
 const LIVE_QUEUE_PACKETS = 64
 const LIVE_QUEUE_BYTES = 256 * 1024
+// Overlapping authoritative version reads coalesce by session+facet. A bounded
+// map keeps a burst of observers from retaining more than a few reads.
+const VERSION_TASK_LIMIT = 64
 
 /**
  * Session state is a bounded transition summary. Approvals are content: they
@@ -108,6 +110,7 @@ export class WatchedEvents {
   #outboxDrops = 0
   #snapshotRequired = new Map()
   #previewBudgetCache = new Map()
+  #versionTasks = new Map()
   #livePendingBytes = 0
   #livePendingPackets = 0
   constructor({ hostId, store, security, adapter, access, codec = defaultCodec, now = Date.now, config = {}, logger }) {
@@ -116,11 +119,22 @@ export class WatchedEvents {
   start() { this.#timer = setInterval(() => this.#expire(), 1000); this.#timer.unref?.(); return this }
   async stop() {
     clearInterval(this.#timer); this.#timer = null
+    for (const task of this.#versionTasks.values()) task.controller.abort('unavailable')
+    this.#versionTasks.clear()
     for (const id of [...this.#watches.keys()]) this.#remove(id)
     await Promise.all([...this.#lanes.values()].map(l => l.committed))
     this.#lanes.clear()
   }
-  #expire() { for (const [id, w] of this.#watches) if (w.expires <= this.now() || !this.security.getChannel(w.channelId)) this.#remove(id) }
+  // Epoch-5 observations are owned by the authenticated Broker connection:
+  // they end on the exact connection close, channel replacement or Host
+  // restart, never on a read/version-check cadence. The 30 s lease remains a
+  // legacy fallback for a watch without a connection binding.
+  #expire() {
+    for (const [id, w] of this.#watches) {
+      if (!this.security.getChannel(w.channelId)) this.#remove(id)
+      else if (!w.connectionRef && w.expires <= this.now()) this.#remove(id)
+    }
+  }
   #remove(id) {
     const watch = this.#watches.get(id); if (!watch) return
     this.#watches.delete(id)
@@ -131,6 +145,15 @@ export class WatchedEvents {
       source.buffer?.flush()
       source.subscription?.close()
       this.#sources.delete(watch.sessionId)
+      this.#abortVersionTasks(watch.sessionId)
+    }
+  }
+  #abortVersionTasks(sessionId) {
+    for (const [key, task] of this.#versionTasks) {
+      if (key.startsWith(`${sessionId}\u0000`)) {
+        task.controller.abort('unavailable')
+        this.#versionTasks.delete(key)
+      }
     }
   }
   // End every observation of one Source with a Host-authored terminal event.
@@ -221,12 +244,18 @@ export class WatchedEvents {
     this.#expire()
     const channel = this.security.getChannel(channelId)
     if (!channel || channel.deviceId !== deviceId) throw new PluginError('unauthorized', 'channel unavailable')
+    if (typeof channel.connectionRef !== 'string' || channel.connectionRef === '') {
+      throw new PluginError('unauthorized', 'connection ownership unavailable')
+    }
+    const connectionRef = channel.connectionRef
+    const grantGeneration = channel.grantGeneration ?? 0
+    const enrollmentGeneration = channel.enrollmentGeneration ?? 0
     const requested = interestsOf(interests)
     let watch = [...this.#watches.values()].find(w => w.deviceId === deviceId && w.channelId === channelId && w.sessionId === sessionId)
     if (!watch) {
       if (this.#watches.size >= 512 || [...this.#watches.values()].filter(w => w.deviceId === deviceId).length >= 8) throw new PluginError('rate_limited', 'watch budget exceeded')
       if (!this.#sources.has(sessionId) && this.#sources.size >= 64) throw new PluginError('rate_limited', 'source watch budget exceeded')
-      watch = { id: randomUUID(), deviceId, channelId, sessionId, interests: requested, expires: this.now() + LEASE }
+      watch = { id: randomUUID(), deviceId, channelId, sessionId, connectionRef, grantGeneration, enrollmentGeneration, interests: requested, expires: this.now() + LEASE }
       this.#watches.set(watch.id, watch)
       let source = this.#sources.get(sessionId)
       if (!source) {
@@ -339,27 +368,98 @@ export class WatchedEvents {
     }
     return ready
   }
-  // Lease renewal. The Host still reads the authoritative state so a lost
-  // final notification cannot leave a stale observation, but the answer keeps
-  // only transition markers: content rides the event stream and the paged
-  // history read, so a lease can never grow with the transcript.
-  async refresh(deviceId, channelId, ids, signal) {
-    if (!Array.isArray(ids) || ids.length > 8 || new Set(ids).size !== ids.length) throw new PluginError('invalid_argument', 'invalid watch selection')
-    const watches = await Promise.all(ids.map(async id => {
-      const ready = await this.#ready(this.#owned(deviceId, channelId, id), signal)
-      const state = ready.state
-      return {
-        watch_id: id,
-        lease_ms: ready.lease_ms,
-        revision: state?.revision ?? 0,
-        run_phase: state?.run_phase ?? 0,
-        live_epoch: state?.live_epoch ?? '',
-        history_head: state?.history_head ?? '',
-        projection_id: state?.projection_id ?? '',
-        questions: ready.questions,
+  /**
+   * Read-only authoritative version markers for the active observations of one
+   * device/channel/session. It never renews a lease, never installs a baseline
+   * and never reads content. Overlapping reads for the same session+facet are
+   * shared, while every requester keeps its own authorization check.
+   */
+  async versions(deviceId, channelId, sessionId, signal) {
+    if (typeof sessionId !== 'string' || sessionId === '') throw new PluginError('invalid_argument', 'session id missing')
+    if (signal?.aborted) throw new PluginError('unavailable')
+    this.#expire()
+    const watches = [...this.#watches.values()].filter(w =>
+      w.deviceId === deviceId && w.channelId === channelId && w.sessionId === sessionId)
+    if (watches.length === 0) throw new PluginError('expired', 'watch unavailable')
+    const needConversation = watches.some(w => w.interests.conversation)
+    const needQuestions = watches.some(w => w.interests.questions)
+    const [conversation, questions] = await Promise.all([
+      needConversation ? this.#versionFacet(sessionId, 'conversation', signal) : null,
+      needQuestions ? this.#versionFacet(sessionId, 'questions', signal) : null,
+    ])
+    // Each requester re-checks its own observation after the shared read. A
+    // watch or channel that vanished meanwhile is no longer authorized.
+    if (!this.security.getChannel(channelId)) throw new PluginError('expired', 'watch unavailable')
+    const checks = []
+    for (const watch of watches) {
+      if (!this.#watches.has(watch.id) || watch.deviceId !== deviceId
+          || watch.channelId !== channelId || watch.connectionRef === undefined) {
+        throw new PluginError('expired', 'watch unavailable')
       }
-    }))
-    return { watches }
+      const check = { watch_id: watch.id }
+      if (watch.interests.conversation) {
+        check.revision = conversation?.revision ?? 0
+        if (conversation?.run_phase !== undefined) check.run_phase = conversation.run_phase
+        if (conversation?.live_epoch !== undefined) check.live_epoch = conversation.live_epoch
+        if (conversation?.history_head !== undefined) check.history_head = conversation.history_head
+        if (conversation?.projection_id !== undefined) check.projection_id = conversation.projection_id
+      }
+      if (watch.interests.questions) {
+        const descriptor = questions?.questions
+        check.questions = questionDescriptorToProto(descriptor ?? { availability: 'unavailable', code: 'unavailable' })
+      }
+      checks.push(check)
+    }
+    return { checks }
+  }
+
+  async #versionFacet(sessionId, facet, signal) {
+    try {
+      return await this.#sharedVersionMarkers(sessionId, facet, signal)
+    } catch (error) {
+      if (signal?.aborted) throw new PluginError('unavailable')
+      const code = errorCode(error)
+      // An authoritative denial ends the affected observation. A transient
+      // failure leaves its data stale and is retried on the next check.
+      if (this.#closeIfGone(sessionId, code)) throw new PluginError('not_found', 'session ended')
+      if (QUESTION_FATAL_CODES.has(code) && facet === 'questions') throw new PluginError(code)
+      throw new PluginError('unavailable')
+    }
+  }
+
+  #sharedVersionMarkers(sessionId, facet, signal) {
+    const key = `${sessionId}\u0000${facet}`
+    let task = this.#versionTasks.get(key)
+    if (!task) {
+      if (this.#versionTasks.size >= VERSION_TASK_LIMIT) throw new PluginError('rate_limited', 'version read budget exceeded')
+      const controller = new AbortController()
+      const facets = facet === 'questions' ? { questions: true } : { conversation: true }
+      const promise = Promise.resolve()
+        .then(() => this.adapter.readVersionMarkers(sessionId, facets, { signal: controller.signal }))
+      task = { controller, promise }
+      this.#versionTasks.set(key, task)
+      const cleanup = () => { if (this.#versionTasks.get(key) === task) this.#versionTasks.delete(key) }
+      promise.then(cleanup, cleanup)
+    }
+    return this.#joinVersionTask(task, signal)
+  }
+
+  #joinVersionTask(task, signal) {
+    if (!signal) return task.promise
+    if (signal.aborted) return Promise.reject(new PluginError('unavailable'))
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        signal.removeEventListener('abort', onAbort)
+        // Cancelling one joiner never aborts the shared read while another
+        // requester still waits on it.
+        reject(new PluginError('unavailable'))
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+      task.promise.then(
+        (value) => { signal.removeEventListener('abort', onAbort); resolve(value) },
+        (error) => { signal.removeEventListener('abort', onAbort); reject(error) },
+      )
+    })
   }
 
   unwatch(deviceId, channelId, id) { this.#owned(deviceId, channelId, id); this.#remove(id) }
@@ -554,12 +654,15 @@ export class WatchedEvents {
     const source = this.#sources.get(sessionId)
     if (!source) return
     const questionsOnly = update.questions != null
-    // One shared event route is bounded by its smallest authenticated receiver
-    // and by local Host policy. A larger receiver cannot raise it.
-    const route = this.#routeForSource(source)
+    // Control events share one Access route bounded by its smallest
+    // authenticated receiver. Previews travel directly to each device topic
+    // under that device's own advertised receive budget.
+    const liveUpdate = update.live != null
+    const controlRoute = liveUpdate ? null : this.#routeForSource(source)
     for (const id of source.recipients) {
       const watch = this.#watches.get(id); if (!watch) continue
       if (questionsOnly ? !watch.interests.questions : !watch.interests.conversation) continue
+      const route = liveUpdate ? this.#liveRouteForWatch(watch) : controlRoute
       this.#enqueue(watch, { ...update, watch_id: id }, route)
     }
   }
@@ -595,8 +698,30 @@ export class WatchedEvents {
       packetLimit,
       envelopeLimit,
       topic: this.access?.eventTopic ?? `whalerein/v1/h/${this.hostId}/event`,
-      liveTopic: this.access?.liveTopic ?? `whalerein/v1/h/${this.hostId}/live`,
     }
+  }
+
+  /**
+   * Live route for one recipient. The destination topic and the receive
+   * budget are per device; Access's own receive advertisement does not apply
+   * because a preview never crosses the Access hop.
+   */
+  #liveRouteForWatch(watch) {
+    const local = this.#localBudget()
+    let packetLimit = Math.min(local.packet_bytes, BROKER_PACKET_LIMIT_BYTES)
+    let envelopeLimit = local.envelope_bytes
+    const advertised = this.security.getChannelReceive?.(watch.channelId)?.budget
+    if (advertised && typeof advertised === 'object') {
+      if (Number.isSafeInteger(advertised.packet_bytes) && advertised.packet_bytes > 0) {
+        packetLimit = Math.min(packetLimit, advertised.packet_bytes)
+      }
+      if (Number.isSafeInteger(advertised.envelope_bytes) && advertised.envelope_bytes > 0) {
+        envelopeLimit = Math.min(envelopeLimit, advertised.envelope_bytes)
+      }
+    }
+    const topic = this.access?.deviceLiveTopic?.(watch.deviceId)
+      ?? `whalerein/v1/h/${this.hostId}/d/${watch.deviceId}/live`
+    return { packetLimit, envelopeLimit, topic }
   }
 
   /**
@@ -610,7 +735,7 @@ export class WatchedEvents {
     const blockId = live.block_id ?? 'budget'
     const kind = live.delta?.kind ?? 'BLOCK_KIND_TEXT'
     const watchId = update?.watch_id ?? watch.id
-    const key = `${watch.deviceId}\u0000${watch.channelId}\u0000${watch.id}\u0000${attempt.live_epoch ?? ''}\u0000${attempt.attempt_id ?? ''}\u0000${blockId}\u0000${kind}\u0000${watchId}\u0000${route.packetLimit}\u0000${route.envelopeLimit}\u0000${route.liveTopic}`
+    const key = `${watch.deviceId}\u0000${watch.channelId}\u0000${watch.id}\u0000${attempt.live_epoch ?? ''}\u0000${attempt.attempt_id ?? ''}\u0000${blockId}\u0000${kind}\u0000${watchId}\u0000${route.packetLimit}\u0000${route.envelopeLimit}\u0000${route.topic}`
     const cached = this.#previewBudgetCache.get(key)
     if (cached !== undefined) return cached
     const at = this.now()
@@ -643,7 +768,7 @@ export class WatchedEvents {
         created_at_unix_ms: at,
         relay_version: RELAY_VERSION,
       })
-      return publishPacketBytes(route.liveTopic, envelope.length, { qos: 0 })
+      return publishPacketBytes(route.topic, envelope.length, { qos: 0 })
     }
     // Leave a small reserve so a created-at varint that grows while the split
     // is sealed cannot push the last preview over the limit.
@@ -662,10 +787,10 @@ export class WatchedEvents {
 
   #previewTextBudget(source, update = null) {
     let max = Number.POSITIVE_INFINITY
-    const route = this.#routeForSource(source)
     for (const id of source.recipients) {
       const watch = this.#watches.get(id)
       if (!watch) continue
+      const route = this.#liveRouteForWatch(watch)
       const candidate = update ? { ...update, watch_id: id } : null
       max = Math.min(max, candidate
         ? this.#maxPreviewTextBytes(watch, candidate, route)
@@ -726,7 +851,9 @@ export class WatchedEvents {
   }
 
   #publishUpdate(watch, update, route = null) {
-    const resolved = route ?? this.#routeForSource(this.#sources.get(watch.sessionId))
+    const resolved = route ?? (update.live
+      ? this.#liveRouteForWatch(watch)
+      : this.#routeForSource(this.#sources.get(watch.sessionId)))
     const plaintext = this.codec.encode('whalerein.v1.EventPayload', { update })
     const at = this.now()
     const envelope = this.#envelope(watch, plaintext, at)
@@ -748,7 +875,7 @@ export class WatchedEvents {
       // Live is fire-and-forget: publish immediately, never behind a chain and
       // never on the control event topic. A disconnected or over-bound live
       // queue drops the preview and leaves the committed message authoritative.
-      this.#publishLive(envelope)
+      this.#publishLive(watch, envelope)
       return
     }
 
@@ -778,7 +905,7 @@ export class WatchedEvents {
    * preserves their client order. Only the bounded per-connection queue can
    * drop a preview.
    */
-  #publishLive(envelope) {
+  #publishLive(watch, envelope) {
     if (!this.access?.connected || typeof this.access.publishLive !== 'function') return false
     if (this.#livePendingPackets >= LIVE_QUEUE_PACKETS || this.#livePendingBytes + envelope.length > LIVE_QUEUE_BYTES) {
       this.logger?.warn('live_preview_dropped', { code: 'rate_limited', reason: 'queue' })
@@ -786,7 +913,7 @@ export class WatchedEvents {
     }
     let pending
     try {
-      pending = this.access.publishLive(envelope)
+      pending = this.access.publishLive(envelope, { deviceId: watch.deviceId })
     } catch {
       return false
     }
@@ -824,12 +951,17 @@ export class WatchedEvents {
     for (const { deviceId, channelId } of channels) this.#clearChannelEvents(deviceId, channelId)
   }
 
-  onDeviceOffline(deviceId) {
-    const observedChannels = new Set()
+  /**
+   * End only the observations bound to one exact Broker connection instance.
+   * A delayed close for a replaced connection never touches a newer watch on
+   * the same device or session.
+   */
+  onConnectionClosed(deviceId, connectionRef, closedChannels = []) {
+    const channels = new Set(closedChannels.map(channel => channel.channelId))
     for (const watch of this.#watches.values()) {
-      if (watch.deviceId === deviceId) observedChannels.add(watch.channelId)
+      if (watch.deviceId === deviceId && watch.connectionRef === connectionRef) channels.add(watch.channelId)
     }
-    for (const channelId of observedChannels) this.#clearChannelEvents(deviceId, channelId)
+    for (const channelId of channels) this.#clearChannelEvents(deviceId, channelId)
   }
 
   observingDeviceIds() {

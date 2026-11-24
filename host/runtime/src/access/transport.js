@@ -73,7 +73,7 @@ function present(value) {
 export function assertRelayEpoch(envelope) {
   const epoch = envelope?.relay_version
   if (Number(epoch) !== RELAY_VERSION) {
-    throw new PluginError('protocol_version_incompatible', 'relay epoch is not 4')
+    throw new PluginError('protocol_version_incompatible', `relay epoch is not ${RELAY_VERSION}; upgrade the sender`)
   }
   return envelope
 }
@@ -216,13 +216,19 @@ export class RelayTransport {
    * `request`). options.receiverLimit is the authenticated Access
    * advertisement for this hop. options.expiresAt, sessionId, partId and
    * deviceId/channelId describe the relay-object scope for a reference.
+   * options.properties (MQTT 5 PUBLISH properties) and options.propertiesBytes
+   * (their exact encoded length) are carried on every representation so packet
+   * accounting includes Correlation Data and Message Expiry.
    */
   sendComplete(topic, envelopeBytes, options = {}) {
     if (!(envelopeBytes instanceof Uint8Array) || envelopeBytes.length === 0) {
       return Promise.reject(new PluginError('invalid_argument', 'empty relay envelope'))
     }
+    const propertiesBytes = Number.isSafeInteger(options.propertiesBytes) && options.propertiesBytes > 0
+      ? options.propertiesBytes
+      : 0
     const bytes = Buffer.from(envelopeBytes)
-    return this.#chain(topic, () => this.#sendComplete(topic, bytes, options))
+    return this.#chain(topic, () => this.#sendComplete(topic, bytes, { ...options, propertiesBytes }))
   }
 
   /**
@@ -306,7 +312,8 @@ export class RelayTransport {
     const envelopeLimit = Number.isSafeInteger(options.envelopeLimit) && options.envelopeLimit > 0
       ? Math.min(this.budget.envelope_bytes, options.envelopeLimit)
       : this.budget.envelope_bytes
-    const encoded = publishPacketBytes(topic, envelopeBytes.length)
+    const propertiesBytes = options.propertiesBytes ?? 0
+    const encoded = publishPacketBytes(topic, envelopeBytes.length, { propertiesBytes })
     const referenced = envelope[descriptor.reference] != null
     if (options.inlineOnly === true && encoded > limit) {
       throw new PluginError('payload_too_large', 'inline message exceeds the hop packet budget')
@@ -315,11 +322,11 @@ export class RelayTransport {
       if (encoded > limit) {
         throw new PluginError('payload_too_large', 'reference packet exceeds the hop packet budget')
       }
-      await this.publish(topic, envelopeBytes)
+      await this.publish(topic, envelopeBytes, options.properties === undefined ? undefined : { properties: options.properties })
       return { representation: 'reference', packetBytes: encoded }
     }
     if (encoded <= limit && envelopeBytes.length <= envelopeLimit) {
-      await this.publish(topic, envelopeBytes)
+      await this.publish(topic, envelopeBytes, options.properties === undefined ? undefined : { properties: options.properties })
       return { representation: 'inline', packetBytes: encoded }
     }
     if (envelopeBytes.length > this.budget.envelope_bytes) {
@@ -369,7 +376,7 @@ export class RelayTransport {
       }
       const candidate = { ...envelope, [descriptor.inline]: EMPTY, [descriptor.reference]: reference }
       const candidateBytes = this.codec.encode(descriptor.type, candidate)
-      const referencePacket = publishPacketBytes(topic, candidateBytes.length)
+      const referencePacket = publishPacketBytes(topic, candidateBytes.length, { propertiesBytes })
       if (referencePacket > limit) {
         throw new PluginError('payload_too_large', 'reference packet exceeds the hop packet budget')
       }
@@ -379,7 +386,7 @@ export class RelayTransport {
       finished = true
       if (generation !== this.#generation) throw new PluginError('unavailable', 'relay interrupted')
       // Verification is complete before any reference is published.
-      await this.publish(topic, candidateBytes)
+      await this.publish(topic, candidateBytes, options.properties === undefined ? undefined : { properties: options.properties })
       this.logger?.debug('relay_reference_published', {
         purpose: descriptor.purpose, bytes: body.length, envelope: candidateBytes.length,
       })

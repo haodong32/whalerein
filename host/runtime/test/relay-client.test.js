@@ -41,23 +41,23 @@ const ciphertext = new Uint8Array(randomBytes(256))
 test('the fixed signed text forms match the wire contract exactly', () => {
   assert.equal(
     relaySignedText('reserve', {
-      relayVersion: 4, hostId: 'h', deviceId: 'd', sessionId: 's', channelId: 'c',
+      relayVersion: 5, hostId: 'h', deviceId: 'd', sessionId: 's', channelId: 'c',
       purpose: 'PAYLOAD_PURPOSE_RESULT', partId: '', ciphertextBytes: 12,
       sha256Hex: 'a'.repeat(64), expiresAt: 5, signedAt: 6,
     }),
-    `whalerein/v1/relay|reserve|4|h|d|s|c|PAYLOAD_PURPOSE_RESULT||12|${'a'.repeat(64)}|5|6`,
+    `whalerein/v1/relay|reserve|5|h|d|s|c|PAYLOAD_PURPOSE_RESULT||12|${'a'.repeat(64)}|5|6`,
   )
   assert.equal(
-    relaySignedText('upload', { relayVersion: 4, objectId: 'o', ciphertextBytes: 1, sha256Hex: 'b'.repeat(64), signedAt: 2 }),
-    `whalerein/v1/relay|upload|4|o|1|${'b'.repeat(64)}|2`,
+    relaySignedText('upload', { relayVersion: 5, objectId: 'o', ciphertextBytes: 1, sha256Hex: 'b'.repeat(64), signedAt: 2 }),
+    `whalerein/v1/relay|upload|5|o|1|${'b'.repeat(64)}|2`,
   )
   assert.equal(
-    relaySignedText('finish', { relayVersion: 4, objectId: 'o', ciphertextBytes: 1, sha256Hex: 'b'.repeat(64), signedAt: 2 }),
-    `whalerein/v1/relay|finish|4|o|1|${'b'.repeat(64)}|2`,
+    relaySignedText('finish', { relayVersion: 5, objectId: 'o', ciphertextBytes: 1, sha256Hex: 'b'.repeat(64), signedAt: 2 }),
+    `whalerein/v1/relay|finish|5|o|1|${'b'.repeat(64)}|2`,
   )
   assert.equal(
-    relaySignedText('object', { relayVersion: 4, objectId: 'o', signedAt: 2 }),
-    'whalerein/v1/relay|object|4|o|2',
+    relaySignedText('object', { relayVersion: 5, objectId: 'o', signedAt: 2 }),
+    'whalerein/v1/relay|object|5|o|2',
   )
 })
 
@@ -84,7 +84,7 @@ test('reserve carries the epoch, exact scope, digest and a valid Host signature'
   assert.equal(calls[0].url, `${ORIGIN}/v1/relay/objects`)
   assert.equal(calls[0].options.method, 'POST')
   const body = JSON.parse(calls[0].options.body)
-  assert.equal(body.relay_version, 4, 'proto3 JSON keeps the required epoch')
+  assert.equal(body.relay_version, 5, 'proto3 JSON keeps the required epoch')
   assert.equal(body.host_id, HOST)
   assert.equal(body.device_id, 'device-1')
   assert.equal(body.purpose, 'PAYLOAD_PURPOSE_RESULT')
@@ -92,7 +92,7 @@ test('reserve carries the epoch, exact scope, digest and a valid Host signature'
   assert.equal(body.sha256, Buffer.from(sha256Bytes(ciphertext)).toString('base64'))
   assert.equal(body.expires_at_unix_ms, '1700000060000')
   const expected = relaySignedText('reserve', {
-    relayVersion: 4, hostId: HOST, deviceId: 'device-1', sessionId: 'session-1',
+    relayVersion: 5, hostId: HOST, deviceId: 'device-1', sessionId: 'session-1',
     channelId: 'channel-1', purpose: 'PAYLOAD_PURPOSE_RESULT', partId: '',
     ciphertextBytes: ciphertext.length, sha256Hex: hex(sha256Bytes(ciphertext)),
     expiresAt: 1_700_000_060_000, signedAt: 1_700_000_000_000,
@@ -119,11 +119,11 @@ test('upload uses the reserved upload path with exact length, epoch and signed h
   await relay.upload({ reservation, ciphertext })
   assert.equal(calls[0].url, `${ORIGIN}/v1/relay/objects/${'a'.repeat(32)}`)
   assert.equal(calls[0].options.method, 'PUT')
-  assert.equal(calls[0].options.headers['WhaleRein-Relay-Epoch'], '4')
+  assert.equal(calls[0].options.headers['WhaleRein-Relay-Epoch'], '5')
   assert.equal(calls[0].options.headers['WhaleRein-Host-Signed-At-Unix-Ms'], '1700000000000')
   assert.equal(calls[0].options.headers['content-length'], String(ciphertext.length))
   const expected = relaySignedText('upload', {
-    relayVersion: 4, objectId: reservation.object_id, ciphertextBytes: ciphertext.length,
+    relayVersion: 5, objectId: reservation.object_id, ciphertextBytes: ciphertext.length,
     sha256Hex: hex(sha256Bytes(ciphertext)), signedAt: 1_700_000_000_000,
   })
   assert.equal(verify(expected, new Uint8Array(Buffer.from(calls[0].options.headers['WhaleRein-Host-Signature'], 'base64url'))), true)
@@ -144,11 +144,11 @@ test('finish publishes only after the exact ciphertext and returns the object me
   const object = await relay.finish({ objectId: 'a'.repeat(32), ciphertext })
   assert.equal(calls[0].url, `${ORIGIN}/v1/relay/objects/${'a'.repeat(32)}/finish`)
   const body = JSON.parse(calls[0].options.body)
-  assert.equal(body.relay_version, 4)
+  assert.equal(body.relay_version, 5)
   assert.equal(Number(body.ciphertext_bytes), ciphertext.length)
   assert.equal(verify(
     relaySignedText('finish', {
-      relayVersion: 4, objectId: 'a'.repeat(32), ciphertextBytes: ciphertext.length,
+      relayVersion: 5, objectId: 'a'.repeat(32), ciphertextBytes: ciphertext.length,
       sha256Hex: hex(sha256Bytes(ciphertext)), signedAt: 1_700_000_000_000,
     }),
     new Uint8Array(Buffer.from(body.signature, 'base64')),

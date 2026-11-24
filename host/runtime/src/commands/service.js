@@ -636,8 +636,17 @@ export class CommandService {
           },
         }
       }
-      if (payload.refresh_watches) {
-        return { status: 'succeeded', response: { watch_states: await this.events.refresh(request.device_id, request.channel_id, payload.refresh_watches.watch_ids??[], scope.controller.signal) } }
+      if (payload.check_versions) {
+        const check = payload.check_versions
+        if (typeof check.session_id !== 'string' || check.session_id === '') return failed('invalid_argument')
+        return {
+          status: 'succeeded',
+          response: {
+            version_checks: await this.events.versions(
+              request.device_id, request.channel_id, check.session_id, scope.controller.signal,
+            ),
+          },
+        }
       }
       if (payload.unwatch_session) {
         this.events.unwatch(request.device_id, request.channel_id, payload.unwatch_session.watch_id)

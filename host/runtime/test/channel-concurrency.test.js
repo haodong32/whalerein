@@ -31,9 +31,9 @@ test('a same-Device send and reply polling preserve the attached live Watch', as
   for (const seq of [1, 2]) {
     const read = await sender.query(readReply)
     assert.equal(read.response.message_reply.state, 'MESSAGE_REPLY_PENDING')
-    const refresh = await watcher.query({ refresh_watches: { watch_ids: [watchId] } })
+    const refresh = await watcher.query({ check_versions: { session_id: 's1' } })
     assert.equal(refresh.status, 'succeeded')
-    assert.equal(refresh.response.watch_states.watches[0].watch_id, watchId)
+    assert.equal(refresh.response.version_checks.checks[0].watch_id, watchId)
     harness.adapter.publish('s1', {
       live: {
         attempt: { live_epoch: 'fixture-epoch', attempt_id: 'fixture-attempt' },

@@ -840,7 +840,7 @@ test('session-observation/AC-14.watch interests are required and forwarded expli
   const { service } = makeService({ events: {
     readHistory: async () => ({}),
     watch: async (...args) => { calls.push(args); return { watch_id: 'w1', state: { session: { host_id: 'host-1', session_id: 's1' } }, lease_ms: 1 } },
-    refresh: async () => ({ watches: [] }),
+    versions: async () => ({ checks: [] }),
     unwatch() {},
   } })
   const query = makeRequest({ kind: 'REQUEST_KIND_QUERY' })
@@ -858,7 +858,8 @@ test('session-observation/AC-14.watch interests are required and forwarded expli
     watch_session: { session_id: 's1', interests: { conversation: false, questions: true } } } })
   assert.equal(accepted.status, 'succeeded')
   assert.deepEqual(calls[0][4], { conversation: false, questions: true })
-  assert.equal((await service.handle({ request: query, payload: { refresh_watches: { watch_ids: ['w1'] } } })).status, 'succeeded')
+  assert.equal((await service.handle({ request: query, payload: { check_versions: { session_id: 's1' } } })).status, 'succeeded')
+  assert.equal((await service.handle({ request: query, payload: { refresh_watches: { watch_ids: ['w1'] } } })).status, 'failed', 'the retired renewal payload is no longer understood')
 })
 
 test('fork journals only confirmed identities and replays one native invocation', async () => {

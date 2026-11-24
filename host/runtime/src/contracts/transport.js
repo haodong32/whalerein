@@ -23,7 +23,42 @@ export {
 }
 
 /** The one coordinated MQTT relay epoch. There is no fallback or dual epoch. */
-export const RELAY_VERSION = 4
+export const RELAY_VERSION = 5
+
+// A Broker-issued connection identity is `<broker-epoch>:<connection-instance>`.
+// The broker epoch is one random 16-hex-character process identity; the
+// connection instance is opaque to Host and is compared only for exact equality.
+const BROKER_CONNECTION_REF = /^[0-9a-f]{16}:\S{1,128}$/
+
+/** Validate one Broker-issued connection reference. */
+export function validateBrokerConnectionRef(value) {
+  if (typeof value !== 'string' || !BROKER_CONNECTION_REF.test(value)) {
+    throw new AdapterError('invalid_argument', 'broker connection reference invalid')
+  }
+  return value
+}
+
+/**
+ * Remaining MQTT 5 Message Expiry Interval in whole seconds.
+ *
+ * The value is the positive ceiling of the original application deadline and is
+ * capped by any shorter upstream MQTT expiry. `null` means the publication is
+ * not deadline-bound; `0` means it has already elapsed and must not be
+ * published. Forwarding and retries never restart the deadline.
+ */
+export function messageExpirySeconds(expiresAt, now = Date.now(), upstreamSeconds = null) {
+  if (expiresAt === undefined || expiresAt === null || expiresAt === 0 || expiresAt === '0') return null
+  const deadline = wireInteger(expiresAt)
+  if (deadline === null) return 0
+  const remainingMs = deadline - now
+  if (remainingMs <= 0) return 0
+  let seconds = Math.ceil(remainingMs / 1000)
+  if (upstreamSeconds !== null && upstreamSeconds !== undefined) {
+    if (!Number.isSafeInteger(upstreamSeconds) || upstreamSeconds <= 0) return 0
+    seconds = Math.min(seconds, upstreamSeconds)
+  }
+  return seconds > 0 ? seconds : 0
+}
 
 const safe = (value) => Number.isSafeInteger(value) && value >= 0
 const positive = (value) => Number.isSafeInteger(value) && value > 0

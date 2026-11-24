@@ -305,7 +305,7 @@ test('a terminal close that cannot be persisted still removes the watch and mark
     const gone = new Error('gone')
     gone.code = 'forbidden'
     ctx.source.readState = async () => { throw gone }
-    await assert.rejects(ctx.events.refresh('d', ctx.channel.channelId, [watch.watch_id]), error => error.code === 'not_found')
+    await assert.rejects(ctx.events.versions('d', ctx.channel.channelId, 's'), error => error.code === 'not_found')
     await settle()
     assert.equal(ctx.events.describe().watches, 0)
     assert.equal(ctx.store.countOutbox(), 0)

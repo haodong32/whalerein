@@ -162,17 +162,17 @@ test('packaged transport profiles and receive advertisements validate together',
  assert.equal(transportProfileBudget('roomy').packet_bytes,131072)
  assert.equal(validateTransportBudget(transportProfileBudget('compact')).bulk_concurrency,2)
  assert.equal(
-  validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:3,relay_version: 4}).connection_generation,
+  validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:3,relay_version: 5}).connection_generation,
   3,
  )
  // The protobuf codec decodes 64-bit integers as decimal strings.
  {
   const strings = { ...transportProfileBudget('default') }
   for (const key of ['envelope_bytes','reserved_bytes']) strings[key] = String(strings[key])
-  const advertisement = validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:strings,connection_generation:'9',relay_version: 4})
+  const advertisement = validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:strings,connection_generation:'9',relay_version: 5})
   assert.equal(advertisement.connection_generation,9)
   assert.equal(advertisement.budget.envelope_bytes,16777216)
-  assert.equal(advertisement.relay_version, 4)
+  assert.equal(advertisement.relay_version, 5)
   assert.deepEqual(validateRequestTransportMetadata({result_max_bytes:'25165824',grant_generation:'7',revocation_generation:'3'}),{result_max_bytes:25165824,grant_generation:7,revocation_generation:3})
  }
  assert.deepEqual(validateRequestTransportMetadata({result_max_bytes:16777216,grant_generation:7,revocation_generation:2}),{result_max_bytes:16777216,grant_generation:7,revocation_generation:2})
@@ -189,7 +189,7 @@ test('packaged transport profiles and receive advertisements validate together',
   {...transportProfileBudget('default'),reserved_bytes:1},
   {...transportProfileBudget('default'),transfer_timeout_ms:0},
  ])assert.throws(()=>validateTransportBudget(budget),e=>e.code==='invalid_argument')
- assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:0,relay_version: 4}),e=>e.code==='invalid_argument')
+ assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:0,relay_version: 5}),e=>e.code==='invalid_argument')
  assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:1}),e=>e.code==='protocol_version_incompatible')
  assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget:transportProfileBudget('default'),connection_generation:1,relay_version:2}),e=>e.code==='protocol_version_incompatible')
  assert.throws(()=>validateRequestTransportMetadata({result_max_bytes:0,grant_generation:1,revocation_generation:1}),e=>e.code==='invalid_argument')
@@ -208,7 +208,7 @@ test('a relation-valid receive budget override is accepted under a known profile
   envelope_bytes: 4 * 1024 * 1024,
   reserved_bytes: 8 * 1024 * 1024,
  }
- const accepted=validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_COMPACT',budget:unpackaged,connection_generation:Number.MAX_SAFE_INTEGER,relay_version: 4})
+ const accepted=validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_COMPACT',budget:unpackaged,connection_generation:Number.MAX_SAFE_INTEGER,relay_version: 5})
  assert.equal(accepted.profile,'TRANSPORT_PROFILE_COMPACT')
  assert.equal(accepted.connection_generation,Number.MAX_SAFE_INTEGER)
  assert.deepEqual(accepted.budget,unpackaged)
@@ -224,15 +224,15 @@ test('a relation-valid receive budget override is accepted under a known profile
   {...unpackaged,transfer_timeout_ms:0},
   {...unpackaged,reserved_bytes:-1},
  ]
- for(const budget of contradictory)assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget,connection_generation:1,relay_version: 4}),e=>e.code==='invalid_argument')
+ for(const budget of contradictory)assert.throws(()=>validateReceiveAdvertisement({profile:'TRANSPORT_PROFILE_DEFAULT',budget,connection_generation:1,relay_version: 5}),e=>e.code==='invalid_argument')
  for(const advertisement of [
   null,
-  {profile:'TRANSPORT_PROFILE_DEFAULT',connection_generation:1,relay_version: 4},
-  {profile:'TRANSPORT_PROFILE_FUTURE',budget:unpackaged,connection_generation:1,relay_version: 4},
-  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:0,relay_version: 4},
-  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:-1,relay_version: 4},
-  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:1.5,relay_version: 4},
-  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:Number.MAX_SAFE_INTEGER+1,relay_version: 4},
+  {profile:'TRANSPORT_PROFILE_DEFAULT',connection_generation:1,relay_version: 5},
+  {profile:'TRANSPORT_PROFILE_FUTURE',budget:unpackaged,connection_generation:1,relay_version: 5},
+  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:0,relay_version: 5},
+  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:-1,relay_version: 5},
+  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:1.5,relay_version: 5},
+  {profile:'TRANSPORT_PROFILE_DEFAULT',budget:unpackaged,connection_generation:Number.MAX_SAFE_INTEGER+1,relay_version: 5},
  ])assert.throws(()=>validateReceiveAdvertisement(advertisement),e=>e.code==='invalid_argument')
 })
 

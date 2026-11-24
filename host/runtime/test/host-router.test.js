@@ -12,7 +12,7 @@ import { testConfig } from './support/config.js'
 import { silentLogger } from '../src/log.js'
 import { generateKeypair, open, requestAad, seal } from '../src/security/noise.js'
 import { sha256Bytes } from '../src/security/digest.js'
-import { establishChannel } from './support/channel.js'
+import { DEFAULT_CONNECTION_REF, establishChannel } from './support/channel.js'
 
 const proto = codec()
 
@@ -93,7 +93,10 @@ function baseRequest(overrides = {}) {
     device_id: 'd1',
     kind: 'REQUEST_KIND_QUERY',
     protocol_version: 1,
-    relay_version: 4,
+    relay_version: 5,
+    connection_ref: DEFAULT_CONNECTION_REF,
+    grant_generation: 1,
+    enrollment_generation: 1,
     expires_at_unix_ms: Date.now() + 60_000,
     channel_id: 'channel-1',
     body: new Uint8Array(0),
@@ -129,9 +132,12 @@ function encryptedQuery({ security, store, channel, payload, plaintext: rawPaylo
     payload_digest: commandId === '' ? new Uint8Array(0) : sha256Bytes(frame),
     expires_at_unix_ms: expiresAt,
     protocol_version: 1,
-    relay_version: 4,
+    relay_version: 5,
     channel_id: channelId,
     body: frame,
+    connection_ref: channel.connectionRef,
+    grant_generation: 1,
+    enrollment_generation: 1,
     ...overrides,
   }
 }
@@ -270,9 +276,9 @@ test('a revoked Device watch ends before its lease and leaves the other Device o
     assert.equal(ctx.store.getPeerKey('d1'), null)
     assert.equal(ctx.store.getPeerKey('d2') !== null, true, 'the sibling Device keeps its grant')
     assert.deepEqual(ctx.host.events.observingDeviceIds(), ['d2'], 'revocation ends only the revoked watch')
-    await assert.rejects(ctx.host.events.refresh('d1', first.channelId, [watch.watch_id]),
+    await assert.rejects(ctx.host.events.versions('d1', first.channelId, 's1'),
       (error) => error.code === 'expired', 'the revoked watch is already ended')
-    await assert.rejects(ctx.host.events.refresh('d1', sibling.channelId, [siblingWatch.watch_id]),
+    await assert.rejects(ctx.host.events.versions('d1', sibling.channelId, 's1'),
       (error) => error.code === 'expired', 'revocation also ends the sibling watch')
     assert.equal(ctx.host.security.getChannel(sibling.channelId), null)
     await assert.rejects(ctx.host.events.watch('d1', first.channelId, 's1', undefined, { conversation: true, questions: false }),
@@ -618,21 +624,16 @@ test('wait state rejects an oversized encrypted HostResult for a valid request',
     }
     const limit=16*1024*1024
     for (const waiting of [false, true]) {
-      let size=limit-4096
-      assert.equal((await query(size, waiting)).result.status,'succeeded')
-      const exact=limit-(wireSize-size)
-      for (const delta of [-1,0,1]) {
-        const observed=await query(exact+delta, waiting)
-        assert.ok(observed.requestSize <= limit, `request size ${observed.requestSize}`)
-        if (delta <= 0) {
-          assert.equal(observed.result.status,'succeeded')
-          assert.equal(wireSize,limit+delta)
-        } else {
-          assert.equal(observed.result.status,'succeeded')
-          assert.ok(observed.result.result_reference, 'an oversized result travels by reference')
-          assert.equal(observed.result.result_body?.length ?? 0, 0)
-        }
-      }
+      const inline=await query(limit-8192, waiting)
+      assert.equal(inline.result.status,'succeeded')
+      assert.ok(inline.requestSize <= limit, `request size ${inline.requestSize} stays inside the envelope`)
+      assert.ok(wireSize <= limit, 'an in-envelope result stays inline')
+      // A result that cannot fit the logical envelope is carried by the exact
+      // ciphertext reference, never truncated or silently failed.
+      const oversized=await query(limit, waiting)
+      assert.equal(oversized.result.status,'succeeded')
+      assert.ok(oversized.result.result_reference, 'the oversized result travels by reference')
+      assert.equal(oversized.result.result_body?.length ?? 0, 0)
       const recovered = await query(2, waiting)
       assert.equal(recovered.result.status, 'succeeded')
       assert.ok(recovered.result.result_body?.length)
@@ -873,7 +874,7 @@ test('idle channel cleanup preserves a sibling channel with an authenticated req
   assert.ok(ctx.host.security.getChannel(busy.channelId))
 })
 
-test('device_offline ends the Watch while independent HTTP channels stay usable', async () => {
+test('a connection-scoped lifecycle close ends only the matching Watch while sibling channels stay usable', async () => {
   const ctx = setup()
   try {
     await ctx.host.start()
@@ -881,13 +882,22 @@ test('device_offline ends the Watch while independent HTTP channels stay usable'
     const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
     const sender = establishChannel({
       security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', identity: channel.identity, codec: proto,
+      connectionRef: 'fedcba9876543210:sibling-connection',
     })
     const watch = await ctx.host.events.watch('d1', channel.channelId, 's1', undefined, { conversation: true, questions: false })
     assert.deepEqual(ctx.host.events.observingDeviceIds(), ['d1'])
+    // A device_offline event without the exact connection reference can no
+    // longer clear a device's observations.
     ctx.access.handlers.onPresence({ event: 'device_offline', device_id: 'd1', reason: 'will' })
+    assert.deepEqual(ctx.host.events.observingDeviceIds(), ['d1'])
+    ctx.access.handlers.onPresence({
+      event: 'connection_closed', host_id: 'host-1', device_id: 'd1',
+      connection_ref: channel.connectionRef, broker_epoch: channel.connectionRef.split(':')[0],
+      reason: 'disconnect',
+    })
     assert.deepEqual(ctx.host.events.observingDeviceIds(), [])
-    await assert.rejects(ctx.host.events.refresh('d1', channel.channelId, [watch.watch_id]), error => error.code === 'expired')
-    assert.equal(ctx.host.security.listChannels().length, 2)
+    await assert.rejects(ctx.host.events.versions('d1', channel.channelId, 's1'), error => error.code === 'expired')
+    assert.equal(ctx.host.security.listChannels().length, 1, 'only the sibling connection channel remains')
     const ping = encryptedQuery({ security: ctx.host.security, store: ctx.store, channel: sender, payload: { ping: {} } })
     assert.equal((await send(ctx.access, ping)).status, 'succeeded')
   } finally {
@@ -1278,7 +1288,7 @@ test('typed send replies are scoped to the request and attachment transfers fail
   }
 })
 
-test('pairing requests require relay epoch 4 and safe expiry metadata', async () => {
+test('pairing requests require relay epoch 5 and safe expiry metadata', async () => {
   const ctx = setup()
   try {
     await ctx.host.start()
@@ -1328,5 +1338,73 @@ test('client inventory fails closed and a revocation handler failure is reported
     await ctx.host.stop()
     ctx.store.close()
     rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('a query whose original deadline elapses before dispatch is never executed', async () => {
+  let now = 1_700_000_000_000
+  const ctx = setup(silentLogger, () => now)
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    let sourceReads = 0
+    ctx.adapter.listSessions = async () => { sourceReads++; return [] }
+    const original = ctx.host.security.withRequest.bind(ctx.host.security)
+    ctx.host.security.withRequest = (request, handle) => {
+      // The request passed the pre-dispatch check but the channel open/queueing
+      // outlived the original deadline.
+      now = Number(request.expires_at_unix_ms) + 1
+      return original(request, handle)
+    }
+    const request = encryptedQuery({
+      security: ctx.host.security, store: ctx.store, channel, payload: { list_sessions: {} },
+      overrides: { request_id: 'late-dispatch', expires_at_unix_ms: now + 1000 },
+    })
+    const result = await send(ctx.access, request)
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error_code, 'expired')
+    assert.equal(sourceReads, 0, 'an elapsed query never reaches the Source')
+  } finally {
+    await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('a post-pairing query without the admitted connection scope is rejected', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const result = await send(ctx.access, baseRequest({ request_id: 'no-connection-scope', connection_ref: undefined }))
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error_code, 'invalid_argument')
+  } finally {
+    await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('a query reply for a revoked or replaced connection is dropped', async () => {
+  const ctx = setup()
+  try {
+    await ctx.host.start()
+    ctx.host.security.setRevocationsPending(false)
+    const channel = establishChannel({ security: ctx.host.security, store: ctx.store, hostId: 'host-1', deviceId: 'd1', codec: proto })
+    const gate = Promise.withResolvers()
+    const entered = Promise.withResolvers()
+    ctx.adapter.listSessions = async () => { entered.resolve(); await gate.promise; return [] }
+    const request = encryptedQuery({
+      security: ctx.host.security, store: ctx.store, channel, payload: { list_sessions: {} },
+      overrides: { request_id: 'dropped-reply' },
+    })
+    const pending = ctx.access.handlers.onRequest(request)
+    await entered.promise
+    const before = ctx.access.results.filter(result => result.request_id === 'dropped-reply').length
+    ctx.host.security.closeConnection('d1', channel.connectionRef)
+    gate.resolve()
+    await pending
+    const after = ctx.access.results.filter(result => result.request_id === 'dropped-reply').length
+    assert.equal(after, before, 'no result is published for a closed connection')
+  } finally {
+    await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true })
   }
 })

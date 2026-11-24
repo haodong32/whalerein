@@ -49,8 +49,9 @@ class FakeMqttClient extends EventEmitter {
 
   publish(topic, payload, options, callback) {
     const cb = typeof options === 'function' ? options : callback
-    const qos = typeof options === 'object' && options !== null ? (options.qos ?? 0) : 0
-    this.broker.publish(this, topic, Buffer.from(payload), (error) => cb?.(error ?? null), qos)
+    const publishOptions = typeof options === 'object' && options !== null ? options : {}
+    const qos = publishOptions.qos ?? 0
+    this.broker.publish(this, topic, Buffer.from(payload), (error) => cb?.(error ?? null), qos, publishOptions.properties)
     return this
   }
 
@@ -124,20 +125,20 @@ export class FakeBroker {
     client.subscriptions.clear()
   }
 
-  publish(client, topic, payload, callback, qos = 1) {
+  publish(client, topic, payload, callback, qos = 1, properties = {}) {
     if (!this.online || client.closed || !client.connected || payload.length > this.maxPacketBytes) {
       queueMicrotask(() => callback(new Error('offline')))
       return
     }
-    this.messages.push({ topic, payload, qos, clientId: client.options?.clientId ?? '' })
+    this.messages.push({ topic, payload, qos, properties, clientId: client.options?.clientId ?? '' })
     queueMicrotask(() => {
       callback(null)
       const subscribers = this.#topics.get(topic)
       if (!subscribers) return
       for (const subscriber of subscribers) {
         if (subscriber.closed || !subscriber.connected) continue
-        subscriber.delivered.push({ topic, payload })
-        subscriber.emit('message', topic, payload, { qos })
+        subscriber.delivered.push({ topic, payload, properties })
+        subscriber.emit('message', topic, payload, { qos, properties })
       }
     })
   }

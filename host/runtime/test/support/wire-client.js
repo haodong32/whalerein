@@ -94,10 +94,10 @@ export class FakeAccessSimulator {
     this.revocationQueue = []
     this.revocationResults = []
     this.hostReady = false
+    this.connectionRef = '0123456789abcdef:access-connection'
     this.requestTopic = `whalerein/v1/h/${hostId}/request`
     this.resultTopic = `whalerein/v1/h/${hostId}/result`
     this.eventTopic = `whalerein/v1/h/${hostId}/event`
-    this.liveTopic = `whalerein/v1/h/${hostId}/live`
     this.liveEvents = []
     this.#attach(broker.connectFn()('mqtts://access.test', { clientId: 'access' }))
   }
@@ -107,9 +107,7 @@ export class FakeAccessSimulator {
     this.ready = new Promise((resolve) => {
       client.on('connect', () => {
         client.subscribe(this.resultTopic, { qos: 1 }, () => {
-          client.subscribe(this.eventTopic, { qos: 1 }, () => {
-            client.subscribe(this.liveTopic, { qos: 0 }, () => resolve())
-          })
+          client.subscribe(this.eventTopic, { qos: 1 }, () => resolve())
         })
       })
     })
@@ -158,18 +156,11 @@ export class FakeAccessSimulator {
       this.broker.deliverDirect(deviceTopic, this.codec.encode('whalerein.v1.EventEnvelope', envelope))
       return
     }
-    if (topic === this.liveTopic) {
-      // Live stays opaque: no durable row, no reference fetch and no retry.
-      const envelope = this.codec.decode('whalerein.v1.EventEnvelope', payload)
-      this.liveEvents.push(envelope)
-      const deviceTopic = `whalerein/v1/h/${this.hostId}/d/${envelope.device_id}/live`
-      this.broker.deliverDirect(deviceTopic, payload)
-    }
   }
 
   async send(request) {
     await this.ready
-    const bytes = this.codec.encode('whalerein.v1.HostRequest', { relay_version: 4, ...request })
+    const bytes = this.codec.encode('whalerein.v1.HostRequest', { relay_version: 5, ...request })
     // The simulated Device -> Access hop may deliver an oversized complete
     // request out of band; real Access would resolve it from HTTPS.
     if (this.broker.maxPacketBytes !== Infinity && bytes.length > this.broker.maxPacketBytes) {
@@ -268,15 +259,15 @@ export class FakeAccessSimulator {
     return this.codec.decode('whalerein.v1.PairingClaimResult', terminal.result_body)
   }
 
-  async handshake({ channelId, deviceId, message }) {
-    const request = this.#request('REQUEST_KIND_HANDSHAKE', deviceId, message, { channelId })
+  async handshake({ channelId, deviceId, message, connectionRef = this.connectionRef }) {
+    const request = this.#request('REQUEST_KIND_HANDSHAKE', deviceId, message, { channelId, connectionRef })
     await this.send(request)
     const terminal = await this.waitTerminal(request.request_id)
     if (terminal.status !== 'succeeded') throw new WireError(terminal.status, terminal.error_code)
     return terminal.result_body
   }
 
-  #request(kind, deviceId, body, { channelId = '' } = {}) {
+  #request(kind, deviceId, body, { channelId = '', connectionRef = null } = {}) {
     return {
       request_id: randomId(),
       host_id: this.hostId,
@@ -286,6 +277,7 @@ export class FakeAccessSimulator {
       channel_id: channelId,
       body,
       expires_at_unix_ms: this.now() + 60_000,
+      ...(connectionRef ? { connection_ref: connectionRef, grant_generation: 1, enrollment_generation: 1 } : {}),
     }
   }
 }
@@ -481,6 +473,9 @@ export class DeviceClient {
       protocol_version: PROTOCOL_VERSION,
       channel_id: this.channel.channelId,
       body: frame,
+      connection_ref: this.access.connectionRef,
+      grant_generation: 1,
+      enrollment_generation: 1,
     }
     const outcome = await this.send(request)
     return { ...outcome, request, aad }

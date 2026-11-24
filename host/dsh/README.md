@@ -483,7 +483,7 @@ against a fake Cordis context; MQTT client; host lifecycle and reload.
   view; paged protocol output does not remove that native memory cost.
 - Native titles and queued prompts are decoded only in the adapter. Unknown
   source metadata remains unavailable rather than inferred.
-- Pending approvals are current state and are queried on watch/reconnect/refresh;
+- Pending approvals are current state and are queried on watch/reconnect/version check;
   historical snapshots do not invent old pending actions.
 - Delegated approval ownership and interactive profile HMR still require target-environment acceptance.
 - Current Core permits one active Watch per instance. Other Harness connectors,

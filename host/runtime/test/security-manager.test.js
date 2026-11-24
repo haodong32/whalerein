@@ -299,7 +299,7 @@ test('when a channel handshake succeeds, it installs the envelope ID and rejects
     host_id: hostId,
     protocol_version: 2,
   })
-  assert.throws(() => security.handleChannelHandshake({
+  assert.throws(() => security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
     channel_id: channelId, device_id: 'device-4', protocol_version: 1,
     body: noise.writeMessage(hello),
   }), (error) => error.code === 'protocol_version_incompatible')
@@ -315,22 +315,22 @@ test('when revocation replay, message shape, or TTL checks fail, the channel han
   const hello = codec.encode('whalerein.v1.ChannelHello', { device_id: 'device-1', host_id: hostId, protocol_version: 1 })
 
   security.setRevocationsPending(true)
-  assert.throws(() => security.handleChannelHandshake({
+  assert.throws(() => security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
     channel_id: channelId, device_id: 'device-1',
     body: noise.writeMessage(hello),
   }), (error) => error.code === 'revocations_pending')
   security.setRevocationsPending(false)
 
-  assert.throws(() => security.handleChannelHandshake({ channel_id: '', device_id: 'device-1', body: hello }), (error) => error.code === 'invalid_argument')
-  assert.throws(() => security.handleChannelHandshake({ channel_id: channelId, device_id: 'device-1', body: new Uint8Array(0) }), (error) => error.code === 'invalid_argument')
+  assert.throws(() => security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test', channel_id: '', device_id: 'device-1', body: hello }), (error) => error.code === 'invalid_argument')
+  assert.throws(() => security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test', channel_id: channelId, device_id: 'device-1', body: new Uint8Array(0) }), (error) => error.code === 'invalid_argument')
 
   const noise2 = new NoiseXX({ initiator: true, staticKeypair: identity, prologue: channelPrologue({ hostId, deviceId: 'device-1', channelId }) })
-  security.handleChannelHandshake({
+  security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
     channel_id: channelId, device_id: 'device-1',
     body: noise2.writeMessage(hello),
   })
   now += 20
-  assert.throws(() => security.handleChannelHandshake({
+  assert.throws(() => security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
     channel_id: channelId, device_id: 'device-1',
     body: new Uint8Array(1),
   }), (error) => error.code === 'unauthorized')
@@ -347,6 +347,11 @@ test('when request frame channel/MAC/AAD checks pass, results are sealed to that
     command_id: '',
     expires_at_unix_ms: 5000,
     channel_id: device.channelId,
+    protocol_version: 1,
+    relay_version: 5,
+    connection_ref: device.connectionRef,
+    grant_generation: device.grantGeneration,
+    enrollment_generation: device.enrollmentGeneration,
   }
   const aad = requestAad({
     requestId: request.request_id,
@@ -465,7 +470,7 @@ test('after Access-confirmed host revocation, local peer cleanup closes its chan
   assert.equal(security.getChannel(channel.channelId), null)
   const reconnect = new NoiseXX({ initiator: true, staticKeypair: channel.identity, prologue: channelPrologue({ hostId, deviceId: 'device-1', channelId: 'revoked-reconnect' }) })
   security.setRevocationsPending(false)
-  assert.throws(() => security.handleChannelHandshake({
+  assert.throws(() => security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
     channel_id: 'revoked-reconnect', device_id: 'device-1', protocol_version: 1,
     body: reconnect.writeMessage(codec.encode('whalerein.v1.ChannelHello', { host_id: hostId, device_id: 'device-1', protocol_version: 1 })),
   }), error => error.code === 'unauthorized' || error.code === 'forbidden')
@@ -638,7 +643,7 @@ test('a device receive advertisement keeps its own channel-scoped generation, in
         profile: 'TRANSPORT_PROFILE_COMPACT',
         budget: transportProfileBudget('compact'),
         connection_generation: 3,
-        relay_version: 4,
+        relay_version: 5,
       },
     })
     // HostReady's broker generation (7) is never compared with the device's
@@ -668,7 +673,7 @@ test('a reconnect installs a fresh advertisement and old channel data never refr
         profile: 'TRANSPORT_PROFILE_COMPACT',
         budget: transportProfileBudget('compact'),
         connection_generation: 11,
-        relay_version: 4,
+        relay_version: 5,
       },
     })
     const second = establishChannel({
@@ -677,7 +682,7 @@ test('a reconnect installs a fresh advertisement and old channel data never refr
         profile: 'TRANSPORT_PROFILE_ROOMY',
         budget: transportProfileBudget('roomy'),
         connection_generation: 12,
-        relay_version: 4,
+        relay_version: 5,
       },
     })
     assert.notEqual(first.ready.receive.connection_generation, second.ready.receive.connection_generation,
@@ -695,7 +700,7 @@ test('a reconnect installs a fresh advertisement and old channel data never refr
         profile: 'TRANSPORT_PROFILE_COMPACT',
         budget: transportProfileBudget('compact'),
         connection_generation: 11,
-        relay_version: 4,
+        relay_version: 5,
       },
     })
     assert.equal(security.getChannelReceive(stale.channelId).connection_generation, 11)
@@ -710,7 +715,7 @@ test('a reconnect installs a fresh advertisement and old channel data never refr
 
     // An installed channel identity is never renegotiated in place.
     const replacement = startChannelHello(security, store, { channelId: second.channelId })
-    assert.throws(() => security.handleChannelHandshake({
+    assert.throws(() => security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
       channel_id: replacement.channelId, device_id: replacement.deviceId, body: replacement.body,
     }), (error) => error.code === 'conflict')
     assert.equal(security.getChannelReceive(second.channelId).connection_generation, 12)
@@ -735,14 +740,14 @@ test('an absent channel receive advertisement adds no cap and a malformed one fa
         capabilities: { capabilities: ['sessions'], protocol_version: 1 }, client_nonce: 'nonce',
         receive,
       })
-      return () => security.handleChannelHandshake({ channel_id: channelId, device_id: 'device-1', protocol_version: 1, body: noise.writeMessage(hello) })
+      return () => security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test', channel_id: channelId, device_id: 'device-1', protocol_version: 1, body: noise.writeMessage(hello) })
     }
     // A per-leg generation is accepted without any cross-leg comparison.
-    assert.ok(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: transportProfileBudget('default'), connection_generation: 2, relay_version: 4 })() instanceof Uint8Array)
+    assert.ok(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: transportProfileBudget('default'), connection_generation: 2, relay_version: 5 })() instanceof Uint8Array)
     // Malformed, contradictory, missing and unknown-profile advertisements
     // fail explicitly before the channel becomes usable.
     assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', connection_generation: 1 }), (error) => error.code === 'invalid_argument')
-    assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: { ...transportProfileBudget('default'), envelope_bytes: 1 }, connection_generation: 1, relay_version: 4 }), (error) => error.code === 'invalid_argument')
+    assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: { ...transportProfileBudget('default'), envelope_bytes: 1 }, connection_generation: 1, relay_version: 5 }), (error) => error.code === 'invalid_argument')
     assert.throws(attempt({ profile: 'TRANSPORT_PROFILE_DEFAULT', budget: transportProfileBudget('default'), connection_generation: 0 }), (error) => error.code === 'invalid_argument')
     assert.throws(() => attempt({ profile: 'TRANSPORT_PROFILE_FUTURE', budget: transportProfileBudget('default'), connection_generation: 1 }), (error) => error.code === 'protocol_version_incompatible')
     assert.equal(security.listChannels().length, 1, 'only the advertisement-free channel was installed')
@@ -868,9 +873,9 @@ test('channel handshake rejects invalid host advertisements, pending limits, sco
   const { security, store } = makeSecurity({ maxPending: 1 })
   try {
     const first = startChannelHello(security, store, { channelId: 'channel-pending' })
-    security.handleChannelHandshake({ channel_id: first.channelId, device_id: first.deviceId, body: first.body })
+    security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test', channel_id: first.channelId, device_id: first.deviceId, body: first.body })
     const second = startChannelHello(security, store, { channelId: 'channel-other' })
-    assert.throws(() => security.handleChannelHandshake({
+    assert.throws(() => security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
       channel_id: second.channelId, device_id: second.deviceId, body: second.body,
     }), (error) => error.code === 'rate_limited')
   } finally {
@@ -880,9 +885,9 @@ test('channel handshake rejects invalid host advertisements, pending limits, sco
   const scoped = makeSecurity()
   try {
     const hello = startChannelHello(scoped.security, scoped.store, { channelId: 'channel-scope' })
-    scoped.security.handleChannelHandshake({ channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body })
+    scoped.security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test', channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body })
     scoped.store.upsertPeerKey({ deviceId: 'device-other', publicKey: generateKeypair().publicKey, fingerprint: 'f', claimId: 'other', pairedAt: 1 })
-    assert.throws(() => scoped.security.handleChannelHandshake({
+    assert.throws(() => scoped.security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
       channel_id: hello.channelId, device_id: 'device-other', body: new Uint8Array([1]),
     }), (error) => error.code === 'forbidden')
   } finally {
@@ -893,7 +898,7 @@ test('channel handshake rejects invalid host advertisements, pending limits, sco
   try {
     const identity = generateKeypair()
     const hello = startChannelHello(mismatchedHello.security, mismatchedHello.store, { channelId: 'channel-id', identity, hello: { device_id: 'device-other' } })
-    assert.throws(() => mismatchedHello.security.handleChannelHandshake({
+    assert.throws(() => mismatchedHello.security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
       channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body,
     }), (error) => error.code === 'forbidden')
   } finally {
@@ -904,9 +909,9 @@ test('channel handshake rejects invalid host advertisements, pending limits, sco
   const payload = makeSecurity()
   try {
     const hello = startChannelHello(payload.security, payload.store, { channelId: 'channel-payload' })
-    const reply = payload.security.handleChannelHandshake({ channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body })
+    const reply = payload.security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test', channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body })
     hello.noise.readMessage(reply)
-    assert.throws(() => payload.security.handleChannelHandshake({
+    assert.throws(() => payload.security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
       channel_id: hello.channelId, device_id: hello.deviceId, body: hello.noise.writeMessage(new Uint8Array([1])),
     }), (error) => error.code === 'invalid_argument')
   } finally {
@@ -925,9 +930,9 @@ test('channel handshake rejects invalid host advertisements, pending limits, sco
       deviceId: hello.deviceId, publicKey: storedIdentity.publicKey,
       fingerprint: fingerprint(storedIdentity.publicKey), claimId: 'stored', pairedAt: 1,
     })
-    const reply = substituted.security.handleChannelHandshake({ channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body })
+    const reply = substituted.security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test', channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body })
     hello.noise.readMessage(reply)
-    assert.throws(() => substituted.security.handleChannelHandshake({
+    assert.throws(() => substituted.security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test',
       channel_id: hello.channelId, device_id: hello.deviceId, body: hello.noise.writeMessage(new Uint8Array(0)),
     }), (error) => error.code === 'unauthorized')
   } finally {
