@@ -3,7 +3,6 @@ package line
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -390,223 +389,462 @@ func TestApplyPairingToleratesNotConnectedAndSurfacesFailures(t *testing.T) {
 	}
 }
 
-func TestRevokeGrantDeniesAndKicksTheScopedConnection(t *testing.T) {
-	grant := store.AdmissionGrant{HostID: "h1", DeviceID: "d1", GrantGeneration: 2, RevocationGeneration: 3, DeviceRevocationGeneration: 4}
-	fs := &fakeStore{grantFor: map[string]store.AdmissionGrant{"h1|d1": grant}}
-	control, requests := newTestControl(t, func(recordedRequest) (string, error) { return "", nil })
-	manager := newTestManager(t, fs, control, &fakeApplier{}, testPresence(t))
-	if err := manager.RevokeGrant(context.Background(), "h1", "d1"); err != nil {
+func scopedGrant(hostID, deviceID string, grantGeneration, revocationGeneration, deviceRevocationGeneration uint64, connections ...store.ScopeConnection) store.ScopeGrant {
+	return store.ScopeGrant{
+		HostID: hostID, DeviceID: deviceID,
+		GrantGeneration: grantGeneration, RevocationGeneration: revocationGeneration,
+		DeviceRevocationGeneration: deviceRevocationGeneration,
+		Connections:                connections,
+	}
+}
+
+func freezeDevice(t *testing.T, presence *broker.Presence, deviceID string, refs ...store.ScopeConnection) {
+	t.Helper()
+	clients := make([]broker.SnapshotClient, 0, len(refs))
+	for _, ref := range refs {
+		clients = append(clients, broker.SnapshotClient{
+			Kind: "device", DeviceID: deviceID, ClientID: ref.ClientID,
+			ConnID: ref.Ref.ID, Epoch: ref.Ref.Epoch, State: "connected",
+		})
+	}
+	presence.SetBrokerEpoch(refs[0].Ref.Epoch)
+	presence.ApplySnapshot(clients, 1)
+}
+
+func TestRevokeGrantFencesFrozenGenerationAndClosesOnlyItsConnection(t *testing.T) {
+	connection := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 7}, ClientID: "whalerein-device-d1"}
+	presence := testPresence(t)
+	freezeDevice(t, presence, "d1", connection)
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "matched 1\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, presence)
+	scope := store.RevocationScope{HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d1", 2, 4, 0, connection),
+	}}
+	receipt, err := manager.RevokeGrant(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*requests) != 2 {
+		t.Fatalf("requests = %+v", *requests)
+	}
+	base := strings.Join((*requests)[0].fields, " ")
+	if (*requests)[0].op != "deny" || !strings.Contains(base, "generation 4194306") ||
+		!strings.Contains(base, "kick 0") || strings.Contains(base, "conn ") {
+		t.Fatalf("base deny = %+v", (*requests)[0])
+	}
+	scoped := strings.Join((*requests)[1].fields, " ")
+	if (*requests)[1].op != "deny" || !strings.Contains(scoped, "conn 7") || !strings.Contains(scoped, "kick 1") {
+		t.Fatalf("scoped deny = %+v", (*requests)[1])
+	}
+	for _, request := range *requests {
+		if request.op == "kick" || strings.Contains(strings.Join(request.fields, " "), "username ") {
+			t.Fatalf("authorization revocation used an unfenced username kick: %+v", request)
+		}
+	}
+	if len(receipt.Applied) != 1 || receipt.Applied[0] != connection {
+		t.Fatalf("receipt = %+v", receipt)
+	}
+	if receipt.Primary() == nil || *receipt.Primary() != connection.Ref {
+		t.Fatalf("primary rejection = %+v", receipt.Primary())
+	}
+}
+
+func TestRevokeGrantTreatsAnAbsentOrReplacedConnectionAsEnforced(t *testing.T) {
+	connection := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 7}, ClientID: "whalerein-device-d1"}
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "matched 0\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, testPresence(t))
+	scope := store.RevocationScope{HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d1", 2, 4, 0, connection),
+	}}
+	receipt, err := manager.RevokeGrant(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !receipt.Absent || len(receipt.Applied) != 0 || receipt.Primary() != nil {
+		t.Fatalf("absent scope receipt = %+v", receipt)
+	}
+	// The generation fence is still installed even when the target vanished.
+	if len(*requests) == 0 || (*requests)[0].op != "deny" {
+		t.Fatalf("requests = %+v", *requests)
+	}
+}
+
+func TestScopedRevocationSkipsConnectionsFromAnotherBrokerEpoch(t *testing.T) {
+	old := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-old", ID: 7}, ClientID: "whalerein-device-d1"}
+	current := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-new", ID: 7}, ClientID: "whalerein-device-d1"}
+	presence := testPresence(t)
+	freezeDevice(t, presence, "d1", current)
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "matched 1\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, presence)
+	scope := store.RevocationScope{HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d1", 2, 4, 0, old),
+	}}
+	receipt, err := manager.RevokeGrant(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range *requests {
+		if strings.Contains(strings.Join(request.fields, " "), "conn 7") {
+			t.Fatalf("an old-epoch connection id was targeted: %+v", request)
+		}
+	}
+	if !receipt.Absent {
+		t.Fatalf("an old-epoch scope must be absent: %+v", receipt)
+	}
+}
+
+func TestQueuedDeliveryFenceIsInstalledForAnAbsentConnection(t *testing.T) {
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "matched 0\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, testPresence(t))
+	scope := store.RevocationScope{HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d1", 3, 2, 1),
+	}}
+	receipt, err := manager.RevokeGrant(context.Background(), scope)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if len(*requests) != 1 || (*requests)[0].op != "deny" {
 		t.Fatalf("requests = %+v", *requests)
 	}
-	want := []string{"device d1", fmt.Sprintf("generation %d", policy.Revision(grant)), "host h1", "kick 1"}
-	got := (*requests)[0].fields[1:] // drop the synthetic id field
-	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Fatalf("deny fields = %v, want %v", got, want)
+	fields := strings.Join((*requests)[0].fields, " ")
+	if !strings.Contains(fields, "generation ") || !strings.Contains(fields, "kick 0") {
+		t.Fatalf("queued delivery fence was not installed: %+v", (*requests)[0])
 	}
-	if err := manager.RevokeGrant(context.Background(), "h2", "d1"); err == nil {
-		t.Fatal("missing grant ignored")
+	if !receipt.Absent {
+		t.Fatalf("an absent connection must count as enforced: %+v", receipt)
 	}
 }
 
-func TestRevokeDeviceDeniesEveryHostScopeThenKicksTheDevice(t *testing.T) {
-	fs := &fakeStore{
-		deviceGrants: map[string][]store.AdmissionGrant{"d1": {
-			{HostID: "h1", DeviceID: "d1"},
-			{HostID: "h2", DeviceID: "d1"},
-		}},
-		grantFor: map[string]store.AdmissionGrant{
-			"h1|d1": {HostID: "h1", DeviceID: "d1", GrantGeneration: 5},
-			"h2|d1": {HostID: "h2", DeviceID: "d1", GrantGeneration: 6},
-		},
-	}
-	control, requests := newTestControl(t, func(recordedRequest) (string, error) { return "", nil })
-	manager := newTestManager(t, fs, control, &fakeApplier{}, testPresence(t))
-	if err := manager.RevokeDevice(context.Background(), "d1"); err != nil {
+func TestSameIDReplacementWithNewerAuthorityIsNotClosed(t *testing.T) {
+	// The frozen connection id now belongs to a replacement whose policy has a
+	// newer generation; the Broker reports no matching stale entry.
+	connection := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 7}, ClientID: "whalerein-device-d1"}
+	presence := testPresence(t)
+	freezeDevice(t, presence, "d1", connection)
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "matched 0\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, presence)
+	receipt, err := manager.RevokeGrant(context.Background(), store.RevocationScope{
+		HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{scopedGrant("h1", "d1", 2, 4, 0, connection)},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(*requests) != 3 {
-		t.Fatalf("requests = %+v", *requests)
+	if !receipt.Absent {
+		t.Fatalf("the replacement was reported as closed: %+v", receipt)
 	}
-	deniedHosts := map[string]bool{}
-	for _, request := range (*requests)[:2] {
-		if request.op != "deny" {
-			t.Fatalf("expected deny, got %+v", request)
+	for _, request := range *requests {
+		if request.op == "kick" || strings.Contains(strings.Join(request.fields, " "), "username ") {
+			t.Fatalf("the replacement was closed by an unfenced kick: %+v", request)
 		}
-		joined := strings.Join(request.fields, " ")
-		if !strings.Contains(joined, "kick 0") || !strings.Contains(joined, "device d1") {
-			t.Fatalf("deny fields = %v", request.fields)
-		}
-		for _, host := range []string{"h1", "h2"} {
-			if strings.Contains(joined, "host "+host) {
-				deniedHosts[host] = true
-			}
-		}
-	}
-	last := (*requests)[2]
-	if last.op != "kick" || strings.Join(last.fields[1:], "|") != "username device:d1" {
-		t.Fatalf("final kick = %+v", last)
-	}
-	if !deniedHosts["h1"] || !deniedHosts["h2"] || len(deniedHosts) != 2 {
-		t.Fatalf("denied hosts = %v", deniedHosts)
-	}
-
-	fs.deviceErr = errors.New("db down")
-	if err := manager.RevokeDevice(context.Background(), "d1"); err == nil {
-		t.Fatal("grant listing failure ignored")
 	}
 }
 
-func TestRevokeDeviceSurfacesGrantAndKickFailures(t *testing.T) {
-	fs := &fakeStore{
-		deviceGrants: map[string][]store.AdmissionGrant{"d1": {{HostID: "h1", DeviceID: "d1"}}},
-		grantFor:     map[string]store.AdmissionGrant{"h1|d1": {HostID: "h1", DeviceID: "d1"}},
+func TestScopedRevocationIsIsolatedToTheFrozenHostAndDevice(t *testing.T) {
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "matched 0\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, testPresence(t))
+	scope := store.RevocationScope{HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d1", 3, 0, 0),
+	}}
+	if _, err := manager.RevokeGrant(context.Background(), scope); err != nil {
+		t.Fatal(err)
 	}
-	snapshot := func(recordedRequest) (string, error) { return "", nil }
-	control, _ := newTestControl(t, snapshot)
-	fs.grantErr = errors.New("grant down")
-	if err := newTestManager(t, fs, control, &fakeApplier{}, testPresence(t)).RevokeDevice(context.Background(), "d1"); err == nil {
-		t.Fatal("grant read failure ignored")
+	for _, request := range *requests {
+		fields := strings.Join(request.fields, " ")
+		if !strings.Contains(fields, "device d1") || !strings.Contains(fields, "host h1") {
+			t.Fatalf("scope leaked outside host/device: %+v", request)
+		}
+		if strings.Contains(fields, "h2") || strings.Contains(fields, "d2") || strings.Contains(fields, "username ") {
+			t.Fatalf("revocation escaped its frozen scope: %+v", request)
+		}
 	}
-	fs.grantErr = nil
+}
 
+func TestRevokeDeviceFencesEveryHostScopeThenClosesOnlyFrozenConnections(t *testing.T) {
+	connection := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 8}, ClientID: "whalerein-device-d1-send"}
+	presence := testPresence(t)
+	freezeDevice(t, presence, "d1", connection)
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "matched 1\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, presence)
+	scope := store.RevocationScope{DeviceID: "d1", DeviceWide: true, Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d1", 5, 0, 0, connection),
+		scopedGrant("h2", "d1", 6, 0, 0, connection),
+	}}
+	receipt, err := manager.RevokeDevice(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deniedHosts := map[string]bool{}
+	scopedKicks := 0
+	for _, request := range *requests {
+		joined := strings.Join(request.fields, " ")
+		if request.op != "deny" {
+			t.Fatalf("unexpected operation = %+v", request)
+		}
+		if strings.Contains(joined, "username ") {
+			t.Fatalf("device revocation used a username kick: %+v", request)
+		}
+		for _, hostID := range []string{"h1", "h2"} {
+			if strings.Contains(joined, "host "+hostID) {
+				deniedHosts[hostID] = true
+			}
+		}
+		if strings.Contains(joined, "conn 8") && strings.Contains(joined, "kick 1") {
+			scopedKicks++
+		}
+	}
+	if !deniedHosts["h1"] || !deniedHosts["h2"] {
+		t.Fatalf("denied hosts = %v", deniedHosts)
+	}
+	if scopedKicks != 2 {
+		t.Fatalf("scoped connection denies = %d, want 2", scopedKicks)
+	}
+	if len(receipt.Applied) != 1 {
+		t.Fatalf("receipt connections were duplicated: %+v", receipt.Applied)
+	}
+}
+
+func TestRevokeDeviceSurfacesBrokerDenyFailures(t *testing.T) {
 	denyFailure, _ := newTestControl(t, func(request recordedRequest) (string, error) {
 		if request.op == "deny" {
 			return "", errors.New("deny failed")
 		}
 		return "", nil
 	})
-	if err := newTestManager(t, fs, denyFailure, &fakeApplier{}, testPresence(t)).RevokeDevice(context.Background(), "d1"); err == nil {
+	scope := store.RevocationScope{DeviceID: "d1", DeviceWide: true, Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d1", 1, 0, 0),
+	}}
+	if _, err := newTestManager(t, &fakeStore{}, denyFailure, &fakeApplier{}, testPresence(t)).RevokeDevice(context.Background(), scope); err == nil {
 		t.Fatal("deny failure ignored")
 	}
-
-	kickFailure, _ := newTestControl(t, func(request recordedRequest) (string, error) {
-		if request.op == "kick" {
-			return "", errors.New("kick failed")
-		}
-		return "", nil
-	})
-	if err := newTestManager(t, fs, kickFailure, &fakeApplier{}, testPresence(t)).RevokeDevice(context.Background(), "d1"); err == nil {
-		t.Fatal("kick failure ignored")
-	}
 }
 
-func TestHeartbeatRefreshesThePolicyWindowAndReportsFailure(t *testing.T) {
-	control, requests := newTestControl(t, func(recordedRequest) (string, error) { return "", nil })
-	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, testPresence(t))
-	if err := manager.Heartbeat(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(*requests) != 1 || (*requests)[0].op != "ping" || strings.Join((*requests)[0].fields[1:], "|") != "ttl 10000" {
-		t.Fatalf("heartbeat = %+v", *requests)
-	}
-	failing, _ := newTestControl(t, func(request recordedRequest) (string, error) {
-		return "", errors.New("ping down")
-	})
-	if err := newTestManager(t, &fakeStore{}, failing, &fakeApplier{}, testPresence(t)).Heartbeat(context.Background()); err == nil {
-		t.Fatal("heartbeat failure ignored")
-	}
-}
-
-func TestIsNotConnectedRecognizesBrokerFailures(t *testing.T) {
-	for _, tc := range []struct {
-		err  error
-		want bool
-	}{
-		{nil, false},
-		{errors.New("not_found"), true},
-		{errors.New("client not connected"), true},
-		{errors.New("denied"), false},
-	} {
-		if got := isNotConnected(tc.err); got != tc.want {
-			t.Fatalf("isNotConnected(%v) = %v", tc.err, got)
-		}
-	}
-}
-
-func TestRecordPolicySkipsAnUnchangedProjection(t *testing.T) {
-	fs := &fakeStore{deviceGrants: map[string][]store.AdmissionGrant{
-		"d1": {{HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 4}},
+func TestScopedEnforcementFailureKeepsTheOperationRetryable(t *testing.T) {
+	connection := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 7}, ClientID: "whalerein-device-d1"}
+	presence := testPresence(t)
+	freezeDevice(t, presence, "d1", connection)
+	scope := store.RevocationScope{HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d1", 2, 4, 0, connection),
 	}}
-	control, requests := newTestControl(t, func(recordedRequest) (string, error) { return "", nil })
-	manager := newTestManager(t, fs, control, &fakeApplier{}, testPresence(t))
-
-	manager.RecordPolicy("", 9)
-	if manager.currentlyApplied("", 9) {
-		t.Fatal("empty device recorded")
-	}
-	manager.RecordPolicy("d1", policy.Revision(fs.deviceGrants["d1"][0]))
-	manager.applyDevicePolicy("d1")
-	if len(*requests) != 0 {
-		t.Fatalf("unchanged policy projected: %+v", *requests)
-	}
-}
-
-func TestApplyDevicePolicyHandlesEveryOutcome(t *testing.T) {
-	grant := store.AdmissionGrant{HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 4}
-	fs := &fakeStore{deviceGrants: map[string][]store.AdmissionGrant{"d1": {grant}}}
-
-	// Listing failure logs and increments the reconcile error counter.
-	fs.deviceErr = errors.New("db down")
-	control, _ := newTestControl(t, func(recordedRequest) (string, error) { return "", nil })
-	manager := newTestManager(t, fs, control, &fakeApplier{}, testPresence(t))
-	manager.applyDevicePolicy("d1")
-	fs.deviceErr = nil
-
-	// A rejected projection is absorbed; pairing already succeeded.
-	denied, _ := newTestControl(t, func(request recordedRequest) (string, error) {
-		if request.op == "set" {
-			return "", errors.New("denied")
+	failing, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "", errors.New("broker control timeout")
 		}
 		return "", nil
 	})
-	newTestManager(t, fs, denied, &fakeApplier{}, testPresence(t)).applyDevicePolicy("d1")
-
-	// A device that vanished between commit and projection is tolerated.
-	notFound, _ := newTestControl(t, func(request recordedRequest) (string, error) {
-		if request.op == "set" {
-			return "", errors.New("broker control set: not_found")
-		}
-		return "", nil
-	})
-	newTestManager(t, fs, notFound, &fakeApplier{}, testPresence(t)).applyDevicePolicy("d1")
-
-	// Success records the revision so the next pass can skip it.
-	okControl, requests := newTestControl(t, func(recordedRequest) (string, error) { return "", nil })
-	succeeded := newTestManager(t, fs, okControl, &fakeApplier{}, testPresence(t))
-	succeeded.applyDevicePolicy("d1")
-	if !succeeded.currentlyApplied("d1", policy.Revision(grant)) {
-		t.Fatal("successful projection was not recorded")
+	manager := newTestManager(t, &fakeStore{}, failing, &fakeApplier{}, presence)
+	if _, err := manager.RevokeGrant(context.Background(), scope); err == nil {
+		t.Fatal("an unconfirmed Broker fence must keep the durable operation pending")
 	}
 	if len(*requests) != 1 {
 		t.Fatalf("requests = %+v", *requests)
 	}
-}
 
-func TestRevokeGrantSurfacesGrantReadFailure(t *testing.T) {
-	fs := &fakeStore{grantErr: errors.New("db down")}
-	control, requests := newTestControl(t, func(recordedRequest) (string, error) { return "", nil })
-	if err := newTestManager(t, fs, control, &fakeApplier{}, testPresence(t)).RevokeGrant(context.Background(), "h1", "d1"); err == nil {
-		t.Fatal("grant read failure ignored")
-	}
-	if len(*requests) != 0 {
-		t.Fatal("deny sent without a durable revision")
-	}
-}
-
-func TestRevokeHostDeniesCurrentGrantIncarnationsThenClosesTheHost(t *testing.T) {
-	fs := &fakeStore{grantFor: map[string]store.AdmissionGrant{}}
-	control, requests := newTestControl(t, func(recordedRequest) (string, error) { return "", nil })
-	manager := newTestManager(t, fs, control, &fakeApplier{}, testPresence(t))
-	if err := manager.RevokeHost(context.Background(), "h1", map[string]uint64{"d2": 9, "d1": 4}); err != nil {
+	// The retry re-issues exactly the frozen generation and connection.
+	ok, retried := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "matched 1\n", nil
+		}
+		return "", nil
+	})
+	manager = newTestManager(t, &fakeStore{}, ok, &fakeApplier{}, presence)
+	if _, err := manager.RevokeGrant(context.Background(), scope); err != nil {
 		t.Fatal(err)
 	}
+	if len(*retried) != 2 || strings.Join((*retried)[0].fields, " ") != strings.Join((*requests)[0].fields, " ") {
+		t.Fatalf("retry did not replay the frozen scope: %+v vs %+v", *retried, *requests)
+	}
+}
+
+func TestReconnectNewGenerationTargetsOnlyTheFrozenConnection(t *testing.T) {
+	old := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 7}, ClientID: "whalerein-device-d1"}
+	replacement := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 8}, ClientID: "whalerein-device-d1"}
+	presence := testPresence(t)
+	freezeDevice(t, presence, "d1", replacement)
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "matched 0\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, presence)
+	receipt, err := manager.RevokeGrant(context.Background(), store.RevocationScope{
+		HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{scopedGrant("h1", "d1", 2, 4, 0, old)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range *requests {
+		fields := strings.Join(request.fields, " ")
+		if strings.Contains(fields, "conn 8") {
+			t.Fatalf("the replacement connection was targeted: %+v", request)
+		}
+	}
+	if !receipt.Absent {
+		t.Fatalf("the replacement was reported as applied: %+v", receipt)
+	}
+}
+
+func TestScopedRevocationHandlesIncompleteGrantsAndConnectionFailures(t *testing.T) {
+	first := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 7}, ClientID: "whalerein-device-d1"}
+	second := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 6}, ClientID: "whalerein-device-d1"}
+	third := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 8}, ClientID: "whalerein-device-d1-extra"}
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		fields := strings.Join(request.fields, " ")
+		if request.op == "deny" && strings.Contains(fields, "conn ") {
+			return "", errors.New("client not connected")
+		}
+		if request.op == "deny" {
+			return "matched 1\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, testPresence(t))
+	scope := store.RevocationScope{HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{
+		{HostID: "h1", DeviceID: "d1", GrantGeneration: 1, Connections: []store.ScopeConnection{first, second, third}},
+		{HostID: "", DeviceID: "d1", GrantGeneration: 2},
+		{HostID: "h2", GrantGeneration: 3},
+	}}
+	receipt, err := manager.RevokeGrant(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(*requests) != 5 {
+		t.Fatalf("requests = %+v", *requests)
+	}
+	for _, request := range *requests {
+		if strings.Contains(strings.Join(request.fields, " "), "generation 2") {
+			t.Fatalf("a grant without a Host was enforced: %+v", request)
+		}
+	}
+	// The final grant has no device id and falls back to the scope device id.
+	last := strings.Join((*requests)[4].fields, " ")
+	if !strings.Contains(last, "generation 3") || !strings.Contains(last, "device d1") {
+		t.Fatalf("scope device fallback = %s", last)
+	}
+	if !receipt.Absent || len(receipt.Applied) != 0 {
+		t.Fatalf("unreachable connections must count as absent: %+v", receipt)
+	}
+
+	// A hard connection-deny failure keeps the operation pending.
+	failing, _ := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" && strings.Contains(strings.Join(request.fields, " "), "conn ") {
+			return "", errors.New("broker denied")
+		}
+		return "matched 1\n", nil
+	})
+	manager = newTestManager(t, &fakeStore{}, failing, &fakeApplier{}, testPresence(t))
+	if _, err := manager.RevokeGrant(context.Background(), store.RevocationScope{
+		HostID: "h1", DeviceID: "d1",
+		Grants: []store.ScopeGrant{scopedGrant("h1", "d1", 1, 0, 0, first)},
+	}); err == nil {
+		t.Fatal("a hard connection-deny failure must be surfaced")
+	}
+}
+
+func TestRevokeHostRemoveFailureIsSurfaced(t *testing.T) {
+	hostConnection := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 11}, ClientID: "whalerein-host-h1"}
+	control, _ := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "remove" {
+			return "", errors.New("broker failure")
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, testPresence(t))
+	if _, err := manager.RevokeHost(context.Background(), store.RevocationScope{HostID: "h1", HostConnection: &hostConnection}); err == nil {
+		t.Fatal("a Host remove failure must be surfaced so enforcement stays pending")
+	}
+}
+
+func TestScopedConnectionsAreDeduplicatedAndRequireATargetClient(t *testing.T) {
+	valid := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 7}, ClientID: "whalerein-device-d1"}
+	invalid := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 8}}
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		if request.op == "deny" {
+			return "matched 1\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, testPresence(t))
+	scope := store.RevocationScope{HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d1", 2, 4, 0, valid, valid, invalid),
+	}}
+	receipt, err := manager.RevokeGrant(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connDenies := 0
+	for _, request := range *requests {
+		if strings.Contains(strings.Join(request.fields, " "), "conn ") {
+			connDenies++
+		}
+	}
+	if connDenies != 1 {
+		t.Fatalf("connection denies = %d, want 1: %+v", connDenies, *requests)
+	}
+	if len(receipt.Applied) != 1 || receipt.Applied[0] != valid {
+		t.Fatalf("applied = %+v", receipt.Applied)
+	}
+}
+
+func TestRevokeHostDeniesFrozenIncarnationsThenRemovesTheFrozenHostConnection(t *testing.T) {
+	hostConnection := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 11}, ClientID: "whalerein-host-h1"}
+	control, requests := newTestControl(t, func(request recordedRequest) (string, error) {
+		switch request.op {
+		case "deny":
+			return "matched 1\n", nil
+		case "remove":
+			return "conn 11\n", nil
+		}
+		return "", nil
+	})
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, testPresence(t))
+	scope := store.RevocationScope{HostID: "h1", HostConnection: &hostConnection, Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d2", 9, 0, 0),
+		scopedGrant("h1", "d1", 4, 0, 0),
+	}}
+	receipt, err := manager.RevokeHost(context.Background(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Device iteration is sorted so a retry issues the same operations.
 	if len(*requests) != 3 {
 		t.Fatalf("requests = %+v", *requests)
 	}
-	// Device iteration is sorted so a retry issues the same operations.
 	if (*requests)[0].op != "deny" || !strings.Contains(strings.Join((*requests)[0].fields, " "), "device d1") ||
 		!strings.Contains(strings.Join((*requests)[0].fields, " "), "generation 4") {
 		t.Fatalf("first deny = %+v", (*requests)[0])
@@ -615,29 +853,47 @@ func TestRevokeHostDeniesCurrentGrantIncarnationsThenClosesTheHost(t *testing.T)
 		!strings.Contains(strings.Join((*requests)[1].fields, " "), "generation 9") {
 		t.Fatalf("second deny = %+v", (*requests)[1])
 	}
-	if (*requests)[2].op != "kick" || !strings.Contains(strings.Join((*requests)[2].fields, " "), "username host:h1") {
-		t.Fatalf("host kick = %+v", (*requests)[2])
+	remove := (*requests)[2]
+	if remove.op != "remove" || !strings.Contains(strings.Join(remove.fields, " "), "client whalerein-host-h1") ||
+		!strings.Contains(strings.Join(remove.fields, " "), "conn 11") ||
+		strings.Contains(strings.Join(remove.fields, " "), "username ") {
+		t.Fatalf("host remove = %+v", remove)
+	}
+	if len(receipt.Applied) != 1 || receipt.Applied[0] != hostConnection {
+		t.Fatalf("receipt = %+v", receipt)
 	}
 }
 
-func TestRevokeHostSwallowsAnAlreadyClosedSessionAndSurfacesOtherFailures(t *testing.T) {
+func TestRevokeHostTreatsAnAbsentHostConnectionAsEnforced(t *testing.T) {
+	hostConnection := store.ScopeConnection{Ref: store.ConnectionRef{Epoch: "epoch-a", ID: 11}, ClientID: "whalerein-host-h1"}
 	control, _ := newTestControl(t, func(request recordedRequest) (string, error) {
-		if request.op == "kick" {
-			return "", errors.New("client not connected")
+		if request.op == "remove" {
+			return "absent 1\n", nil
 		}
 		return "", nil
 	})
-	manager := newTestManager(t, &fakeStore{grantFor: map[string]store.AdmissionGrant{}}, control, &fakeApplier{}, testPresence(t))
-	if err := manager.RevokeHost(context.Background(), "h1", nil); err != nil {
+	manager := newTestManager(t, &fakeStore{}, control, &fakeApplier{}, testPresence(t))
+	receipt, err := manager.RevokeHost(context.Background(), store.RevocationScope{HostID: "h1", HostConnection: &hostConnection})
+	if err != nil {
 		t.Fatalf("an already closed Host session is not an error: %v", err)
 	}
+	if !receipt.Absent {
+		t.Fatalf("absent host receipt = %+v", receipt)
+	}
+	if _, err := manager.RevokeHost(context.Background(), store.RevocationScope{HostID: "h1"}); err != nil {
+		t.Fatalf("an offline Host with no frozen connection is enforced: %v", err)
+	}
+}
 
-	failing, _ := newTestControl(t, func(request recordedRequest) (string, error) {
-		return "", errors.New("broker unavailable")
+func TestScopedRevocationSwallowsAnUnreachableBrokerForAbsentScopes(t *testing.T) {
+	failing, _ := newTestControl(t, func(recordedRequest) (string, error) {
+		return "", errors.New("client not connected")
 	})
-	manager = newTestManager(t, &fakeStore{grantFor: map[string]store.AdmissionGrant{}}, failing, &fakeApplier{}, testPresence(t))
-	if err := manager.RevokeHost(context.Background(), "h1", map[string]uint64{"d1": 1}); err == nil {
-		t.Fatal("a line failure must be surfaced")
+	scope := store.RevocationScope{HostID: "h1", DeviceID: "d1", Grants: []store.ScopeGrant{
+		scopedGrant("h1", "d1", 1, 0, 0),
+	}}
+	if _, err := newTestManager(t, &fakeStore{}, failing, &fakeApplier{}, testPresence(t)).RevokeGrant(context.Background(), scope); err != nil {
+		t.Fatalf("an unreachable absent target should count as enforced: %v", err)
 	}
 }
 

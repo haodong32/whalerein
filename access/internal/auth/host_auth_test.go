@@ -116,8 +116,8 @@ func TestHostAuthorizationKeySignsAndVerifiesRequests(t *testing.T) {
 	if fs.grants[grantKey("h1", "d1")] {
 		t.Fatal("grant still active")
 	}
-	if len(transport.disconnected) != 1 || transport.disconnected[0] != "d1" {
-		t.Fatalf("disconnect = %v", transport.disconnected)
+	if len(transport.disconnected) != 0 {
+		t.Fatalf("authorization revocation used an unfenced username disconnect: %v", transport.disconnected)
 	}
 	fs.grants[grantKey("h2", "d1")] = true
 	if fs.grants[grantKey("h2", "d1")] != true {

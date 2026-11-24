@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -30,6 +31,13 @@ const (
 // observedAt is the source timestamp used for stale-event rejection.
 type DeviceOfflineHandler func(deviceID, source string, observedAt time.Time)
 
+// liveConnection is one admitted device connection the presence registry can
+// target for a scoped revocation. The client id is carried because a device
+// may use the fixed id or a bounded suffixed variant.
+type liveConnection struct {
+	clientID string
+}
+
 type presenceEntry struct {
 	online bool
 	// at is the source timestamp used to reject stale events for one identity.
@@ -41,6 +49,9 @@ type presenceEntry struct {
 	// being refreshed and eventually expires.
 	seenAt time.Time
 	connID uint64
+	// epoch is the broker-process epoch of connID. A changed epoch invalidates
+	// the connection identity for scoped revocation.
+	epoch string
 	// connections is the set of live broker connection identities for one
 	// device. A device can hold several authenticated connections at once (for
 	// example a long-lived watch connection and a short-lived send connection);
@@ -66,7 +77,7 @@ type Presence struct {
 	mu          sync.RWMutex
 	hosts       map[string]presenceEntry
 	devices     map[string]presenceEntry
-	connections map[string]map[ConnectionRef]struct{}
+	connections map[string]map[ConnectionRef]liveConnection
 	// epoch is the broker-process epoch the current snapshot belongs to. A
 	// changed epoch invalidates every tracked connection reference.
 	epoch                string
@@ -91,7 +102,7 @@ func NewPresence(cacheTTL time.Duration, metrics *diagnostics.Metrics, logger *s
 	p := &Presence{
 		hosts:       make(map[string]presenceEntry),
 		devices:     make(map[string]presenceEntry),
-		connections: make(map[string]map[ConnectionRef]struct{}),
+		connections: make(map[string]map[ConnectionRef]liveConnection),
 		cacheTTL:    cacheTTL,
 		metrics:     metrics,
 		logger:      logger,
@@ -432,24 +443,88 @@ func (p *Presence) DeviceConnectionRefs(deviceID string) []ConnectionRef {
 	if deviceID == "" {
 		return nil
 	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	refs := make([]ConnectionRef, 0, len(p.connections[deviceID]))
-	for ref := range p.connections[deviceID] {
-		refs = append(refs, ref)
+	connections := p.DeviceConnections(deviceID)
+	refs := make([]ConnectionRef, 0, len(connections))
+	for _, connection := range connections {
+		refs = append(refs, connection.Ref)
 	}
 	return refs
 }
 
-func (p *Presence) noteConnectionLocked(deviceID string, ref ConnectionRef, online bool) {
+// DeviceConnections returns the admitted broker connections of a device with
+// their client ids, ordered deterministically so a retry issues the same
+// scoped control operations.
+func (p *Presence) DeviceConnections(deviceID string) []ScopeConnection {
+	if deviceID == "" {
+		return nil
+	}
+	p.mu.RLock()
+	live := p.connections[deviceID]
+	out := make([]ScopeConnection, 0, len(live))
+	for ref, connection := range live {
+		if !ref.Valid() {
+			continue
+		}
+		out = append(out, ScopeConnection{Ref: ref, ClientID: connection.clientID})
+	}
+	p.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ClientID != out[j].ClientID {
+			return out[i].ClientID < out[j].ClientID
+		}
+		return out[i].Ref.ID < out[j].Ref.ID
+	})
+	return out
+}
+
+// HostConnectionRef returns the admitted broker connection identity of one
+// Host. A Host re-add establishes a different enrollment generation and a new
+// connection instance, so a delayed revocation targets only the frozen ref.
+func (p *Presence) HostConnectionRef(hostID string) (ConnectionRef, bool) {
+	connection, ok := p.HostScopeConnection(hostID)
+	return connection.Ref, ok
+}
+
+// HostScopeConnection returns the admitted Host connection together with its
+// deterministic broker client id.
+func (p *Presence) HostScopeConnection(hostID string) (ScopeConnection, bool) {
+	if hostID == "" {
+		return ScopeConnection{}, false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	entry, ok := p.hosts[hostID]
+	if !ok || !entry.online || entry.connID == 0 {
+		return ScopeConnection{}, false
+	}
+	epoch := entry.epoch
+	if epoch == "" {
+		epoch = p.epoch
+	}
+	ref := ConnectionRef{Epoch: epoch, ID: entry.connID}
+	if !ref.Valid() {
+		return ScopeConnection{}, false
+	}
+	connection := ScopeConnection{Ref: ref, ClientID: ClientIDForHost(hostID)}
+	return connection, connection.Valid()
+}
+
+// BrokerEpoch returns the broker-process epoch of the current snapshot.
+func (p *Presence) BrokerEpoch() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.epoch
+}
+
+func (p *Presence) noteConnectionLocked(deviceID string, ref ConnectionRef, clientID string, online bool) {
 	if deviceID == "" || !ref.Valid() {
 		return
 	}
 	if online {
 		if p.connections[deviceID] == nil {
-			p.connections[deviceID] = map[ConnectionRef]struct{}{}
+			p.connections[deviceID] = map[ConnectionRef]liveConnection{}
 		}
-		p.connections[deviceID][ref] = struct{}{}
+		p.connections[deviceID][ref] = liveConnection{clientID: clientID}
 		return
 	}
 	delete(p.connections[deviceID], ref)
@@ -499,16 +574,20 @@ func (p *Presence) HandleNotification(notification *Notification) {
 					// HostReady confirmation.
 					ready = previous.ready
 				}
+				epoch := notification.Epoch
+				if epoch == "" {
+					epoch = p.epoch
+				}
 				p.hosts[notification.HostID] = presenceEntry{
 					online: online, at: at, seenAt: p.now(),
-					connID: notification.ConnID, ready: ready, seq: notification.Sequence,
+					connID: notification.ConnID, epoch: epoch, ready: ready, seq: notification.Sequence,
 				}
 			}
 		}
 	case "device":
 		if notification.DeviceID != "" {
 			connID := notification.ConnID
-			p.noteConnectionLocked(notification.DeviceID, ConnectionRef{Epoch: notification.Epoch, ID: notification.ConnID}, online)
+			p.noteConnectionLocked(notification.DeviceID, ConnectionRef{Epoch: notification.Epoch, ID: notification.ConnID}, notification.ClientID, online)
 			p.mu.Unlock()
 			p.applyDevice(notification.DeviceID, online, at, PresenceSourceBroker, connID, true, notification.Sequence)
 			return
@@ -518,7 +597,7 @@ func (p *Presence) HandleNotification(notification *Notification) {
 		// reply affinity, but their lifecycle does not create directory
 		// presence edges.
 		if notification.DeviceID != "" {
-			p.noteConnectionLocked(notification.DeviceID, ConnectionRef{Epoch: notification.Epoch, ID: notification.ConnID}, online)
+			p.noteConnectionLocked(notification.DeviceID, ConnectionRef{Epoch: notification.Epoch, ID: notification.ConnID}, notification.ClientID, online)
 		}
 	}
 	p.mu.Unlock()
@@ -539,7 +618,7 @@ func (p *Presence) SetBrokerEpoch(epoch string) bool {
 		return false
 	}
 	p.epoch = epoch
-	p.connections = make(map[string]map[ConnectionRef]struct{}, len(p.devices))
+	p.connections = make(map[string]map[ConnectionRef]liveConnection, len(p.devices))
 	return true
 }
 
@@ -585,7 +664,11 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 				if exists {
 					ready = previous.ready && (previous.connID == client.ConnID || previous.connID == 0)
 				}
-				hosts[client.HostID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, ready: ready, seq: boundary}
+				epoch := client.Epoch
+				if epoch == "" {
+					epoch = p.epoch
+				}
+				hosts[client.HostID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, epoch: epoch, ready: ready, seq: boundary}
 			}
 		case "device":
 			if client.DeviceID != "" {
@@ -646,7 +729,7 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 	}
 	// The snapshot is the authoritative current connection set; every stale
 	// reference from an older broker epoch or replaced connection disappears.
-	connections := make(map[string]map[ConnectionRef]struct{}, len(devices))
+	connections := make(map[string]map[ConnectionRef]liveConnection, len(devices))
 	for _, client := range clients {
 		if client.Kind != "device" || client.State != "connected" || client.DeviceID == "" {
 			continue
@@ -656,9 +739,9 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 			continue
 		}
 		if connections[client.DeviceID] == nil {
-			connections[client.DeviceID] = map[ConnectionRef]struct{}{}
+			connections[client.DeviceID] = map[ConnectionRef]liveConnection{}
 		}
-		connections[client.DeviceID][ref] = struct{}{}
+		connections[client.DeviceID][ref] = liveConnection{clientID: client.ClientID}
 	}
 	// A CONNECT notification applied after the snapshot boundary describes
 	// newer broker state; keep its reference instead of rolling it back.
@@ -668,9 +751,9 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 		}
 		for ref := range p.connections[deviceID] {
 			if connections[deviceID] == nil {
-				connections[deviceID] = map[ConnectionRef]struct{}{}
+				connections[deviceID] = map[ConnectionRef]liveConnection{}
 			}
-			connections[deviceID][ref] = struct{}{}
+			connections[deviceID][ref] = p.connections[deviceID][ref]
 		}
 	}
 	p.hosts = hosts

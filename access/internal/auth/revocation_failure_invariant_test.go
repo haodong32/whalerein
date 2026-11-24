@@ -73,18 +73,32 @@ func TestHostGrantRevocationDoesNotNotifyBeforeStoreSuccess(t *testing.T) {
 	}
 }
 
-// This only checks that notification is attempted; the disconnect failure's API semantics remain unresolved.
-func TestHostGrantDisconnectFailureStillAttemptsNotification(t *testing.T) {
-	service, fs, presence, transport := newService(t)
+// A Broker enforcement failure leaves the durable revocation committed but
+// keeps the operation retryable, and the Host notice is not claimed before the
+// scoped fence is confirmed. A successful retry then delivers the notice.
+func TestHostGrantEnforcementFailureKeepsTheScopedOperationRetryable(t *testing.T) {
+	service, fs, _, presence, transport, enforcer := newServiceWithFakes(t)
 	ctx := context.Background()
 	fs.grants[grantKey("h1", "d1")] = true
 	fs.pending = []store.Revocation{{HostID: "h1", DeviceID: "d1", GrantGeneration: 4, RevokedAt: time.Unix(10, 0)}}
 	presence.online["h1"] = true
 	transport.awaitFn = successAck
-	transport.disconnectErr = errors.New("synthetic disconnect failure")
-	_ = service.RevokeHostGrant(ctx, "h1", "d1")
-	if len(transport.disconnected) != 1 || len(transport.awaited) != 1 {
-		t.Fatal("disconnect failure skipped the host notice attempt")
+	enforcer.err = errors.New("synthetic broker failure")
+	if err := service.RevokeHostGrant(ctx, "h1", "d1"); err == nil {
+		t.Fatal("Broker enforcement failure was hidden")
+	}
+	if len(transport.awaited) != 0 {
+		t.Fatal("Host notice was claimed before the Broker fence was confirmed")
+	}
+	if fs.grants[grantKey("h1", "d1")] {
+		t.Fatal("durable revocation was rolled back by the Broker failure")
+	}
+	enforcer.err = nil
+	if err := service.RevokeHostGrant(ctx, "h1", "d1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(transport.awaited) != 1 {
+		t.Fatalf("retry did not deliver the Host notice: %d", len(transport.awaited))
 	}
 }
 

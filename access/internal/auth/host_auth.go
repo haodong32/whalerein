@@ -140,28 +140,33 @@ func (s *Service) rememberSignature(proof HostProof) bool {
 	return true
 }
 
-// RevokeHostGrant revokes one host's grant and disconnects the device so a
-// cached broker ACL drops. Other hosts' grants are left in place.
+// RevokeHostGrant revokes one host's grant and enforces exactly that frozen
+// grant scope on the Broker: the admitted connection instances are denied and
+// closed only while they still carry the revoked generation. Other hosts'
+// grants are left in place.
 func (s *Service) RevokeHostGrant(ctx context.Context, hostID, deviceID string) error {
+	if hostID == "" || deviceID == "" {
+		return ErrBadRequest
+	}
 	at := s.now()
+	// Freeze the authorization before the durable write. Enforcement must never
+	// re-read a newer generation after a retry or a concurrent re-pair.
+	grant, err := s.store.AdmissionGrantFor(ctx, hostID, deviceID)
+	if err != nil {
+		return err
+	}
+	scope := grantScope(grant, hostID, deviceID)
 	// Fence realtime admission before the durable write so a concurrent
 	// dispatch cannot use the grant being revoked.
 	finishRevoke := s.admission.BeginGrantRevoke(hostID, deviceID)
-	err := s.store.RevokeGrant(ctx, hostID, deviceID, at)
+	err = s.store.RevokeGrant(ctx, hostID, deviceID, at)
 	finishRevoke()
 	if err != nil {
 		return err
 	}
-	if err := s.enforcer.RevokeGrant(ctx, hostID, deviceID); err != nil {
+	if _, err := s.enforceFrozenGrant(ctx, scope, false); err != nil {
 		return fmt.Errorf("revoke grant policy: %w", err)
 	}
 	s.logger.Info("revocation committed", "source", "host_settings", "trace_id", diagnostics.TraceID(ctx), "host", s.masker.Host(hostID), "device", s.masker.Device(deviceID), "revoked_at_unix_ms", at.UnixMilli())
-	if err := s.transport.DisconnectDevice(ctx, deviceID); err != nil {
-		s.logger.Warn("host grant disconnect failed",
-			"host", s.masker.Host(hostID), "device", s.masker.Device(deviceID), "error", err.Error())
-	}
-	if s.presence.IsHostOnline(ctx, hostID) {
-		return s.notifyRevokedGrant(ctx, hostID, deviceID)
-	}
 	return nil
 }

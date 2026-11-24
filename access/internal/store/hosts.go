@@ -305,6 +305,40 @@ func revokeGrant(ctx context.Context, begin func(context.Context) (pgx.Tx, error
 	return tx.Commit(ctx)
 }
 
+// RevokeGrantGeneration revokes only the frozen grant generation. A delayed
+// retry after re-pairing leaves the newer generation untouched and reports
+// false. It is idempotent for the same generation.
+func (s *Store) RevokeGrantGeneration(ctx context.Context, hostID, deviceID string, grantGeneration uint64, at time.Time) (bool, error) {
+	tx, err := s.poolBegin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('whalerein-device:' || $1, 0))`, deviceID); err != nil {
+		return false, err
+	}
+	var lockedID string
+	if err := tx.QueryRow(ctx, "SELECT device_id FROM devices WHERE device_id=$1 FOR UPDATE", deviceID).Scan(&lockedID); err != nil {
+		return false, wrapRequestScan(err)
+	}
+	cmd, err := tx.Exec(ctx, `
+		UPDATE grants
+		SET revoked_at = COALESCE(revoked_at, $4), updated_at = $4,
+		    revocation_generation = CASE WHEN revoked_at IS NULL THEN revocation_generation + 1 ELSE revocation_generation END
+		WHERE host_id = $1 AND device_id = $2 AND grant_generation = $3`,
+		hostID, deviceID, int64(grantGeneration), at)
+	if err != nil {
+		return false, fmt.Errorf("revoke grant generation: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return false, tx.Commit(ctx)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM device_credentials WHERE device_id=$1 AND NOT EXISTS(SELECT 1 FROM grants WHERE device_id=$1 AND revoked_at IS NULL)`, deviceID); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
 // RevokeDeviceGrants revokes every live grant of a device in one transaction.
 // It returns the affected host ids and whether the device exists. The ACL is
 // database-derived, so the revocation is effective at commit.

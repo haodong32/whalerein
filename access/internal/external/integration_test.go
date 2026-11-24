@@ -248,8 +248,8 @@ func (h harness) get(t *testing.T, path, token string) (int, []byte) {
 // store lifecycle test. This fixture only needs the HTTP surface to succeed.
 type acceptEnforcer struct{}
 
-func (acceptEnforcer) DisableHostScope(context.Context, string, map[string]uint64) error {
-	return nil
+func (acceptEnforcer) DisableHostScope(context.Context, store.RevocationScope) (store.EnforcementReceipt, error) {
+	return store.EnforcementReceipt{}, nil
 }
 
 // do sends one request with explicit headers and returns the status and body.

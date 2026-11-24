@@ -18,26 +18,30 @@ import (
 )
 
 type fakeStore struct {
-	hosts         map[string]store.Host
-	devices       map[string]store.Device
-	grants        map[string]bool // host|device
-	keys          map[string][]byte
-	keyErr        error
-	revokeErr     error
-	pending       []store.Revocation
-	pendingErr    error
-	markErr       error
-	markCalls     []string
-	revokeHosts   []string
-	revokeExists  bool
-	ensureErr     error
-	activeErr     error
-	credentialErr error
-	grantErr      error
-	listGrantErr  error
-	listCalls     int
-	credentials   map[string]store.EnrollmentCredential
-	events        *[]string
+	hosts               map[string]store.Host
+	devices             map[string]store.Device
+	grants              map[string]bool // host|device
+	keys                map[string][]byte
+	keyErr              error
+	revokeErr           error
+	pending             []store.Revocation
+	pendingErr          error
+	markErr             error
+	markCalls           []string
+	revokeHosts         []string
+	revokeExists        bool
+	ensureErr           error
+	activeErr           error
+	credentialErr       error
+	grantErr            error
+	listGrantErr        error
+	listCalls           int
+	credentials         map[string]store.EnrollmentCredential
+	events              *[]string
+	grantGens           map[string]store.AdmissionGrant
+	enrollments         map[string]store.ExternalEnrollment
+	enrollmentErr       error
+	revokeGenerationErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -47,6 +51,8 @@ func newFakeStore() *fakeStore {
 		grants:      map[string]bool{},
 		keys:        map[string][]byte{},
 		credentials: map[string]store.EnrollmentCredential{},
+		grantGens:   map[string]store.AdmissionGrant{},
+		enrollments: map[string]store.ExternalEnrollment{},
 	}
 }
 
@@ -233,6 +239,50 @@ func (f *fakeStore) HostBrokerCredential(_ context.Context, hostID string) (stor
 	return credential, nil
 }
 
+func (f *fakeStore) AdmissionGrantFor(_ context.Context, hostID, deviceID string) (store.AdmissionGrant, error) {
+	key := grantKey(hostID, deviceID)
+	if grant, ok := f.grantGens[key]; ok {
+		return grant, nil
+	}
+	active, ok := f.grants[key]
+	if !ok {
+		return store.AdmissionGrant{}, store.ErrNotFound
+	}
+	return store.AdmissionGrant{HostID: hostID, DeviceID: deviceID, Active: active, GrantGeneration: 1}, nil
+}
+
+func (f *fakeStore) RevokeGrantGeneration(_ context.Context, hostID, deviceID string, grantGeneration uint64, _ time.Time) (bool, error) {
+	if f.revokeGenerationErr != nil {
+		return false, f.revokeGenerationErr
+	}
+	if f.events != nil {
+		*f.events = append(*f.events, "store.revoke_generation")
+	}
+	key := grantKey(hostID, deviceID)
+	current := uint64(1)
+	if grant, ok := f.grantGens[key]; ok {
+		current = grant.GrantGeneration
+	}
+	if _, ok := f.grants[key]; !ok {
+		return false, nil
+	}
+	if current != grantGeneration {
+		return false, nil
+	}
+	f.grants[key] = false
+	return true, nil
+}
+
+func (f *fakeStore) Enrollment(_ context.Context, hostID string) (store.ExternalEnrollment, error) {
+	if f.enrollmentErr != nil {
+		return store.ExternalEnrollment{}, f.enrollmentErr
+	}
+	if enrollment, ok := f.enrollments[hostID]; ok {
+		return enrollment, nil
+	}
+	return store.ExternalEnrollment{}, store.ErrNotFound
+}
+
 func (f *fakeStore) RevokeGrant(_ context.Context, hostID, deviceID string, _ time.Time) error {
 	if f.events != nil {
 		*f.events = append(*f.events, "store.revoke_grant")
@@ -278,8 +328,10 @@ func (f *fakeStore) MarkRevocationsReplayed(_ context.Context, hostID string, de
 }
 
 type fakePresence struct {
-	online map[string]bool
-	err    error
+	online      map[string]bool
+	err         error
+	connections map[string][]store.ScopeConnection
+	hostConns   map[string]store.ScopeConnection
 }
 
 func (f *fakePresence) IsHostOnline(_ context.Context, hostID string) bool {
@@ -287,6 +339,15 @@ func (f *fakePresence) IsHostOnline(_ context.Context, hostID string) bool {
 		return false
 	}
 	return f.online[hostID]
+}
+
+func (f *fakePresence) DeviceConnections(deviceID string) []store.ScopeConnection {
+	return append([]store.ScopeConnection(nil), f.connections[deviceID]...)
+}
+
+func (f *fakePresence) HostScopeConnection(hostID string) (store.ScopeConnection, bool) {
+	connection, ok := f.hostConns[hostID]
+	return connection, ok
 }
 
 // fakeAdmission mimics the bounded local grant authority.
@@ -356,24 +417,32 @@ func (f *fakeAdmission) Allow(_ context.Context, hostID, deviceID string) error 
 type fakeEnforcer struct {
 	err   error
 	calls []string
+	scope store.RevocationScope
+	// applied is returned as the confirmed connection evidence.
+	applied []store.ScopeConnection
 }
 
-func (f *fakeEnforcer) RevokeGrant(_ context.Context, hostID, deviceID string) error {
-	f.calls = append(f.calls, "grant:"+hostID+":"+deviceID)
-	return f.err
+func (f *fakeEnforcer) receipt(scope store.RevocationScope) store.EnforcementReceipt {
+	f.scope = scope
+	return store.EnforcementReceipt{Scope: scope, Applied: append([]store.ScopeConnection(nil), f.applied...), Absent: len(f.applied) == 0}
 }
 
-func (f *fakeEnforcer) RevokeDevice(_ context.Context, deviceID string) error {
-	f.calls = append(f.calls, "device:"+deviceID)
-	return f.err
+func (f *fakeEnforcer) RevokeGrant(_ context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	f.calls = append(f.calls, "grant:"+scope.HostID+":"+scope.DeviceID)
+	return f.receipt(scope), f.err
 }
 
-func (f *fakeEnforcer) RevokeHost(_ context.Context, hostID string, generations map[string]uint64) error {
-	f.calls = append(f.calls, "host:"+hostID)
-	for deviceID := range generations {
-		f.calls = append(f.calls, "host-grant:"+hostID+":"+deviceID)
+func (f *fakeEnforcer) RevokeDevice(_ context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	f.calls = append(f.calls, "device:"+scope.DeviceID)
+	return f.receipt(scope), f.err
+}
+
+func (f *fakeEnforcer) RevokeHost(_ context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	f.calls = append(f.calls, "host:"+scope.HostID)
+	for _, grant := range scope.Grants {
+		f.calls = append(f.calls, "host-grant:"+scope.HostID+":"+grant.DeviceID)
 	}
-	return f.err
+	return f.receipt(scope), f.err
 }
 
 type fakeTransport struct {
@@ -749,7 +818,7 @@ func successAck(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
 }
 
 func TestRevokeDeviceDeniesAccessAndReplaysHostNotices(t *testing.T) {
-	service, fs, presence, transport := newService(t)
+	service, fs, _, presence, transport, enforcer := newServiceWithFakes(t)
 	ctx := context.Background()
 	fs.devices["d1"] = store.Device{DeviceID: "d1"}
 	fs.hosts["h1"] = store.Host{HostID: "h1"}
@@ -762,8 +831,11 @@ func TestRevokeDeviceDeniesAccessAndReplaysHostNotices(t *testing.T) {
 	if err := service.RevokeDevice(ctx, "d1"); err != nil {
 		t.Fatal(err)
 	}
-	if len(transport.disconnected) != 1 || transport.disconnected[0] != "d1" {
-		t.Fatalf("disconnected = %v", transport.disconnected)
+	if len(transport.disconnected) != 0 {
+		t.Fatalf("authorization revocation used an unfenced username disconnect: %v", transport.disconnected)
+	}
+	if len(enforcer.calls) != 1 || enforcer.calls[0] != "device:d1" {
+		t.Fatalf("scoped enforcer calls = %v", enforcer.calls)
 	}
 	if len(fs.markCalls) != 1 || fs.markCalls[0] != "h1:d1" {
 		t.Fatalf("mark calls = %v", fs.markCalls)
@@ -1004,14 +1076,15 @@ func TestDeviceCanOnlyPublishItsOwnReadyAdvertisement(t *testing.T) {
 	}
 }
 
-type repairDuringDisconnect struct {
-	*fakeTransport
+type repairDuringRevoke struct {
+	*fakeStore
 	repair func()
 }
 
-func (r *repairDuringDisconnect) DisconnectDevice(context.Context, string) error {
+func (r *repairDuringRevoke) RevokeDeviceGrants(ctx context.Context, deviceID string, at time.Time) ([]string, bool, error) {
+	hosts, exists, err := r.fakeStore.RevokeDeviceGrants(ctx, deviceID, at)
 	r.repair()
-	return nil
+	return hosts, exists, err
 }
 
 func TestRevocationAfterConcurrentRepairDoesNotSendAnOldGrantNotice(t *testing.T) {
@@ -1020,10 +1093,11 @@ func TestRevocationAfterConcurrentRepairDoesNotSendAnOldGrantNotice(t *testing.T
 	fs.hosts["h"] = store.Host{HostID: "h"}
 	fs.grants[grantKey("h", "d")] = true
 	presence.online["h"] = true
-	service.transport = &repairDuringDisconnect{fakeTransport: transport, repair: func() {
+	repairing := &repairDuringRevoke{fakeStore: fs, repair: func() {
 		fs.grants[grantKey("h", "d")] = true
 		fs.pending = nil
 	}}
+	service.store = repairing
 	if err := service.RevokeDevice(context.Background(), "d"); err != nil {
 		t.Fatal(err)
 	}
@@ -1135,11 +1209,20 @@ func TestAuthenticateBrokerKeepsStandaloneHostProvisioning(t *testing.T) {
 }
 
 func TestDisableHostScopeFencesAdmissionAndClosesTheHost(t *testing.T) {
-	service, fs, admission, _, _, enforcer := newServiceWithFakes(t)
+	service, fs, admission, presence, _, enforcer := newServiceWithFakes(t)
 	ctx := context.Background()
 	fs.grants[grantKey("h1", "d1")] = true
 	fs.grants[grantKey("h1", "d2")] = true
-	if err := service.DisableHostScope(ctx, "h1", map[string]uint64{"d1": 4, "d2": 7}); err != nil {
+	hostConnection := store.ScopeConnection{
+		Ref: store.ConnectionRef{Epoch: "epoch", ID: 9}, ClientID: "whalerein-host-h1",
+	}
+	presence.hostConns = map[string]store.ScopeConnection{"h1": hostConnection}
+	scope := store.RevocationScope{HostID: "h1", Grants: []store.ScopeGrant{
+		{HostID: "h1", DeviceID: "d1", GrantGeneration: 4},
+		{HostID: "h1", DeviceID: "d2", GrantGeneration: 7},
+	}}
+	_, err := service.DisableHostScope(ctx, scope)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if !admission.denied[grantKey("h1", "d1")] || !admission.denied[grantKey("h1", "d2")] {
@@ -1155,11 +1238,14 @@ func TestDisableHostScopeFencesAdmissionAndClosesTheHost(t *testing.T) {
 	if !seen["host-grant:h1:d1"] || !seen["host-grant:h1:d2"] {
 		t.Fatalf("the revoked grants were not denied: %v", enforcer.calls)
 	}
-	if err := service.DisableHostScope(ctx, "", nil); !errors.Is(err, ErrBadRequest) {
+	if enforcer.scope.HostConnection == nil || *enforcer.scope.HostConnection != hostConnection {
+		t.Fatalf("frozen Host connection lost: %+v", enforcer.scope)
+	}
+	if _, err := service.DisableHostScope(ctx, store.RevocationScope{}); !errors.Is(err, ErrBadRequest) {
 		t.Fatalf("an empty host id must be refused, got %v", err)
 	}
 	enforcer.err = errors.New("line unavailable")
-	if err := service.DisableHostScope(ctx, "h1", nil); err == nil {
+	if _, err := service.DisableHostScope(ctx, scope); err == nil {
 		t.Fatal("an enforcement failure must be surfaced")
 	}
 }

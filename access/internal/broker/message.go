@@ -1,8 +1,7 @@
 package broker
 
 import (
-	"strconv"
-	"strings"
+	"github.com/whalerein/whalerein/access/internal/store"
 )
 
 // Reserved MQTT 5 User Property names. The pinned broker stamps
@@ -69,36 +68,16 @@ type Message struct {
 	Properties MessageProperties
 }
 
-// ConnectionRef is the Broker-issued identity of one accepted connection:
-// a broker-process epoch plus the connection instance within that process.
-type ConnectionRef struct {
-	Epoch string
-	ID    uint64
-}
+// ConnectionRef is the Broker-issued identity of one accepted connection. It
+// is an alias of the shared store type so the durable revocation scope and the
+// presence registry cannot drift.
+type ConnectionRef = store.ConnectionRef
 
-// String renders the wire form <broker-epoch>:<connection-instance>.
-func (r ConnectionRef) String() string {
-	if r.Epoch == "" {
-		return ""
-	}
-	return r.Epoch + ":" + strconv.FormatUint(r.ID, 10)
-}
-
-// Valid reports whether the reference names a broker epoch and connection.
-func (r ConnectionRef) Valid() bool {
-	return r.Epoch != "" && r.ID != 0 && !strings.ContainsAny(r.Epoch, ":/ \t\r\n")
-}
+// ScopeConnection is one admitted connection frozen into a revocation scope.
+type ScopeConnection = store.ScopeConnection
 
 // ParseConnectionRef parses the reserved connection reference property and the
 // snapshot `ref` field.
 func ParseConnectionRef(value string) (ConnectionRef, bool) {
-	epoch, rawID, ok := strings.Cut(strings.TrimSpace(value), ":")
-	if !ok || epoch == "" || rawID == "" || strings.ContainsAny(epoch, "/ \t\r\n") {
-		return ConnectionRef{}, false
-	}
-	id, err := strconv.ParseUint(rawID, 10, 64)
-	if err != nil || id == 0 {
-		return ConnectionRef{}, false
-	}
-	return ConnectionRef{Epoch: epoch, ID: id}, true
+	return store.ParseConnectionRef(value)
 }

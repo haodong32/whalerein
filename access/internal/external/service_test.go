@@ -226,6 +226,10 @@ func (f *fakeStore) DisableEnrollmentWithTarget(_ context.Context, hostID, remov
 	return recorded, nil
 }
 
+func (f *fakeStore) MarkRemovalEnforcedAt(ctx context.Context, removalOperationID string, _ *store.ConnectionRef, at time.Time) error {
+	return f.MarkRemovalEnforced(ctx, removalOperationID, at)
+}
+
 func (f *fakeStore) MarkRemovalEnforced(_ context.Context, removalOperationID string, at time.Time) error {
 	recorded, ok := f.removals[removalOperationID]
 	if !ok {
@@ -255,13 +259,19 @@ type harness struct {
 type fakeEnforcer struct {
 	calls       []string
 	generations map[string]uint64
+	scope       store.RevocationScope
+	applied     []store.ScopeConnection
 	err         error
 }
 
-func (f *fakeEnforcer) DisableHostScope(_ context.Context, hostID string, grantGenerations map[string]uint64) error {
-	f.calls = append(f.calls, hostID)
-	f.generations = grantGenerations
-	return f.err
+func (f *fakeEnforcer) DisableHostScope(_ context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	f.calls = append(f.calls, scope.HostID)
+	f.scope = scope
+	f.generations = map[string]uint64{}
+	for _, grant := range scope.Grants {
+		f.generations[grant.DeviceID] = grant.GrantGeneration
+	}
+	return store.EnforcementReceipt{Scope: scope, Applied: append([]store.ScopeConnection(nil), f.applied...), Absent: len(f.applied) == 0}, f.err
 }
 
 func newService(t *testing.T) (*Service, *fakeStore, issuer) {

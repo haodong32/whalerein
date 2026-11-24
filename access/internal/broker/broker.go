@@ -1026,6 +1026,18 @@ func (s *Service) IsHostOnline(ctx context.Context, hostID string) bool {
 	return s.presence.IsHostOnline(ctx, hostID)
 }
 
+// DeviceConnections exposes the admitted device connections to the scoped
+// revocation path. It is broker-derived and never reads the database.
+func (s *Service) DeviceConnections(deviceID string) []ScopeConnection {
+	return s.presence.DeviceConnections(deviceID)
+}
+
+// HostScopeConnection exposes the admitted Host connection identity so a
+// revocation can target exactly that instance.
+func (s *Service) HostScopeConnection(hostID string) (ScopeConnection, bool) {
+	return s.presence.HostScopeConnection(hostID)
+}
+
 // Available reports whether broker presence has been established since this
 // Access session started. Callers must not interpret an unavailable presence
 // view as a terminal offline host.
