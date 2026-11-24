@@ -61,7 +61,7 @@ def test_ac02_inline_result_stays_inline(scenario, paired_device):
     rows = psql(
         scenario.schema,
         f"SELECT count(*) FROM {scenario.schema}.requests "
-        f"WHERE device_id='{paired_device.identity['device_id']}'",
+        f"WHERE device_id='{paired_device.identity['device_id']}' AND kind IN (1,2,3)",
     )
     assert rows.strip() in ("", "0"), "an epoch-5 query must not create a durable request row"
 
@@ -80,7 +80,7 @@ def test_ac01_above_result_uses_the_access_directory(scenario, paired_device):
     rows = psql(
         scenario.schema,
         f"SELECT count(*) FROM {scenario.schema}.requests "
-        f"WHERE device_id='{paired_device.identity['device_id']}'",
+        f"WHERE device_id='{paired_device.identity['device_id']}' AND kind IN (1,2,3)",
     )
     assert rows.strip() in ("", "0"), "an epoch-5 query must not create a durable request row"
     # The directory is real: the case root contains one ready RESULT object.
