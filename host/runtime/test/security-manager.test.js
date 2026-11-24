@@ -414,6 +414,45 @@ test('when request frame channel/MAC/AAD checks pass, results are sealed to that
   assert.equal(security.sealEvent({ deviceId: 'device-1', channelId: 'other', plaintext: eventPlaintext, createdAt: 900 }), null)
 })
 
+test('a query admitted on a retired client key is rejected after rotation', async () => {
+  const { security, store } = makeSecurity()
+  const retiredIdentity = generateKeypair()
+  const retired = establishChannel({ security, store, hostId, deviceId: 'device-1', codec, identity: retiredIdentity })
+  const rotated = establishChannel({
+    security, store, hostId, deviceId: 'device-1', codec,
+    identity: generateKeypair(), connectionRef: '0123456789abcdef:2',
+  })
+  const sealedQuery = (channel, requestId) => {
+    const request = {
+      request_id: requestId, host_id: hostId, device_id: 'device-1', kind: 'REQUEST_KIND_QUERY',
+      command_id: '', expires_at_unix_ms: 5000, channel_id: channel.channelId,
+      protocol_version: 1, relay_version: 5, connection_ref: channel.connectionRef,
+      grant_generation: channel.grantGeneration, enrollment_generation: channel.enrollmentGeneration,
+    }
+    const aad = requestAad({
+      requestId, hostId, deviceId: 'device-1', kind: request.kind, commandId: '',
+      expiresAt: request.expires_at_unix_ms,
+    })
+    const frame = seal(channel.c2h, aad, new TextEncoder().encode('payload'))
+    return {
+      request,
+      body: codec.encode('whalerein.v1.EncryptedFrame', {
+        channel_id: channel.channelId, nonce: frame.nonce, ciphertext: frame.ciphertext,
+      }),
+    }
+  }
+  const authenticate = ({ request, body }) => security.withRequest({ ...request, body }, result => result)
+  const inFlight = sealedQuery(retired, 'request-retired')
+  // The Broker connection that owned the retired key closes while its query is
+  // still in flight.
+  security.closeConnection('device-1', retired.connectionRef)
+  const rejected = await authenticate(inFlight)
+  assert.equal(rejected.ok, false, 'a retired key cannot deliver its in-flight query')
+  assert.equal(rejected.code, 'unauthorized')
+  const current = await authenticate(sealedQuery(rotated, 'request-rotated'))
+  assert.equal(current.ok, true, 'the rotated key keeps serving its own query')
+})
+
 test('channel admission bounds preserve active channels and release idle capacity', (t) => {
   let now = 1000
   const closures = []

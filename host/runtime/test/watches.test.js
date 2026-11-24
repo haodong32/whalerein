@@ -18,14 +18,14 @@ class Source extends SourceAdapter {
   watch(id,sink){this.sinks.set(id,sink);return {close:()=>{this.closed++;this.sinks.delete(id)}}}
   async readHistory(id){return {session:{session_id:id},batch:{from_cursor:'bookmark:start',to_cursor:'bookmark:alpha',batch_id:'record:alpha',changes:[]},cut_cursor:'bookmark:alpha',complete:true}}
 }
-function fixture(access={connected:true,published:[],liveTopic:'whalerein/v1/h/h/live',async publishEvent(value){this.published.push(value)},async publishLive(value){this.published.push(value);return true}},source=new Source(),config={}) {
+function fixture(access={connected:true,published:[],liveTopic:'whalerein/v1/h/h/live',async publishEvent(value){this.published.push(value)},async publishLive(value){this.published.push(value);return true}},source=new Source(),config={},identity=generateKeypair()) {
   let now=100
   const store=new StateStore({path:':memory:'})
   const security=new SecurityManager({hostId:'h',identity:generateKeypair(),store,codec:codec(),now:()=>now})
-  const channel=establishChannel({hostId:'h',deviceId:'d',security,store})
+  const channel=establishChannel({hostId:'h',deviceId:'d',security,store,identity})
   const events=new WatchedEvents({hostId:'h',store,security,adapter:source,access,config,codec:codec(),now:()=>now})
   events.start()
-  return {events,source,store,security,channel,access,config,advance:ms=>{now+=ms}}
+  return {events,source,store,security,channel,access,config,identity,advance:ms=>{now+=ms}}
 }
 const CONV={conversation:true,questions:false}
 const settle=()=>new Promise(r=>setTimeout(r,30))
@@ -72,6 +72,35 @@ test('a replaced channel ends only its own observation while another connection 
   assert.equal(ctx.events.describe().watches, 1, 'the other watcher still holds an active observation')
   ctx.events.onConnectionClosed('second', other.connectionRef)
   assert.deepEqual(ctx.events.observingDeviceIds(), [], 'each connection close leaves no active observation')
+})
+
+test('a rotated client key replaces the observation of its retired channel only', async (t) => {
+  const ctx = fixture()
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  const retired = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d'])
+  // Re-pairing persists the rotated public key, so only the new channel can
+  // handshake for this Device.
+  const rotatedIdentity = generateKeypair()
+  const rotated = establishChannel({
+    hostId: 'h', deviceId: 'd', security: ctx.security, store: ctx.store,
+    identity: rotatedIdentity, connectionRef: '0123456789abcdef:2',
+  })
+  // The retired key can no longer handshake for this Device.
+  assert.throws(() => establishChannel({
+    hostId: 'h', deviceId: 'd', security: ctx.security, store: ctx.store,
+    identity: ctx.identity, persistPeer: false, channelId: '0123456789abcdef',
+    connectionRef: '0123456789abcdef:3',
+  }), (error) => error.code === 'unauthorized')
+  const current = await ctx.events.watch('d', rotated.channelId, 's', undefined, CONV)
+  assert.notEqual(current.watch_id, retired.watch_id, 'a rotated key gets its own observation')
+  // The retired Broker connection closes; that ends exactly its observation and
+  // the rotated one keeps delivering.
+  ctx.events.onConnectionClosed('d', ctx.channel.connectionRef)
+  assert.equal(ctx.events.describe().watches, 1, 'the rotated observation survives')
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d'])
+  ctx.events.onConnectionClosed('d', rotated.connectionRef)
+  assert.deepEqual(ctx.events.observingDeviceIds(), [], 'closing the rotated connection ends it too')
 })
 
 function deferred() {
