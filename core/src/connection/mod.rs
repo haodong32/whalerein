@@ -16,16 +16,18 @@
 //! subscriptions; reaching HTTPS alone never counts.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use prost::Message;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use whalerein_proto::EventEnvelope;
+use whalerein_proto::{EventEnvelope, HostRequest, HostResult, RequestStateNotice};
 
-use crate::access::{DeliveryClass, DeviceMqttClient, MqttConnectionEvent, MqttSettings};
+use crate::access::{
+    DeliveryClass, DeviceMqttClient, MqttConnectionEvent, MqttSettings, PublisherSlot, QueryReply,
+};
 use crate::api::{Cancellation, CoreError, CoreResult};
 use crate::diagnostics::journal::Diagnostics;
 use crate::runtime::{ConnectionState, Runtime};
@@ -127,9 +129,224 @@ struct Subscriber {
     live_budget: usize,
 }
 
+/// One query waiter. It is keyed by request identity inside a specific
+/// connection generation; a reply from another generation, device or Host can
+/// never complete it.
+struct QueryWaiter {
+    host_id: String,
+    device_id: String,
+    generation: u64,
+    request_id: String,
+    channel_id: String,
+    expires_at_unix_ms: i64,
+    sender: oneshot::Sender<CoreResult<HostResult>>,
+}
+
+/// Per-connection-generation registry of pending query replies.
+#[derive(Default)]
+struct QueryWaiters {
+    next_id: AtomicU64,
+    entries: Mutex<HashMap<u64, QueryWaiter>>,
+}
+
+impl QueryWaiters {
+    fn register(
+        &self,
+        host_id: &str,
+        device_id: &str,
+        generation: u64,
+        request: &HostRequest,
+    ) -> (u64, oneshot::Receiver<CoreResult<HostResult>>) {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (sender, receiver) = oneshot::channel();
+        self.entries.lock().expect("query waiters").insert(
+            id,
+            QueryWaiter {
+                host_id: host_id.to_owned(),
+                device_id: device_id.to_owned(),
+                generation,
+                request_id: request.request_id.clone(),
+                channel_id: request.channel_id.clone(),
+                expires_at_unix_ms: request.expires_at_unix_ms,
+                sender,
+            },
+        );
+        (id, receiver)
+    }
+
+    fn remove(&self, id: u64) {
+        self.entries.lock().expect("query waiters").remove(&id);
+    }
+
+    /// Complete the exact waiter. A reply only completes a waiter from the
+    /// same connection generation with the same Host, device, request and
+    /// channel identity. Returns whether a waiter was completed.
+    fn dispatch(&self, reply: &QueryReply) -> bool {
+        let result = &reply.result;
+        let waiter = {
+            let mut entries = self.entries.lock().expect("query waiters");
+            let found = entries.iter().find_map(|(id, waiter)| {
+                (waiter.generation == reply.connection_generation
+                    && waiter.host_id == result.host_id
+                    && waiter.device_id == result.device_id
+                    && waiter.request_id == result.request_id
+                    && waiter.channel_id == result.channel_id)
+                    .then_some(*id)
+            });
+            found.and_then(|id| entries.remove(&id))
+        };
+        let Some(waiter) = waiter else {
+            return false;
+        };
+        if crate::util::now_unix_ms() > waiter.expires_at_unix_ms {
+            let _ = waiter.sender.send(Err(CoreError::Timeout));
+            return true;
+        }
+        let _ = waiter.sender.send(Ok(reply.result.clone()));
+        true
+    }
+
+    /// Fail every waiter, for example because the broker session ended. Safe
+    /// reads may reissue with their remaining caller deadline.
+    fn fail_all(&self, detail: &'static str) {
+        let entries = std::mem::take(&mut *self.entries.lock().expect("query waiters"));
+        for (_, waiter) in entries {
+            let _ = waiter
+                .sender
+                .send(Err(CoreError::Unavailable(detail.into())));
+        }
+    }
+
+    /// Fail only waiters bound to a superseded connection generation.
+    fn fail_before(&self, generation: u64) {
+        let mut entries = self.entries.lock().expect("query waiters");
+        let stale: Vec<u64> = entries
+            .iter()
+            .filter(|(_, waiter)| waiter.generation < generation)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            if let Some(waiter) = entries.remove(&id) {
+                let _ = waiter.sender.send(Err(CoreError::Unavailable(
+                    "device connection was replaced".into(),
+                )));
+            }
+        }
+    }
+}
+
+/// A signal delivered to one command-notice waiter.
+#[derive(Debug)]
+pub(crate) enum NoticeEvent {
+    /// A matching result notice. It is a hint; the authoritative read decides.
+    Notice(Box<RequestStateNotice>),
+    /// The shared connection completed a (re)subscribe.
+    Reconnected,
+}
+
+struct NoticeWaiter {
+    id: u64,
+    host_id: String,
+    device_id: String,
+    request_id: String,
+    command_id: String,
+    sender: mpsc::Sender<NoticeEvent>,
+}
+
+/// Command notices routed by exact request identity through the shared owner.
+/// Dropping the guard removes only this waiter; sibling waits are unaffected.
+#[derive(Default)]
+struct NoticeWaiters {
+    next_id: AtomicU64,
+    entries: Mutex<Vec<NoticeWaiter>>,
+}
+
+pub(crate) struct NoticeGuard {
+    id: u64,
+    waiters: Arc<NoticeWaiters>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_notice_guard() -> NoticeGuard {
+    let waiters = Arc::new(NoticeWaiters::default());
+    let id = waiters.next_id.fetch_add(1, Ordering::SeqCst);
+    NoticeGuard { id, waiters }
+}
+
+impl Drop for NoticeGuard {
+    fn drop(&mut self) {
+        self.waiters
+            .entries
+            .lock()
+            .expect("notice waiters")
+            .retain(|waiter| waiter.id != self.id);
+    }
+}
+
+impl NoticeWaiters {
+    fn register(
+        self: &Arc<Self>,
+        host_id: &str,
+        device_id: &str,
+        request_id: &str,
+        command_id: &str,
+    ) -> (mpsc::Receiver<NoticeEvent>, NoticeGuard) {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (sender, receiver) = mpsc::channel(16);
+        self.entries
+            .lock()
+            .expect("notice waiters")
+            .push(NoticeWaiter {
+                id,
+                host_id: host_id.to_owned(),
+                device_id: device_id.to_owned(),
+                request_id: request_id.to_owned(),
+                command_id: command_id.to_owned(),
+                sender,
+            });
+        (
+            receiver,
+            NoticeGuard {
+                id,
+                waiters: self.clone(),
+            },
+        )
+    }
+
+    fn dispatch(&self, notice: &RequestStateNotice) {
+        let entries = self.entries.lock().expect("notice waiters");
+        let mut blocked = Vec::new();
+        for waiter in entries.iter() {
+            if waiter.request_id == notice.request_id
+                && waiter.host_id == notice.host_id
+                && waiter.device_id == notice.device_id
+                && waiter.command_id == notice.command_id
+                && waiter
+                    .sender
+                    .try_send(NoticeEvent::Notice(Box::new(notice.clone())))
+                    .is_err()
+            {
+                // A full or closed queue drops only this notice; the waiter
+                // stays installed and its reserved final read still decides.
+                blocked.push(waiter.id);
+            }
+        }
+        drop(entries);
+        let _ = blocked;
+    }
+
+    fn reconnected(&self) {
+        let entries = self.entries.lock().expect("notice waiters");
+        for waiter in entries.iter() {
+            let _ = waiter.sender.try_send(NoticeEvent::Reconnected);
+        }
+    }
+}
+
 /// The live device connection. Cheap to clone and shared by every holder.
 pub(crate) struct HostConnection {
     host_id: String,
+    device_id: String,
     runtime: Arc<Runtime>,
     snapshot: Arc<Mutex<ConnectionSnapshot>>,
     changes: watch::Sender<ConnectionSnapshot>,
@@ -139,6 +356,16 @@ pub(crate) struct HostConnection {
     task: Mutex<Option<JoinHandle<()>>>,
     running: Arc<AtomicBool>,
     queue_bytes: usize,
+    /// Broker session generation. It advances on every CONNACK and fences
+    /// waiters created under an older session.
+    generation: AtomicU64,
+    queries: Arc<QueryWaiters>,
+    notices: Arc<NoticeWaiters>,
+    publisher: Arc<PublisherSlot>,
+    /// The target connection stamp observed for the current generation. Core
+    /// does not know its own broker connection id; it validates that every
+    /// reply for a generation is addressed to the same target.
+    target: Mutex<Option<(u64, String)>>,
 }
 
 impl HostConnection {
@@ -147,6 +374,7 @@ impl HostConnection {
         let (changes, _) = watch::channel(initial.clone());
         let connection = Arc::new(Self {
             host_id: input.host_id.clone(),
+            device_id: input.device_id.clone(),
             runtime: input.runtime.clone(),
             snapshot: Arc::new(Mutex::new(initial)),
             changes,
@@ -156,6 +384,11 @@ impl HostConnection {
             task: Mutex::new(None),
             running: Arc::new(AtomicBool::new(true)),
             queue_bytes: input.queue_bytes,
+            generation: AtomicU64::new(0),
+            queries: Arc::new(QueryWaiters::default()),
+            notices: Arc::new(NoticeWaiters::default()),
+            publisher: Arc::new(PublisherSlot::default()),
+            target: Mutex::new(None),
         });
         let runner = connection.clone();
         let task = tokio::spawn(async move { runner.run(input).await });
@@ -169,6 +402,134 @@ impl HostConnection {
 
     pub(crate) fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn host_id(&self) -> &str {
+        &self.host_id
+    }
+
+    pub(crate) fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    /// The current broker session generation. Zero means no session yet.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn is_connected(&self) -> bool {
+        self.snapshot().state == ConnectionState::Connected
+    }
+
+    /// Publish one query-lane request and wait for its correlated reply.
+    ///
+    /// The waiter is registered before publication; the shared owner validates
+    /// the reply identity and the original application deadline. A connection
+    /// replacement fails the waiter with a retryable transport error so safe
+    /// reads can reissue with the remaining caller deadline.
+    pub(crate) async fn query(
+        &self,
+        request: &HostRequest,
+        cancellation: &Cancellation,
+    ) -> CoreResult<HostResult> {
+        if request.host_id != self.host_id || request.device_id != self.device_id {
+            return Err(CoreError::InvalidInput(
+                "query identity does not match this host connection".into(),
+            ));
+        }
+        self.wait_ready(cancellation).await?;
+        let publisher = self
+            .publisher
+            .get()
+            .ok_or_else(|| CoreError::Unavailable("MQTT query lane is not ready".into()))?;
+        let generation = self.generation();
+        if generation == 0 {
+            return Err(CoreError::Unavailable(
+                "MQTT query lane is not ready".into(),
+            ));
+        }
+        if crate::util::now_unix_ms() >= request.expires_at_unix_ms {
+            return Err(CoreError::Timeout);
+        }
+        let (id, receiver) =
+            self.queries
+                .register(&self.host_id, &self.device_id, generation, request);
+        if let Err(error) = publisher.publish(request).await {
+            self.queries.remove(id);
+            return Err(CoreError::from(error));
+        }
+        let remaining = Duration::from_millis(
+            (request.expires_at_unix_ms - crate::util::now_unix_ms()).max(0) as u64,
+        );
+        let result = tokio::select! {
+            reply = receiver => match reply {
+                Ok(result) => result,
+                Err(_) => Err(CoreError::Unavailable(
+                    "device connection was interrupted".into(),
+                )),
+            },
+            _ = cancellation.cancelled() => {
+                self.queries.remove(id);
+                Err(CoreError::Unavailable("query was cancelled".into()))
+            }
+            _ = tokio::time::sleep(remaining) => {
+                self.queries.remove(id);
+                Err(CoreError::Timeout)
+            }
+        };
+        // The application deadline is authoritative even when the broker
+        // delivered the reply late.
+        match result {
+            Ok(_) if crate::util::now_unix_ms() > request.expires_at_unix_ms => {
+                Err(CoreError::Timeout)
+            }
+            other => other,
+        }
+    }
+
+    /// Register this exact command identity for shared-connection notices.
+    /// Attach before submitting so a result published early is not lost.
+    pub(crate) fn register_notice(
+        &self,
+        request_id: &str,
+        command_id: &str,
+    ) -> (mpsc::Receiver<NoticeEvent>, NoticeGuard, bool) {
+        let ready = self.is_connected();
+        let (receiver, guard) =
+            self.notices
+                .register(&self.host_id, &self.device_id, request_id, command_id);
+        (receiver, guard, ready)
+    }
+
+    fn dispatch_reply(&self, reply: QueryReply) -> bool {
+        let result = &reply.result;
+        if result.host_id != self.host_id || result.device_id != self.device_id {
+            return true;
+        }
+        if result.relay_version != crate::access::transport::RELAY_EPOCH_V5 {
+            return true;
+        }
+        // The reply must be addressed to this connection's session. Core does
+        // not know its own broker reference, so it accepts the first stamp for
+        // a generation and rejects a different one for the same generation.
+        let Some(target) = reply.target.as_deref().filter(|value| !value.is_empty()) else {
+            return true;
+        };
+        {
+            let mut observed = self.target.lock().expect("query target");
+            match observed.as_ref() {
+                Some((generation, expected)) if *generation == reply.connection_generation => {
+                    if expected != target {
+                        return true;
+                    }
+                }
+                _ => {
+                    *observed = Some((reply.connection_generation, target.to_owned()));
+                }
+            }
+        }
+        self.queries.dispatch(&reply);
+        true
     }
 
     fn update(&self, next: ConnectionSnapshot) {
@@ -256,6 +617,7 @@ impl HostConnection {
     }
 
     fn interrupt_subscribers(&self, detail: &'static str) {
+        self.queries.fail_all(detail);
         for subscriber in self
             .subscribers
             .lock()
@@ -332,17 +694,30 @@ impl HostConnection {
                     owner.fan_out(DeliveryClass::Live, envelope);
                     true
                 },
-                |_| true,
+                |notice| {
+                    owner.notices.dispatch(notice);
+                    true
+                },
+                |reply| owner.dispatch_reply(reply),
                 |event| match event {
                     // The broker session exists but is not usable until every
-                    // subscription is acknowledged.
-                    MqttConnectionEvent::Connected => {}
-                    MqttConnectionEvent::Subscribed => owner.set_state(ConnectionState::Connected),
+                    // subscription is acknowledged. A new generation fails
+                    // waiters bound to the replaced session.
+                    MqttConnectionEvent::Connected { generation } => {
+                        owner.generation.store(generation, Ordering::SeqCst);
+                        owner.queries.fail_before(generation);
+                        *owner.target.lock().expect("query target") = None;
+                    }
+                    MqttConnectionEvent::Subscribed { .. } => {
+                        owner.notices.reconnected();
+                        owner.set_state(ConnectionState::Connected);
+                    }
                     MqttConnectionEvent::Disconnected => {
                         owner.interrupt_subscribers("device connection was interrupted");
                         owner.set_state(ConnectionState::Reconnecting);
                     }
                 },
+                Some(&owner.publisher),
             )
             .await;
         self.running.store(false, Ordering::SeqCst);
@@ -386,6 +761,31 @@ fn terminal_error(code: Option<&str>) -> CoreError {
         Some(code) => CoreError::Unavailable(code.to_owned()),
         None => CoreError::Unavailable("host connection is not running".into()),
     }
+}
+
+/// Start one connection against an in-process test broker. The caller owns
+/// the returned handle; dropping it stops the transport.
+#[cfg(test)]
+pub(crate) fn test_connection(
+    settings: MqttSettings,
+    host_id: &str,
+    device_id: &str,
+    token: &str,
+) -> Arc<HostConnection> {
+    let (global, _) = broadcast::channel(8);
+    HostConnection::start(
+        ConnectionInput {
+            host_id: host_id.to_owned(),
+            device_id: device_id.to_owned(),
+            settings,
+            token: token.to_owned(),
+            cloud_session: None,
+            runtime: Arc::new(Runtime::new()),
+            diagnostics: Arc::new(Diagnostics::default()),
+            queue_bytes: 64 * 1024,
+        },
+        global,
+    )
 }
 
 /// The per-Core registry of host connections. A connection is created on first

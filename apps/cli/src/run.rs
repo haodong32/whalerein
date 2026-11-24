@@ -2723,10 +2723,10 @@ mod instance_command_tests {
             execute(&config, secrets.clone(), &["session", "wait", "session-1"]).await;
         assert_eq!(default_wait.exit, 0);
         assert_eq!(default_wait.to_json()["data"]["reason"], "idle");
-        // The slice leaves a small response allowance inside the 30s
-        // transport budget; one millisecond of scheduling drift is allowed.
+        // The MQTT lane encodes the remaining caller deadline directly in the
+        // wait slice; the caller, not the slice, owns the overall timeout.
         let slice = access.host.lock().unwrap().wait_last_timeout_ms;
-        assert!((27_900..=28_000).contains(&slice), "wait slice {slice}");
+        assert!((29_000..=30_000).contains(&slice), "wait slice {slice}");
         access.host.lock().unwrap().wait_timeouts = usize::MAX;
         for (extra, exit) in [(false, 0), (true, 7)] {
             // One second leaves room for Host discovery under parallel test load

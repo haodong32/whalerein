@@ -31,7 +31,9 @@ use crate::commands::CommandService;
 use crate::diagnostics;
 use crate::diagnostics::journal::{DiagnosticContext, DiagnosticKind, DiagnosticSink, Diagnostics};
 use crate::pairing::{default_capabilities, parse_pairing_uri, PairingDecision, PairingInitiator};
-use crate::runtime::channel::{ensure_channel, ensure_channel_after, require_payload_capability};
+use crate::runtime::channel::{
+    ensure_channel_after_on, ensure_channel_on, require_payload_capability,
+};
 use crate::runtime::{ConnectionState, Runtime};
 use crate::security::{keys, load_device_token, load_or_create_cache_key, SecretStore};
 use crate::session::SessionKey;
@@ -190,6 +192,11 @@ pub struct Core {
     _activation: Option<Arc<crate::profiles::ActivationGuard>>,
     #[cfg(all(test, unix))]
     fail_waiting_marker: Arc<AtomicBool>,
+    /// Test-only compatibility mode for fixtures written against the retired
+    /// HTTP query lane. Production always injects the shared connection owner;
+    /// focused epoch-5 tests call `use_mqtt_queries` to exercise the real lane.
+    #[cfg(test)]
+    legacy_http_queries: Arc<AtomicBool>,
 }
 
 impl Core {
@@ -410,6 +417,8 @@ impl Core {
             _activation: None,
             #[cfg(all(test, unix))]
             fail_waiting_marker: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            legacy_http_queries: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -1356,23 +1365,17 @@ impl Core {
                 self.options.data_dir.clone(),
                 self.options.secrets.clone(),
             );
-        // A foreground command attaches its own scoped MQTT receiver under the
-        // same Device. A watch or sibling command keeps its separate
-        // connection and is never displaced by this attachment.
-        let config = self.require_config()?;
-        let regional = self.cloud_transport().await.ok().flatten();
-        let token = match &regional {
-            Some(session) => Some(session.token.clone()),
-            None => crate::security::load_device_token(&self.options.secrets, &config.device_id)?,
-        };
-        if let Some(token) = token {
-            service = service.with_foreground_transport(
-                self.mqtt_settings(&config)?,
-                config.device_id.clone(),
-                token,
-                regional.map(|session| session.id),
-            );
+        // Query replies and command notices are routed by the one shared Host
+        // connection owner for this Core instance. A watch or sibling command
+        // keeps its separate waiter without displacing the connection.
+        #[cfg(test)]
+        if self
+            .legacy_http_queries
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(service);
         }
+        service = service.with_connections(self.connections.clone());
         Ok(service)
     }
 
@@ -1434,6 +1437,7 @@ impl Core {
     /// Renew one observation's authority lease. A typed authority close is
     /// terminal; transport failures are left to the observation's normal retry
     /// so a network blip does not end a healthy watch.
+    #[allow(dead_code)]
     pub(crate) async fn check_host_authority(&self, host_id: &str) -> CoreResult<()> {
         let access = self.access_client().await?;
         access
@@ -1480,6 +1484,26 @@ impl Core {
     ) -> CoreResult<crate::security::SecureChannel> {
         self.diagnostics
             .record_stage("core", "handshake", "started", "none");
+        #[cfg(test)]
+        if self
+            .legacy_http_queries
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let config = self.require_config()?;
+            let identity = self.device_identity()?;
+            let access = self.access_client().await?;
+            let expected = self.confirmed_host_fingerprint(host_id)?;
+            return crate::runtime::channel::ensure_channel(
+                &self.runtime,
+                &access,
+                &identity.key,
+                host_id,
+                &config.device_id,
+                force_new,
+                Some(&expected),
+            )
+            .await;
+        }
         let opened = async {
             let config = self.require_config()?;
             let identity = self.device_identity()?;
@@ -1490,11 +1514,27 @@ impl Core {
                 access
             };
             let expected = self.confirmed_host_fingerprint(host_id)?;
+            // Ordering: the authorized MQTT subscription and receive-budget
+            // readiness come first; pinned Noise then travels on the same
+            // connection's query/reply lane.
+            let connection = self.host_connection(host_id).await?;
+            connection
+                .wait_ready(&Cancellation::new())
+                .await
+                .inspect_err(|error| {
+                    self.diagnostics.record_stage(
+                        error.source_layer(),
+                        "mqtt_subscription",
+                        "unavailable",
+                        error.code(),
+                    );
+                })?;
             if let Some(stale) = stale_channel_id {
-                ensure_channel_after(
+                ensure_channel_after_on(
                     &self.runtime,
                     &access,
                     &identity.key,
+                    &connection,
                     host_id,
                     &config.device_id,
                     stale,
@@ -1502,10 +1542,11 @@ impl Core {
                 )
                 .await
             } else {
-                ensure_channel(
+                ensure_channel_on(
                     &self.runtime,
                     &access,
                     &identity.key,
+                    &connection,
                     host_id,
                     &config.device_id,
                     force_new,
@@ -1539,6 +1580,7 @@ impl Core {
         let payload_label = Self::request_payload_name(&payload);
         let expected_session = self.cloud_session_id()?;
         let result = async {
+            self.ensure_authorized_host(host_id)?;
             let config = self.require_config()?;
             let channel = self.ensure_channel(host_id, false).await?;
             require_payload_capability(&self.runtime, host_id, &payload, &self.diagnostics)?;
@@ -1617,7 +1659,7 @@ impl Core {
             Some(whalerein_proto::request_payload::Payload::ListApprovals(_)) => "list_approvals",
             Some(whalerein_proto::request_payload::Payload::ReadHistory(_)) => "read_history",
             Some(whalerein_proto::request_payload::Payload::WatchSession(_)) => "watch_session",
-            Some(whalerein_proto::request_payload::Payload::RefreshWatches(_)) => "refresh_watches",
+            Some(whalerein_proto::request_payload::Payload::CheckVersions(_)) => "check_versions",
             Some(whalerein_proto::request_payload::Payload::UnwatchSession(_)) => "unwatch_session",
             Some(whalerein_proto::request_payload::Payload::ReadMessageReply(_)) => {
                 "read_message_reply"
@@ -2268,6 +2310,13 @@ impl Core {
     }
 
     /// Open the connection without waiting for it, for a background monitor.
+    /// Test-only: exercise the production MQTT query lane.
+    #[cfg(test)]
+    pub(crate) fn use_mqtt_queries(&self) {
+        self.legacy_http_queries
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) async fn host_connection(
         &self,
         host_id: &str,

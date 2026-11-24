@@ -750,67 +750,13 @@ fn secrets_dir_persists_credentials_across_cli_processes() {
     }
 }
 
-/// Accept MQTT CONNECT/SUBSCRIBE from the CLI probe and hold the session open.
-fn spawn_mqtt_peer(
-    runtime: &tokio::runtime::Runtime,
-    listener: tokio::net::TcpListener,
-) -> tokio::task::JoinHandle<()> {
-    runtime.spawn(async move {
-        loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            tokio::spawn(async move {
-                let mut buffer = bytes::BytesMut::new();
-                loop {
-                    use rumqttc::v5::mqttbytes::v5::Packet;
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let packet = loop {
-                        if let Ok(packet) = Packet::read(&mut buffer, None) {
-                            break packet;
-                        }
-                        if stream.read_buf(&mut buffer).await.ok().unwrap_or(0) == 0 {
-                            return;
-                        }
-                    };
-                    let reply: Option<Vec<u8>> = match packet {
-                        Packet::Connect(..) => Some(vec![0x20, 3, 0, 0, 0]),
-                        Packet::Subscribe(subscription) => {
-                            let [high, low] = subscription.pkid.to_be_bytes();
-                            Some(vec![0x90, 4, high, low, 0, 0])
-                        }
-                        Packet::Publish(publish)
-                            if publish.qos != rumqttc::v5::mqttbytes::QoS::AtMostOnce =>
-                        {
-                            let [high, low] = publish.pkid.to_be_bytes();
-                            Some(vec![0x40, 2, high, low])
-                        }
-                        Packet::PingReq(_) => Some(vec![0xD0, 0]),
-                        Packet::Disconnect(..) => return,
-                        _ => None,
-                    };
-                    if let Some(reply) = reply {
-                        if stream.write_all(&reply).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-            });
-        }
-    })
-}
-
 #[test]
 fn host_status_probes_the_local_connection_without_a_watch() {
     use whalerein_core::api::test_support::FakeAccess;
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let access = runtime.block_on(FakeAccess::start());
-    let listener = runtime
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
-    let mqtt_url = format!("mqtt://{}", listener.local_addr().unwrap());
-    let _peer = spawn_mqtt_peer(&runtime, listener);
+    // FakeAccess carries its own in-process MQTT broker URL in the pairing URI.
     let temp = tempfile::tempdir().unwrap();
     let config = selected(temp.path(), "standalone");
     let mut pairing = invocation(&config)
@@ -824,7 +770,7 @@ fn host_status_probes_the_local_connection_without_a_watch() {
         .stdin
         .take()
         .unwrap()
-        .write_all(format!("{}&mqtt={mqtt_url}", access.pairing_uri()).as_bytes())
+        .write_all(access.pairing_uri().as_bytes())
         .unwrap();
     let paired = pairing.wait_with_output().unwrap();
     assert_eq!(paired.status.code(), Some(0), "{paired:?}");

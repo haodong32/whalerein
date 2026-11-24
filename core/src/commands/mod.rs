@@ -22,13 +22,14 @@ use whalerein_proto::{
 use crate::access::{
     http::{receipt_matches_request, TransportObservation, FINAL_LOOKUP_RESERVE},
     transport::TransportBudget,
-    AccessClient, DeviceMqttClient, MqttConnectionEvent, MqttSettings,
+    AccessClient,
 };
 use crate::api::{
     error_code_name, CommandHandle, CoreError, CoreResult, LifecycleReceipt,
     OnlineStatus as DomainStatus, QuestionReceiptInfo,
 };
 use crate::cache::{Cache, CommandIntent};
+use crate::connection::{HostConnection, HostConnections, NoticeEvent, NoticeGuard};
 use crate::pairing::PROTOCOL_VERSION;
 use crate::security::{decode_frame, encode_frame, RequestAad, SecureChannel};
 use crate::util::{now_unix_ms, random_id, sha256};
@@ -49,14 +50,6 @@ struct Admission {
     config: crate::api::config::ConfigStore,
     profile: std::path::PathBuf,
     secrets: std::sync::Arc<dyn crate::security::SecretStore>,
-}
-
-/// Scoped MQTT receiver configuration for one foreground invocation.
-struct ForegroundTransport {
-    settings: MqttSettings,
-    device_id: String,
-    token: String,
-    session_id: Option<String>,
 }
 
 /// Why a heartbeat stopped renewing. A terminal response (404/expired/closed)
@@ -134,29 +127,18 @@ impl Drop for CommandHeartbeat {
     }
 }
 
-#[derive(Debug)]
-enum ForegroundSignal {
-    /// A matching result notice may carry a newer authoritative state.
-    Notice(Box<RequestStateNotice>),
-    /// A successful reconnect: reconcile the original request once more.
-    Reconnected,
-}
-
-/// Attached before submission. Signals are scoped to this invocation's MQTT
-/// connection; closing the guard stops the receiver without touching a sibling
-/// receiver under the same Device.
+/// Attached before submission. Signals are scoped to this command identity
+/// and arrive through the shared Host connection owner; dropping the guard
+/// removes only this waiter.
 struct ForegroundNotices {
-    signals: mpsc::Receiver<ForegroundSignal>,
-    stop: Arc<AtomicBool>,
-    task: Option<JoinHandle<()>>,
+    signals: mpsc::Receiver<NoticeEvent>,
+    _guard: NoticeGuard,
+    /// The shared connection was already subscribed when this waiter attached.
+    receiver_ready: bool,
     last_seen: Option<(String, i64)>,
 }
 
 impl ForegroundNotices {
-    fn stop(&self) {
-        self.stop.store(true, Ordering::SeqCst);
-    }
-
     /// Return true when this notice is new and matches the invocation scope.
     /// Foreign, stale and duplicate notices are ignored and never fetched.
     fn accept(&mut self, notice: &RequestStateNotice, request: &HostRequest) -> bool {
@@ -178,15 +160,6 @@ impl ForegroundNotices {
     }
 }
 
-impl Drop for ForegroundNotices {
-    fn drop(&mut self) {
-        self.stop();
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-    }
-}
-
 pub struct CommandService {
     access: Arc<AccessClient>,
     cache: Arc<Cache>,
@@ -197,7 +170,17 @@ pub struct CommandService {
     /// Largest complete inline request this device sends. A larger sealed body
     /// is uploaded and submitted as a reference before any submit attempt.
     outbound_inline_bytes: u64,
-    foreground: Option<ForegroundTransport>,
+    /// The shared per-Host connection owner. The query lane and command result
+    /// notices both travel through it; a Core instance never opens a second
+    /// foreground connection.
+    connections: Option<Arc<HostConnections>>,
+    connection: Option<Arc<HostConnection>>,
+    /// Test-only legacy HTTP query lane. The production query path is MQTT;
+    /// this keeps the low-level commands fixtures that exercise the shared
+    /// representation/decryption code without a broker meaningful. It is never
+    /// reachable from a `Core` (which injects its connection registry).
+    #[cfg(test)]
+    legacy_http_query: bool,
 }
 
 impl CommandService {
@@ -211,8 +194,50 @@ impl CommandService {
             transport,
             outbound_envelope_bytes: transport.envelope_bytes,
             outbound_inline_bytes: transport.inline_request_bytes(),
-            foreground: None,
+            connections: None,
+            connection: None,
+            #[cfg(test)]
+            legacy_http_query: true,
         }
+    }
+
+    /// Inject the shared Host connection registry owned by the Core instance.
+    /// Queries and command notices never open an auxiliary connection.
+    pub(crate) fn with_connections(mut self, connections: Arc<HostConnections>) -> Self {
+        self.connections = Some(connections);
+        #[cfg(test)]
+        {
+            self.legacy_http_query = false;
+        }
+        self
+    }
+
+    /// Inject one exact shared connection for a caller that already resolved
+    /// and prepared it.
+    #[cfg(test)]
+    pub(crate) fn with_host_connection(mut self, connection: Arc<HostConnection>) -> Self {
+        self.connection = Some(connection);
+        #[cfg(test)]
+        {
+            self.legacy_http_query = false;
+        }
+        self
+    }
+
+    fn connection_for(&self, host_id: &str) -> CoreResult<Arc<HostConnection>> {
+        if let Some(connection) = &self.connection {
+            if connection.host_id() == host_id {
+                return Ok(connection.clone());
+            }
+        }
+        if let Some(connections) = &self.connections {
+            if let Some(connection) = connections.running(host_id) {
+                return Ok(connection);
+            }
+        }
+        Err(CoreError::Unavailable(
+            "host connection is not ready for the query lane".into(),
+        ))
     }
 
     pub(crate) fn with_transport_budget(mut self, transport: TransportBudget) -> Self {
@@ -226,25 +251,6 @@ impl CommandService {
 
     pub(crate) fn with_outbound_envelope(mut self, envelope_bytes: u64) -> Self {
         self.outbound_envelope_bytes = envelope_bytes.min(self.transport.envelope_bytes);
-        self
-    }
-
-    /// Configure the scoped MQTT receiver attached before a foreground
-    /// submission. Without it (for example a bare unit fixture) the wait uses
-    /// bounded authoritative recovery only.
-    pub(crate) fn with_foreground_transport(
-        mut self,
-        settings: MqttSettings,
-        device_id: impl Into<String>,
-        token: impl Into<String>,
-        session_id: Option<String>,
-    ) -> Self {
-        self.foreground = Some(ForegroundTransport {
-            settings,
-            device_id: device_id.into(),
-            token: token.into(),
-            session_id,
-        });
         self
     }
 
@@ -299,7 +305,208 @@ impl CommandService {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn query_inner(
+        &self,
+        host_id: &str,
+        device_id: &str,
+        channel: &SecureChannel,
+        mut payload: RequestPayload,
+        wait_deadline: Option<Instant>,
+        transport: Option<&TransportObservation>,
+    ) -> CoreResult<ResponsePayload> {
+        #[cfg(test)]
+        {
+            if self.legacy_http_query && self.connection_for(host_id).is_err() {
+                return self
+                    .query_inner_http(
+                        host_id,
+                        device_id,
+                        channel,
+                        payload,
+                        wait_deadline,
+                        transport,
+                    )
+                    .await;
+            }
+        }
+        let _ = transport;
+        let source_sensitive = matches!(
+            payload.payload.as_ref(),
+            Some(whalerein_proto::request_payload::Payload::WaitSession(_))
+                | Some(whalerein_proto::request_payload::Payload::ReadWaitState(_))
+        );
+        let safe_to_retry = safe_query_to_retry(&payload);
+        let request_id = random_id(16);
+        let expires_at = now_unix_ms() + REQUEST_TTL_MS;
+        if let Some(deadline) = wait_deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                // The caller owns the overall deadline and distinguishes it
+                // from a transport error; let its timeout resolve this case.
+                return std::future::pending().await;
+            }
+            let remaining_ms = remaining.as_nanos().div_ceil(1_000_000) as u64;
+            let Some(whalerein_proto::request_payload::Payload::WaitSession(wait)) =
+                payload.payload.as_mut()
+            else {
+                return Err(CoreError::InvalidInput("wait payload missing".into()));
+            };
+            // One MQTT request/reply carries the slice; the caller keeps the
+            // overall deadline and resends with whatever time remains.
+            wait.timeout_ms = remaining_ms.min(u64::from(u32::MAX)) as u32;
+        }
+        let aad = RequestAad {
+            request_id: &request_id,
+            host_id,
+            device_id,
+            kind: RequestKind::Query,
+            command_id: "",
+            expires_at_unix_ms: expires_at,
+        };
+        let frame = channel.seal_request(&aad, &payload.encode_to_vec())?;
+        let mut request = build_request(
+            &request_id,
+            host_id,
+            device_id,
+            RequestKind::Query,
+            "",
+            Vec::new(),
+            expires_at,
+            channel.channel_id(),
+            encode_frame(&frame),
+        );
+        request.trace_id = self.access.trace_id().to_owned();
+        // This field is the encoded HTTPS result bound, not the raw logical
+        // envelope; Access converts it back to a raw ciphertext allowance.
+        request.transport = Some(RequestTransportMetadata {
+            result_max_bytes: crate::access::http::https_body_limit(self.transport.envelope_bytes)
+                as u64,
+            grant_generation: 0,
+            revocation_generation: 0,
+            enrollment_generation: 0,
+        });
+        self.ensure_forwardable(&request)?;
+        let connection = self.connection_for(host_id)?;
+        let result = self
+            .query_lane(&connection, &request, safe_to_retry)
+            .await?;
+        let bound = self.admitted_result_bound(&request);
+        let state = self.resolve_query_reply(result, bound).await?;
+        let status = DomainStatus::from_proto(state.status).unwrap_or(DomainStatus::Unknown);
+        let result = decrypt_response_raw(channel, &aad, &state).map_err(|error| {
+            if source_sensitive
+                && !state.result_body.is_empty()
+                && matches!(error, CoreError::ChannelMismatch)
+            {
+                CoreError::Security("wait response channel could not be verified".into())
+            } else {
+                error
+            }
+        });
+        match status {
+            DomainStatus::Succeeded => result.and_then(|payload| {
+                if payload.error_code == 0 {
+                    Ok(payload)
+                } else if source_sensitive {
+                    Err(source_response_error(&payload))
+                } else {
+                    Err(response_error(&payload))
+                }
+            }),
+            DomainStatus::Failed | DomainStatus::Rejected | DomainStatus::HostOffline => {
+                // A failed result may still carry an encrypted domain error.
+                match result {
+                    Ok(payload) if source_sensitive && payload.error_code != 0 => {
+                        Err(source_response_error(&payload))
+                    }
+                    Ok(payload) => Err(response_error(&payload)),
+                    // Any non-empty encrypted error body claims authentication;
+                    // never mask corruption with its cleartext status copy.
+                    Err(error) if !state.result_body.is_empty() => Err(error),
+                    Err(_) => Err(status_error(status, error_code_of(&state))),
+                }
+            }
+            DomainStatus::Unknown => Err(CoreError::UnknownResult),
+            other => Err(CoreError::Internal(format!(
+                "query ended in {}",
+                other.as_str()
+            ))),
+        }
+    }
+
+    /// Publish one query on the shared MQTT lane and wait on its correlated
+    /// waiter. A connection replacement or broker loss is retryable only for a
+    /// safe read, and retries keep the original application deadline.
+    async fn query_lane(
+        &self,
+        connection: &Arc<HostConnection>,
+        request: &HostRequest,
+        safe_to_retry: bool,
+    ) -> CoreResult<whalerein_proto::HostResult> {
+        let cancellation = crate::api::Cancellation::new();
+        let mut attempts = 0u32;
+        loop {
+            match connection.query(request, &cancellation).await {
+                Ok(result) => return Ok(result),
+                Err(error)
+                    if safe_to_retry
+                        && error.is_retryable_transport()
+                        && now_unix_ms() < request.expires_at_unix_ms
+                        && attempts < 8 =>
+                {
+                    attempts = attempts.saturating_add(1);
+                    // Wait for a usable generation before reissuing. The
+                    // request identity and deadline are unchanged.
+                    if let Err(error) = connection.wait_ready(&cancellation).await {
+                        if error.is_retryable_transport() {
+                            tokio::time::sleep(Duration::from_millis(100 * u64::from(attempts)))
+                                .await;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    if !connection.is_connected() {
+                        tokio::time::sleep(Duration::from_millis(100 * u64::from(attempts))).await;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Convert one MQTT reply into the same stored-status shape the rest of the
+    /// query path decrypts, resolving a result reference through its existing
+    /// HTTPS object binding and bound.
+    async fn resolve_query_reply(
+        &self,
+        result: whalerein_proto::HostResult,
+        max_ciphertext_bytes: u64,
+    ) -> CoreResult<RequestState> {
+        let body = crate::access::transport::resolve_query_reply_body(
+            &self.access,
+            &result,
+            max_ciphertext_bytes,
+        )
+        .await
+        .map_err(CoreError::from)?;
+        Ok(RequestState {
+            request_id: result.request_id,
+            host_id: result.host_id,
+            device_id: result.device_id,
+            status: result.status,
+            command_id: result.command_id,
+            payload_digest: result.payload_digest,
+            result_body: body.unwrap_or_default(),
+            error_code: result.error_code,
+            error_message: result.error_message,
+            channel_id: result.channel_id,
+            ..Default::default()
+        })
+    }
+
+    #[cfg(test)]
+    async fn query_inner_http(
         &self,
         host_id: &str,
         device_id: &str,
@@ -369,6 +576,7 @@ impl CommandService {
                 as u64,
             grant_generation: 0,
             revocation_generation: 0,
+            enrollment_generation: 0,
         });
         self.ensure_forwardable(&request)?;
         let receipt = self
@@ -510,6 +718,7 @@ impl CommandService {
                 as u64,
             grant_generation: 0,
             revocation_generation: 0,
+            enrollment_generation: 0,
         });
         self.ensure_forwardable(&request)?;
         let admission_guard = if let Some(admission) = &self.admission {
@@ -580,15 +789,13 @@ impl CommandService {
         // Attach the scoped MQTT receiver before the request can be submitted,
         // so a result published before the wait is installed is still routed
         // to this invocation.
-        let mut notices = self.attach_notices(host_id, device_id);
+        let mut notices = self.attach_notices(&request);
         // A sealed body above the effective encoded request budget is uploaded
         // and finished first. Only then is the reference submitted. The
         // original request id, command id and payload digest are unchanged, so
         // an upload retry can never create a second execution.
         if let Err(error) = self.ensure_representation(&mut request).await {
-            if let Some(notices) = notices.as_mut() {
-                notices.stop();
-            }
+            drop(notices.take());
             self.cache.remove_unsent_command(&request_id)?;
             return Err(error);
         }
@@ -742,7 +949,7 @@ impl CommandService {
         let _heartbeat = CommandHeartbeat::start(self.access.clone(), request_id.to_owned());
         // Attach before resuming the wait so an already-published terminal
         // notice is not lost.
-        let mut notices = self.attach_notices(host_id, device_id);
+        let mut notices = self.attach_command_notices(host_id, device_id, request_id, command_id);
         let budget = FOREGROUND_WAIT + FINAL_LOOKUP_RESERVE;
         let final_reserve = FINAL_LOOKUP_RESERVE.min(budget);
         let deadline = Instant::now() + budget;
@@ -755,7 +962,7 @@ impl CommandService {
             return outcome;
         }
         let mut recovery_attempt = 0u32;
-        let mut receiver_ready = false;
+        let mut receiver_ready = notices.as_ref().is_some_and(|watch| watch.receiver_ready);
         loop {
             let now = Instant::now();
             if now >= deadline {
@@ -770,7 +977,7 @@ impl CommandService {
             if receiver_ready {
                 match notices.as_mut() {
                     Some(watch) => match tokio::time::timeout(slice, watch.signals.recv()).await {
-                        Ok(Some(ForegroundSignal::Notice(notice))) => {
+                        Ok(Some(NoticeEvent::Notice(notice))) => {
                             // The notice carries the original request/command
                             // identity; it is a hint, never the result itself.
                             let scope = HostRequest {
@@ -782,7 +989,7 @@ impl CommandService {
                             };
                             read_now = watch.accept(&notice, &scope);
                         }
-                        Ok(Some(ForegroundSignal::Reconnected)) => read_now = true,
+                        Ok(Some(NoticeEvent::Reconnected)) => read_now = true,
                         Ok(None) => break,
                         // A connected receiver with no notice performs no
                         // status fetch: the final lookup covers a lost notice.
@@ -796,11 +1003,11 @@ impl CommandService {
                 // accepted command recoverable without a fixed poll loop.
                 match notices.as_mut() {
                     Some(watch) => match tokio::time::timeout(slice, watch.signals.recv()).await {
-                        Ok(Some(ForegroundSignal::Reconnected)) => {
+                        Ok(Some(NoticeEvent::Reconnected)) => {
                             receiver_ready = true;
                             read_now = true;
                         }
-                        Ok(Some(ForegroundSignal::Notice(notice))) => {
+                        Ok(Some(NoticeEvent::Notice(notice))) => {
                             receiver_ready = true;
                             let scope = HostRequest {
                                 request_id: request_id.to_owned(),
@@ -1091,7 +1298,7 @@ impl CommandService {
         digest: &[u8],
     ) -> CoreResult<PayloadReference> {
         let reserve = RelayObjectReserveRequest {
-            relay_version: crate::access::transport::RELAY_EPOCH_V4,
+            relay_version: crate::access::transport::RELAY_EPOCH_V5,
             host_id: request.host_id.clone(),
             device_id: request.device_id.clone(),
             session_id: self
@@ -1107,6 +1314,9 @@ impl CommandService {
             expires_at_unix_ms: request.expires_at_unix_ms,
             signed_at_unix_ms: 0,
             signature: Vec::new(),
+            request_id: request.request_id.clone(),
+            enrollment_generation: request.enrollment_generation,
+            connection_ref: request.connection_ref.clone(),
         };
         let reservation = self.access.reserve_relay_object(&reserve).await?;
         if let Err(error) = self.access.upload_relay_object(&reservation, body).await {
@@ -1117,7 +1327,7 @@ impl CommandService {
             return Err(error.into());
         }
         let finish = RelayObjectFinishRequest {
-            relay_version: crate::access::transport::RELAY_EPOCH_V4,
+            relay_version: crate::access::transport::RELAY_EPOCH_V5,
             ciphertext_bytes: body.len() as u64,
             sha256: digest.to_vec(),
             signed_at_unix_ms: 0,
@@ -1179,62 +1389,43 @@ impl CommandService {
             })
     }
 
-    /// Attach this invocation's scoped MQTT receiver. The receiver subscribes
-    /// to the Device event and notice topics; only notices for this exact
-    /// request are surfaced. Attaching never blocks submission: a broker that
-    /// is not reachable yet is a bounded recovery case, not a duplicate submit.
-    fn attach_notices(&self, host_id: &str, device_id: &str) -> Option<ForegroundNotices> {
-        let transport = self.foreground.as_ref()?;
-        if transport.device_id != device_id {
+    /// Register this exact command identity on the shared Host connection.
+    ///
+    /// The waiter is installed before submission, so a notice published while
+    /// the request is still being admitted is still routed here. Dropping the
+    /// guard removes only this waiter; a sibling command or watch is unaffected.
+    fn attach_notices(&self, request: &HostRequest) -> Option<ForegroundNotices> {
+        let connection = self.connection_for(&request.host_id).ok()?;
+        if connection.device_id() != request.device_id {
             return None;
         }
-        let (tx, rx) = mpsc::channel(32);
-        let notice_tx = tx.clone();
-        let stop = Arc::new(AtomicBool::new(false));
-        let task_stop = stop.clone();
-        let mut client = DeviceMqttClient::with_diagnostics(
-            transport.settings.clone(),
-            host_id,
-            &transport.device_id,
-            transport.token.clone(),
-            Arc::default(),
-        )
-        // Presence belongs to the long-lived watch observation. This
-        // short-lived command receiver must not publish the shared device
-        // last will when it stops while a watch is still attached.
-        .without_last_will();
-        if let Some(session) = &transport.session_id {
-            client = client.with_cloud_session(session.clone());
-        }
-        let task = tokio::spawn(async move {
-            let stop_requested = || task_stop.load(Ordering::SeqCst);
-            let _ = client
-                .run(
-                    stop_requested,
-                    // The event stream belongs to a Watch receiver, not to a
-                    // foreground command; never print or forward it here.
-                    |_| true,
-                    // Foreground commands never consume live previews.
-                    |_| true,
-                    |notice| {
-                        let _ =
-                            notice_tx.try_send(ForegroundSignal::Notice(Box::new(notice.clone())));
-                        true
-                    },
-                    |state| {
-                        // Every successful (re)subscribe binds a fresh
-                        // advertisement; reconcile the original request once.
-                        if state == MqttConnectionEvent::Subscribed {
-                            let _ = tx.try_send(ForegroundSignal::Reconnected);
-                        }
-                    },
-                )
-                .await;
-        });
+        let (signals, guard, receiver_ready) =
+            connection.register_notice(&request.request_id, &request.command_id);
         Some(ForegroundNotices {
-            signals: rx,
-            stop,
-            task: Some(task),
+            signals,
+            _guard: guard,
+            receiver_ready,
+            last_seen: None,
+        })
+    }
+
+    /// Register a notice waiter for an already-accepted command identity.
+    fn attach_command_notices(
+        &self,
+        host_id: &str,
+        device_id: &str,
+        request_id: &str,
+        command_id: &str,
+    ) -> Option<ForegroundNotices> {
+        let connection = self.connection_for(host_id).ok()?;
+        if connection.device_id() != device_id {
+            return None;
+        }
+        let (signals, guard, receiver_ready) = connection.register_notice(request_id, command_id);
+        Some(ForegroundNotices {
+            signals,
+            _guard: guard,
+            receiver_ready,
             last_seen: None,
         })
     }
@@ -1267,7 +1458,7 @@ impl CommandService {
             return Ok(state);
         }
         let mut recovery_attempt = 0u32;
-        let mut receiver_ready = false;
+        let mut receiver_ready = notices.as_ref().is_some_and(|watch| watch.receiver_ready);
         loop {
             let now = Instant::now();
             if now >= deadline {
@@ -1283,12 +1474,12 @@ impl CommandService {
                 match notices.as_mut() {
                     Some(watch) => {
                         match tokio::time::timeout(slice, watch.signals.recv()).await {
-                            Ok(Some(ForegroundSignal::Notice(notice))) => {
+                            Ok(Some(NoticeEvent::Notice(notice))) => {
                                 read_now = watch.accept(&notice, request);
                             }
                             // A reconnect binds a fresh advertisement;
                             // reconcile the original identity once more.
-                            Ok(Some(ForegroundSignal::Reconnected)) => read_now = true,
+                            Ok(Some(NoticeEvent::Reconnected)) => read_now = true,
                             Ok(None) => break,
                             // A connected receiver with no notice performs no
                             // status fetch; the final lookup covers a lost one.
@@ -1303,11 +1494,11 @@ impl CommandService {
                 // never a fixed poll loop.
                 match notices.as_mut() {
                     Some(watch) => match tokio::time::timeout(slice, watch.signals.recv()).await {
-                        Ok(Some(ForegroundSignal::Reconnected)) => {
+                        Ok(Some(NoticeEvent::Reconnected)) => {
                             receiver_ready = true;
                             read_now = true;
                         }
-                        Ok(Some(ForegroundSignal::Notice(notice))) => {
+                        Ok(Some(NoticeEvent::Notice(notice))) => {
                             receiver_ready = true;
                             read_now = watch.accept(&notice, request);
                         }
@@ -1451,6 +1642,39 @@ impl CommandService {
     }
 }
 
+/// A query may be reissued after a connection replacement only when replaying
+/// it is safe. Writes and answer submissions keep their single attempt.
+fn safe_query_to_retry(payload: &RequestPayload) -> bool {
+    use whalerein_proto::request_payload::Payload;
+    matches!(
+        payload.payload.as_ref(),
+        Some(
+            Payload::ListSessions(_)
+                | Payload::GetSession(_)
+                | Payload::GetApproval(_)
+                | Payload::GetCommandResult(_)
+                | Payload::Ping(_)
+                | Payload::ListApprovals(_)
+                | Payload::ReadHistory(_)
+                | Payload::WatchSession(_)
+                | Payload::CheckVersions(_)
+                | Payload::UnwatchSession(_)
+                | Payload::ReadMessageReply(_)
+                | Payload::GetHostCapabilities(_)
+                | Payload::ListModels(_)
+                | Payload::ReadSessionModel(_)
+                | Payload::WaitSession(_)
+                | Payload::CancelSessionWait(_)
+                | Payload::ReadWaitState(_)
+                | Payload::ReadPendingQueue(_)
+                | Payload::ListQuestions(_)
+                | Payload::GetQuestion(_)
+                | Payload::PullAttachment(_)
+                | Payload::CloseAttachment(_)
+        )
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_request(
     request_id: &str,
@@ -1471,13 +1695,16 @@ fn build_request(
         command_id: command_id.to_owned(),
         payload_digest,
         expires_at_unix_ms,
-        relay_version: crate::access::transport::RELAY_EPOCH_V4,
+        relay_version: crate::access::transport::RELAY_EPOCH_V5,
         trace_id: random_id(16),
         protocol_version: PROTOCOL_VERSION,
         channel_id: channel_id.to_owned(),
         body,
         body_reference: None,
         transport: None,
+        connection_ref: String::new(),
+        grant_generation: 0,
+        enrollment_generation: 0,
     }
 }
 
@@ -3669,11 +3896,11 @@ mod relay_command_tests {
         *channel_id.lock().unwrap() = "chan".into();
 
         let (tx, rx) = mpsc::channel(4);
-        tx.send(ForegroundSignal::Reconnected).await.unwrap();
+        tx.send(NoticeEvent::Reconnected).await.unwrap();
         let mut notices = ForegroundNotices {
             signals: rx,
-            stop: Arc::new(AtomicBool::new(false)),
-            task: None,
+            _guard: crate::connection::test_notice_guard(),
+            receiver_ready: false,
             last_seen: None,
         };
         let state = service
@@ -3696,7 +3923,7 @@ mod relay_command_tests {
             command_id: "c-1".into(),
             updated_at_unix_ms: updated,
             result_reference: None,
-            relay_version: crate::access::transport::RELAY_EPOCH_V4,
+            relay_version: crate::access::transport::RELAY_EPOCH_V5,
         }
     }
 
@@ -3705,8 +3932,8 @@ mod relay_command_tests {
         let (_tx, rx) = mpsc::channel(1);
         let mut notices = ForegroundNotices {
             signals: rx,
-            stop: Arc::new(AtomicBool::new(false)),
-            task: None,
+            _guard: crate::connection::test_notice_guard(),
+            receiver_ready: false,
             last_seen: None,
         };
         let request = request(vec![1], RequestKind::Command);
@@ -3776,28 +4003,34 @@ mod relay_command_tests {
     }
 
     #[tokio::test]
-    async fn the_foreground_receiver_attaches_before_submission() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let settings = MqttSettings::parse(&format!("mqtt://{address}")).unwrap();
+    async fn shared_connection_notices_attach_by_exact_device_and_request() {
+        use crate::api::test_support::FakeAccess;
+
+        let access = FakeAccess::start().await;
+        let settings = crate::access::MqttSettings::parse(&access.mqtt_url()).unwrap();
+        let connection = crate::connection::test_connection(settings, "h-1", "d-1", "token");
+        connection
+            .wait_ready(&crate::api::Cancellation::new())
+            .await
+            .unwrap();
         let cache = Arc::new(Cache::open_in_memory([8; 32]).unwrap());
-        let fake = crate::api::test_support::FakeAccess::start().await;
         let service = CommandService::new(
-            Arc::new(AccessClient::new(fake.url(), None).unwrap()),
+            Arc::new(AccessClient::new(access.url(), None).unwrap()),
             cache,
         )
-        .with_foreground_transport(settings, "d-1", "token", None);
-        // A receiver for another Device is never attached to this invocation.
-        assert!(service.attach_notices("h-1", "other-device").is_none());
+        .with_host_connection(connection);
+        // A connection for another Device never accepts this invocation.
+        let other = request(vec![2], RequestKind::Command);
+        let mut other = other;
+        other.device_id = "d-2".into();
+        assert!(service.attach_notices(&other).is_none());
         let notices = service
-            .attach_notices("h-1", "d-1")
-            .expect("scoped receiver attached");
-        assert!(notices.task.is_some());
-        let accepted = tokio::time::timeout(Duration::from_secs(1), listener.accept())
-            .await
-            .expect("the receiver connects before any submission")
-            .is_ok();
-        assert!(accepted);
+            .attach_notices(&request(vec![1], RequestKind::Command))
+            .expect("scoped waiter attached to the shared connection");
+        assert!(
+            notices.receiver_ready,
+            "the shared connection is subscribed"
+        );
         drop(notices);
     }
 

@@ -325,9 +325,9 @@ pub struct FakeHost {
     pub wait_replace_at: usize,
     pub fail_handshake_polls_after_replacement: bool,
     pub fail_handshake_polls: bool,
-    /// Error returned for every `RefreshWatches` query. Used to prove that a
-    /// lease failure is classified instead of looping on reconnects.
-    pub refresh_error: Option<ErrorCode>,
+    /// Error returned for every read-only `CheckVersions` query. Used to prove
+    /// that a version-check failure is classified instead of looping.
+    pub version_check_error: Option<ErrorCode>,
     handshake_request_ids: HashSet<String>,
     pending_source_error: Option<ErrorCode>,
     pub wait_ids: Vec<String>,
@@ -735,7 +735,7 @@ impl FakeHost {
             wait_replace_at: 0,
             fail_handshake_polls_after_replacement: false,
             fail_handshake_polls: false,
-            refresh_error: None,
+            version_check_error: None,
             handshake_request_ids: HashSet::new(),
             pending_source_error: None,
             wait_ids: Vec::new(),
@@ -1702,19 +1702,18 @@ impl FakeHost {
                 )),
                 ..Default::default()
             },
-            Some(Payload::RefreshWatches(_)) => {
-                if let Some(code) = self.refresh_error {
+            Some(Payload::CheckVersions(_)) => {
+                if let Some(code) = self.version_check_error {
                     return Ok(ResponsePayload {
                         error_code: code as i32,
                         ..Default::default()
                     });
                 }
                 ResponsePayload {
-                    payload: Some(whalerein_proto::response_payload::Payload::WatchStates(
-                        whalerein_proto::WatchStates {
-                            watches: vec![whalerein_proto::WatchLease {
+                    payload: Some(whalerein_proto::response_payload::Payload::VersionChecks(
+                        whalerein_proto::VersionChecks {
+                            checks: vec![whalerein_proto::VersionCheck {
                                 watch_id: "watch-1".into(),
-                                lease_ms: 30000,
                                 revision: 1,
                                 run_phase: whalerein_proto::RunPhase::Idle as i32,
                                 live_epoch: "epoch".into(),
@@ -2133,15 +2132,391 @@ fn error_response(status: u16, code: ErrorCode, message: &str) -> MockResponse {
     )
 }
 
+/// An in-process MQTT 5 broker for the fake Access/Host pair.
+///
+/// The HTTP fixture cannot serve the epoch-5 query lane. This broker accepts
+/// the device connection, acknowledges its subscriptions, routes each `query`
+/// PUBLISH to the same `FakeHost` used by the HTTP fixture, and publishes the
+/// correlated `HostResult` on the device reply topic with MQTT 5 Correlation
+/// Data, Response Topic and Message Expiry semantics. Tests can also publish
+/// control events, previews and notices into the subscribed device session.
+pub struct FakeBroker {
+    url: String,
+    shared: Arc<BrokerShared>,
+}
+
+struct BrokerShared {
+    host: Arc<Mutex<FakeHost>>,
+    state: Mutex<BrokerState>,
+    ready: tokio::sync::Notify,
+}
+
+struct BrokerState {
+    next_conn: u64,
+    next_pkid: u16,
+    connections: HashMap<u64, BrokerConn>,
+}
+
+struct BrokerConn {
+    filters: Vec<String>,
+    outgoing: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    target: String,
+}
+
+impl FakeBroker {
+    pub async fn start(host: Arc<Mutex<FakeHost>>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("mqtt://{}", listener.local_addr().unwrap());
+        let shared = Arc::new(BrokerShared {
+            host,
+            state: Mutex::new(BrokerState {
+                next_conn: 1,
+                next_pkid: 1,
+                connections: HashMap::new(),
+            }),
+            ready: tokio::sync::Notify::new(),
+        });
+        let accept = shared.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let shared = accept.clone();
+                tokio::spawn(async move {
+                    serve_broker_connection(shared, stream).await;
+                });
+            }
+        });
+        Self { url, shared }
+    }
+
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    /// Wait until one device session has acknowledged its reply subscription.
+    pub async fn wait_ready(&self) {
+        loop {
+            let ready = self
+                .shared
+                .state
+                .lock()
+                .unwrap()
+                .connections
+                .values()
+                .any(|conn| conn.filters.iter().any(|filter| filter.ends_with("/reply")));
+            if ready {
+                return;
+            }
+            self.shared.ready.notified().await;
+        }
+    }
+
+    fn publish_to_subscribers(&self, topic: &str, qos: u8, payload: Vec<u8>) {
+        let mut senders = Vec::new();
+        let mut pkids = Vec::new();
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            let matching: Vec<_> = state
+                .connections
+                .values()
+                .filter(|conn| conn.filters.iter().any(|filter| filter == topic))
+                .map(|conn| conn.outgoing.clone())
+                .collect();
+            for outgoing in matching {
+                state.next_pkid = state.next_pkid.wrapping_add(1).max(1);
+                senders.push(outgoing);
+                pkids.push(state.next_pkid);
+            }
+        }
+        for (tx, pkid) in senders.into_iter().zip(pkids) {
+            let _ = tx.send(broker_publish(topic, qos, payload.clone(), pkid, None));
+        }
+    }
+
+    /// Publish one control-class event envelope to the device event topic.
+    pub fn publish_event(&self, envelope: &whalerein_proto::EventEnvelope) {
+        let topic = crate::access::device_event_topic(&envelope.host_id, &envelope.device_id);
+        self.publish_to_subscribers(&topic, 1, envelope.encode_to_vec());
+    }
+
+    /// Publish one live-class preview envelope to the device live topic.
+    pub fn publish_live(&self, envelope: &whalerein_proto::EventEnvelope) {
+        let topic = crate::access::device_live_topic(&envelope.host_id, &envelope.device_id);
+        self.publish_to_subscribers(&topic, 0, envelope.encode_to_vec());
+    }
+
+    /// Publish one packet-sized result notice to the device notice topic.
+    pub fn publish_notice(&self, notice: &whalerein_proto::RequestStateNotice) {
+        let topic = crate::access::device_notice_topic(&notice.host_id, &notice.device_id);
+        self.publish_to_subscribers(&topic, 1, notice.encode_to_vec());
+    }
+}
+
+fn broker_publish(
+    topic: &str,
+    qos: u8,
+    payload: Vec<u8>,
+    pkid: u16,
+    properties: Option<rumqttc::v5::mqttbytes::v5::PublishProperties>,
+) -> Vec<u8> {
+    use rumqttc::v5::mqttbytes::v5::{Packet, Publish};
+    use rumqttc::v5::mqttbytes::QoS;
+    let qos = match qos {
+        1 => QoS::AtLeastOnce,
+        _ => QoS::AtMostOnce,
+    };
+    let mut publish = Publish::new(topic, qos, payload, properties);
+    if qos == QoS::AtLeastOnce {
+        publish.pkid = pkid;
+    }
+    let mut bytes = bytes::BytesMut::new();
+    Packet::Publish(publish).write(&mut bytes, None).unwrap();
+    bytes.to_vec()
+}
+
+async fn serve_broker_connection(shared: Arc<BrokerShared>, stream: tokio::net::TcpStream) {
+    use rumqttc::v5::mqttbytes::v5::Packet;
+    use tokio::io::AsyncWriteExt;
+
+    let (mut reader, mut writer) = stream.into_split();
+    let (outgoing, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    tokio::spawn(async move {
+        while let Some(bytes) = outgoing_rx.recv().await {
+            if writer.write_all(&bytes).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    let mut conn_id: Option<u64> = None;
+    let mut buffer = bytes::BytesMut::new();
+    loop {
+        let packet = loop {
+            if let Ok(packet) = Packet::read(&mut buffer, None) {
+                break packet;
+            }
+            if reader.read_buf(&mut buffer).await.unwrap_or(0) == 0 {
+                return;
+            }
+        };
+        match packet {
+            Packet::Connect(..) => {
+                let id = {
+                    let mut state = shared.state.lock().unwrap();
+                    let id = state.next_conn;
+                    state.next_conn = state.next_conn.saturating_add(1);
+                    state.connections.insert(
+                        id,
+                        BrokerConn {
+                            filters: Vec::new(),
+                            outgoing: outgoing.clone(),
+                            target: format!("0123456789abcdef:{id}"),
+                        },
+                    );
+                    id
+                };
+                conn_id = Some(id);
+                let _ = outgoing.send(vec![0x20, 3, 0, 0, 0]);
+            }
+            Packet::Subscribe(subscription) => {
+                let mut codes = Vec::new();
+                if let Some(id) = conn_id {
+                    let mut state = shared.state.lock().unwrap();
+                    if let Some(conn) = state.connections.get_mut(&id) {
+                        for filter in &subscription.filters {
+                            conn.filters.push(filter.path.clone());
+                            // Every granted subscription is QoS 1-capable in
+                            // the fake; the client still receives QoS 0 live
+                            // payloads because the broker publishes them at 0.
+                            codes.push(0u8);
+                        }
+                    }
+                }
+                let [high, low] = subscription.pkid.to_be_bytes();
+                // MQTT 5 SUBACK adds a zero-length property block between the
+                // packet identity and the reason codes.
+                let mut ack = vec![0x90, (3 + codes.len()) as u8, high, low, 0];
+                ack.extend(codes);
+                let _ = outgoing.send(ack);
+                shared.ready.notify_waiters();
+            }
+            Packet::Publish(publish) => {
+                if publish.qos == rumqttc::v5::mqttbytes::QoS::AtLeastOnce {
+                    let [high, low] = publish.pkid.to_be_bytes();
+                    // MQTT 5 PUBACK: packet identity, success reason code and a
+                    // zero-length property block.
+                    let _ = outgoing.send(vec![0x40, 4, high, low, 0, 0]);
+                }
+                let topic = String::from_utf8_lossy(&publish.topic).into_owned();
+                if topic.ends_with("/ready") {
+                    continue;
+                }
+                if !topic.ends_with("/query") {
+                    continue;
+                }
+                let Ok(request) = HostRequest::decode(publish.payload.clone()) else {
+                    continue;
+                };
+                let Some(target) = conn_id.and_then(|id| {
+                    shared
+                        .state
+                        .lock()
+                        .unwrap()
+                        .connections
+                        .get(&id)
+                        .map(|conn| conn.target.clone())
+                }) else {
+                    continue;
+                };
+                let (result, delay_ms) = {
+                    let mut host = shared.host.lock().unwrap();
+                    broker_answer(&mut host, &request)
+                };
+                if delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+                let properties = publish.properties.clone();
+                let reply_topic = properties
+                    .as_ref()
+                    .and_then(|properties| properties.response_topic.clone())
+                    .unwrap_or_else(|| {
+                        crate::access::device_reply_topic(&request.host_id, &request.device_id)
+                    });
+                let expiry = properties
+                    .as_ref()
+                    .and_then(|properties| properties.message_expiry_interval);
+                let reply_properties = rumqttc::v5::mqttbytes::v5::PublishProperties {
+                    response_topic: None,
+                    correlation_data: Some(bytes::Bytes::from(
+                        request.request_id.clone().into_bytes(),
+                    )),
+                    message_expiry_interval: expiry,
+                    user_properties: vec![(
+                        crate::access::TARGET_PROPERTY.to_owned(),
+                        target.clone(),
+                    )],
+                    ..Default::default()
+                };
+                let pkid = {
+                    let mut state = shared.state.lock().unwrap();
+                    state.next_pkid = state.next_pkid.wrapping_add(1).max(1);
+                    state.next_pkid
+                };
+                let bytes = broker_publish(
+                    &reply_topic,
+                    1,
+                    result.encode_to_vec(),
+                    pkid,
+                    Some(reply_properties),
+                );
+                let _ = outgoing.send(bytes);
+            }
+            Packet::PingReq(_) => {
+                let _ = outgoing.send(vec![0xD0, 0]);
+            }
+            Packet::Disconnect(_) => break,
+            _ => {}
+        }
+    }
+    if let Some(id) = conn_id {
+        shared.state.lock().unwrap().connections.remove(&id);
+    }
+}
+
+/// Answer one query-lane request through the same dispatch surface the HTTP
+/// fixture uses, then translate the recorded outcome into a `HostResult`.
+fn broker_answer(host: &mut FakeHost, request: &HostRequest) -> (whalerein_proto::HostResult, u64) {
+    // The fake Host models one Host availability for both HTTP and the broker
+    // lane. An offline Host rejects the query lane before dispatch so a client
+    // reports host_offline instead of waiting for an uncertain command.
+    if !host.host_online {
+        let mut result = broker_error_result(request, ErrorCode::Unavailable);
+        result.status = OnlineStatus::HostOffline as i32;
+        return (result, 0);
+    }
+    let body = match serde_json::to_vec(request) {
+        Ok(body) => body,
+        Err(_) => return (broker_error_result(request, ErrorCode::InvalidArgument), 0),
+    };
+    let response = host.host_request(&request.host_id, &body);
+    let delay_ms = response.delay_ms;
+    let outcome = if response.status == 200 {
+        host.requests.get(&request.request_id).map(|state| {
+            (
+                state.status,
+                state.result_body.clone(),
+                state.error_code,
+                state.command_id.clone(),
+                state.channel_id.clone(),
+                state.payload_digest.clone(),
+            )
+        })
+    } else {
+        let error = serde_json::from_slice::<ErrorResponse>(&response.body).ok();
+        Some((
+            OnlineStatus::Rejected as i32,
+            Vec::new(),
+            error.as_ref().map_or(0, |error| error.code),
+            request.command_id.clone(),
+            request.channel_id.clone(),
+            request.payload_digest.clone(),
+        ))
+    };
+    let Some((status, result_body, error_code, command_id, channel_id, payload_digest)) = outcome
+    else {
+        return (broker_error_result(request, ErrorCode::Internal), delay_ms);
+    };
+    (
+        whalerein_proto::HostResult {
+            request_id: request.request_id.clone(),
+            host_id: request.host_id.clone(),
+            device_id: request.device_id.clone(),
+            status,
+            command_id,
+            payload_digest,
+            result_body,
+            error_code,
+            trace_id: request.trace_id.clone(),
+            error_message: String::new(),
+            completed_at_unix_ms: crate::util::now_unix_ms(),
+            protocol_version: PROTOCOL_VERSION,
+            channel_id,
+            relay_version: crate::access::transport::RELAY_EPOCH_V5,
+            result_reference: None,
+        },
+        delay_ms,
+    )
+}
+
+fn broker_error_result(request: &HostRequest, code: ErrorCode) -> whalerein_proto::HostResult {
+    whalerein_proto::HostResult {
+        request_id: request.request_id.clone(),
+        host_id: request.host_id.clone(),
+        device_id: request.device_id.clone(),
+        status: OnlineStatus::Rejected as i32,
+        command_id: request.command_id.clone(),
+        payload_digest: request.payload_digest.clone(),
+        error_code: code as i32,
+        trace_id: request.trace_id.clone(),
+        channel_id: request.channel_id.clone(),
+        relay_version: crate::access::transport::RELAY_EPOCH_V5,
+        ..Default::default()
+    }
+}
+
 /// A fake Access + fake host pair wired into one HTTP server.
 pub struct FakeAccess {
     pub host: Arc<Mutex<FakeHost>>,
     pub server: MockServer,
+    pub broker: FakeBroker,
 }
 
 impl FakeAccess {
     pub async fn start() -> Self {
         let host = Arc::new(Mutex::new(FakeHost::new()));
+        let broker = FakeBroker::start(host.clone()).await;
         let handler_host = host.clone();
         let server = MockServer::start(Arc::new(move |request| {
             let mut host = handler_host.lock().expect("fake host");
@@ -2236,21 +2611,31 @@ impl FakeAccess {
             }
         }))
         .await;
-        Self { host, server }
+        Self {
+            host,
+            server,
+            broker,
+        }
     }
 
     pub fn url(&self) -> url::Url {
         self.server.url()
     }
 
+    /// The in-process MQTT broker URL backing this fixture.
+    pub fn mqtt_url(&self) -> String {
+        self.broker.url()
+    }
+
     pub fn pairing_uri(&self) -> String {
         let host = self.host.lock().unwrap();
         format!(
-            "whalerein://pair?v=1&access={}&host={}&token={}",
+            "whalerein://pair?v=1&access={}&host={}&token={}&mqtt={}",
             url::form_urlencoded::byte_serialize(self.url().as_str().as_bytes())
                 .collect::<String>(),
             host.host_id,
-            host.token
+            host.token,
+            url::form_urlencoded::byte_serialize(self.broker.url().as_bytes()).collect::<String>()
         )
     }
 

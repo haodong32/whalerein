@@ -454,7 +454,7 @@ mod tests {
             "query",
             "failed",
             "payload_too_large",
-            "refresh_watches",
+            "check_versions",
         );
         {
             let live = sink.0.lock().expect("sink lock");
@@ -462,7 +462,7 @@ mod tests {
                 live.last()
                     .and_then(|event| event.get("payload"))
                     .and_then(|value| value.as_str()),
-                Some("refresh_watches"),
+                Some("check_versions"),
                 "the recorded payload name is what attributes a failure to its query"
             );
         }
@@ -523,7 +523,7 @@ mod query_label_tests {
             "query",
             "failed",
             "payload_too_large",
-            "refresh_watches",
+            "check_versions",
         );
         {
             let live = sink.0.lock().expect("sink lock");
@@ -531,11 +531,11 @@ mod query_label_tests {
                 live.last()
                     .and_then(|event| event.get("payload"))
                     .and_then(|value| value.as_str()),
-                Some("refresh_watches"),
+                Some("check_versions"),
                 "the recorded payload name is what attributes a failure to its query"
             );
         }
         let live = sink.0.lock().unwrap();
-        assert_eq!(live[0]["payload"], "refresh_watches");
+        assert_eq!(live[0]["payload"], "check_versions");
     }
 }

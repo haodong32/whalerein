@@ -56,7 +56,8 @@ async fn returns_runtime_state_and_populates_host_session_and_event_cache() {
     );
     let config = core.current_config().unwrap();
     let settings = core.mqtt_settings(&config).unwrap();
-    assert_eq!(settings.port, 1883);
+    let broker = url::Url::parse(&access.broker.url()).unwrap();
+    assert_eq!(Some(settings.port), broker.port());
     assert!(!settings.tls);
     let session = core.get_session(&key("host-1", "session-1")).await.unwrap();
     assert_eq!(session.title, "test session");

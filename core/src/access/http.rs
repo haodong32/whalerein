@@ -17,7 +17,7 @@ use whalerein_proto::{
     RequestReceipt, RequestState,
 };
 
-use crate::access::transport::{TransportBudget, RELAY_EPOCH_V4};
+use crate::access::transport::{TransportBudget, RELAY_EPOCH_V5};
 use crate::api::{error_code_name, CoreError, CoreResult};
 use crate::diagnostics::journal::{request_id_for_log, DiagnosticKind, Diagnostics};
 use crate::util::now_unix_ms;
@@ -148,6 +148,7 @@ pub struct AccessClient {
     base: Url,
     token: Option<String>,
     request_timeout: Duration,
+    #[allow(dead_code)]
     poll_interval: Duration,
     transport: TransportBudget,
     response_limit: usize,
@@ -435,6 +436,7 @@ impl AccessClient {
 
     /// Renew one observation lease. 204 means the Device's grant, session and
     /// Host enrollment are still current; a typed reason means authority ended.
+    #[allow(dead_code)]
     pub async fn host_authority(&self, host_id: &str) -> Result<(), AccessError> {
         let url = self.endpoint(&["v1", "hosts", host_id, "authority"])?;
         let response = self
@@ -591,7 +593,7 @@ impl AccessClient {
             .http
             .put(url)
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .header(RELAY_EPOCH_HEADER, RELAY_EPOCH_V4.to_string())
+            .header(RELAY_EPOCH_HEADER, RELAY_EPOCH_V5.to_string())
             .header(reqwest::header::CONTENT_LENGTH, bytes.len().to_string())
             .header(TRACE_HEADER, self.trace_id())
             .timeout(self.transfer_timeout());
@@ -638,7 +640,7 @@ impl AccessClient {
         let mut request = self
             .http
             .get(url)
-            .header(RELAY_EPOCH_HEADER, RELAY_EPOCH_V4.to_string())
+            .header(RELAY_EPOCH_HEADER, RELAY_EPOCH_V5.to_string())
             .header(reqwest::header::ACCEPT, "application/octet-stream")
             .header(TRACE_HEADER, self.trace_id())
             .timeout(self.transfer_timeout());
@@ -666,7 +668,7 @@ impl AccessClient {
         let url = self.endpoint(&["v1", "relay", "objects", object_id])?;
         self.send(
             self.request(reqwest::Method::DELETE, url, None)
-                .header(RELAY_EPOCH_HEADER, RELAY_EPOCH_V4.to_string()),
+                .header(RELAY_EPOCH_HEADER, RELAY_EPOCH_V5.to_string()),
         )
         .await
     }
@@ -768,6 +770,7 @@ impl AccessClient {
 
     /// Poll one request until it reaches a terminal status (or `host_accepted`
     /// when requested, for control commands).
+    #[allow(dead_code)]
     pub async fn wait_for_request(
         &self,
         request: &HostRequest,
@@ -777,6 +780,7 @@ impl AccessClient {
             .await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn wait_for_request_observed(
         &self,
         request: &HostRequest,
@@ -912,6 +916,7 @@ pub(crate) fn receipt_matches_request(receipt: &RequestReceipt, request: &HostRe
     receipt.request_id == request.request_id && receipt.command_id == request.command_id
 }
 
+#[allow(dead_code)]
 pub fn is_terminal(status: i32) -> bool {
     matches!(
         OnlineStatus::try_from(status).unwrap_or(OnlineStatus::Unspecified),
@@ -1671,7 +1676,7 @@ mod relay_tests {
                     },
                 ),
                 ("PUT", path) if path == format!("/v1/relay/objects/{served_object_id}") => {
-                    assert_eq!(mock.headers.get("whalerein-relay-epoch").unwrap(), "4");
+                    assert_eq!(mock.headers.get("whalerein-relay-epoch").unwrap(), "5");
                     assert_eq!(mock.headers.get("content-length").unwrap(), "8");
                     assert_eq!(mock.body, b"cipher-!");
                     MockResponse::empty(204)
@@ -1698,7 +1703,7 @@ mod relay_tests {
         let client = AccessClient::new(server.url(), Some("device-token".into())).unwrap();
         let reservation = client
             .reserve_relay_object(&RelayObjectReserveRequest {
-                relay_version: RELAY_EPOCH_V4,
+                relay_version: RELAY_EPOCH_V5,
                 host_id: "h".into(),
                 device_id: "d".into(),
                 session_id: String::new(),
@@ -1710,6 +1715,9 @@ mod relay_tests {
                 expires_at_unix_ms: 9,
                 signed_at_unix_ms: 0,
                 signature: Vec::new(),
+                request_id: String::new(),
+                enrollment_generation: 0,
+                connection_ref: String::new(),
             })
             .await
             .unwrap();
@@ -1721,7 +1729,7 @@ mod relay_tests {
             .finish_relay_object(
                 &object_id,
                 &RelayObjectFinishRequest {
-                    relay_version: RELAY_EPOCH_V4,
+                    relay_version: RELAY_EPOCH_V5,
                     ciphertext_bytes: 8,
                     sha256: crate::util::sha256(b"cipher-!").to_vec(),
                     signed_at_unix_ms: 0,
