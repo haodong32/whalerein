@@ -272,9 +272,9 @@ path and no "roll back the binary against a newer schema" support.
 | New version to an older binary | Not supported | The old binary rejects the newer migration ledger. Restore a coordinated backup with the explicit re-enrollment procedure instead. |
 | Skip versions (N-2 or older) | Not supported without rehearsal | The repository does not publish an N-2 compatibility promise. Rehearse the exact path in an isolated installation. |
 | Mixed Access versions behind one database | Not supported | One Access process per standalone installation is the current design. |
-| Access, plugin and clients across the relay-epoch boundary | Not supported | Relay epoch 4 is a hard cut: upgrade Access, the broker plugin/policy, Host runtime, Core, CLI, mobile bindings and clients together. Reconnect clients after the cut so both directions renegotiate. An epoch-3 peer is rejected at admission. |
-| Any epoch-3 or older Access/client against epoch-4 Access | Not supported | Rejected with `protocol_version_incompatible`; live previews never use the reference carrier and there is no acknowledgement topic. |
-| Older binary against the epoch-4 migration ledger | Not supported | Restore a coordinated pre-cut backup with matching older artifacts, or use an operator-built binary that supports the new schema. |
+| Access, plugin and clients across the relay-epoch boundary | Not supported | Relay epoch 5 is a hard cut: upgrade Access, the broker plugin/policy, Host runtime, Core, CLI, mobile bindings and clients together. Reconnect clients after the cut so both directions renegotiate. An epoch-3 or epoch-4 peer is rejected at admission. |
+| Any retired-epoch Access/client against epoch-5 Access | Not supported | Rejected with `protocol_version_incompatible`; the retired Host `.../live` relay, HTTP handshake/query path and watch renewal do not exist in epoch 5. |
+| Older binary against the epoch-5 migration ledger | Not supported | Restore a coordinated pre-cut backup with matching older artifacts, or use an operator-built binary that supports the new schema. |
 
 The static preflight runs without Docker:
 
@@ -286,8 +286,11 @@ It parses the Compose Access config and stack, asserts the payload volume is
 mounted and writable by design, checks `storage.enabled` and the byte/count
 limits, asserts the broker ceiling equals the packaged
 `brokerPacketLimitBytes` and every profile packet budget is within it, and
-checks the epoch-4/relay-topic prerequisites, including the two QoS 0 live
-topics. It does not start a container.
+checks relay-topic prerequisites. The checked-in script still asserts the
+retired epoch-4 constants and Host live topic; the release owner must refresh it
+for epoch 5 (query/reply topics, direct Device live, retired Host `.../live`)
+before treating the static preflight as release evidence. It does not start a
+container.
 
 Run the full adjacent-version matrix against a throwaway PostgreSQL instance:
 
@@ -317,20 +320,23 @@ Current limitations, recorded honestly:
 - an actual production rollout also needs TLS/trust, credential-store and
   broker-policy reconciliation checks that are environment-specific.
 
-## Coordinated relay epoch-4 cutover
+## Coordinated relay epoch-5 cutover
 
 The MQTT relay is replaced in one coordinated hard cut. Application protocol
-stays 1; the MQTT relay epoch is 4. Every Access, broker ACL/plugin, Host
+stays 1; the MQTT relay epoch is 5. Every Access, broker ACL/plugin, Host
 runtime/DSH plugin, Core, CLI, mobile binding, iOS build and supported client
-must come from one release revision. An epoch-3 peer is rejected at admission
-with `protocol_version_incompatible`; there is no mixed rollout.
+must come from one release revision. An epoch-3 or epoch-4 peer is rejected at
+admission with `protocol_version_incompatible`; there is no mixed rollout.
 
-Epoch 4 keeps the QoS 1 control topics (`request`, `result`, `event`, device
-`event`, `notice`, `ready`) and adds the QoS 0 live topics `.../live` (Host to
-Access) and `.../d/{device_id}/live` (Access to Device). Both classes use the
-same authenticated broker connection and the same per-connection ACL. Live is
-fire-and-forget: it may drop or coalesce, never becomes an HTTPS reference,
-never enters a durable outbox, receipt or notice, and is superseded by the final
+Epoch 5 keeps the QoS 1 control topics (`request`, `result`, `event`, device
+`event`, `notice`, `ready`), adds the QoS 1 query lane
+(`.../d/{device_id}/query` and `.../d/{device_id}/reply`) for post-pairing Noise
+and session queries, and moves previews to direct QoS 0 Host-to-Device
+publication on `.../d/{device_id}/live`. The Host `.../live` relay topic is
+retired; Access neither subscribes to nor republishes previews. All classes use
+the same authenticated broker connection and per-connection ACL. Previews remain
+fire-and-forget: they may drop or coalesce, never become an HTTPS reference,
+never enter a durable outbox, receipt or notice, and are superseded by the final
 committed control message.
 
 ### Prepare
@@ -338,24 +344,27 @@ committed control message.
 1. Provision the node payload volume and filesystem from
    [Temporary ciphertext capacity](#temporary-ciphertext-capacity). Confirm
    permissions, free space above `max_node_bytes` plus the reserve, and that
-   only Access writes the directory. Live adds no volume or capacity.
+   only Access writes the directory. Direct live publication adds no volume or
+   capacity; query-scoped result objects use the same temporary directory.
 2. Configure public TLS for the Access origin and the five relay routes, plus
    broker TLS/hostnames. Set ingress body limits to at least
    `max(http.max_body_bytes, storage.max_object_bytes)` and request/response
    timeouts to at least `storage.upload_timeout` / `storage.read_timeout` (and
    the profile `transfer_timeout`). Ingress manifests are operator inputs; this
-   repository contains only the loopback Compose stack. Live adds no TLS route,
-   listener or service.
+   repository contains only the loopback Compose stack. The query lane and
+   direct previews add no TLS route, listener or service.
 3. Select the same profile or explicit overrides on Access, Host and clients.
    Every packet budget must stay at or below the rendered broker
    `max_packet_size` and the packaged `brokerPacketLimitBytes` (1 MiB).
-4. Deploy the matching broker config/plugin and confirm the eight relay topics:
-   control and live. Access computes ACLs from the authenticated grant; do not
-   duplicate policy in ad-hoc broker files. The live grants are: Host publishes
-   its own `.../live`; Access subscribes `h/+/live` and publishes the
-   authenticated Device's `.../d/{device_id}/live`; a Device subscribes only its
-   own `.../d/{device_id}/live`. Live traffic uses QoS 0; control stays QoS 1.
-   The plugin ACL itself is topic-based and does not encode QoS.
+4. Deploy the matching broker config/plugin and confirm the nine relay topics:
+   control, query/reply and direct Device live. Access computes ACLs from the
+   authenticated grant; do not duplicate policy in ad-hoc broker files. The
+   grants are: a Device publishes its own `.../d/{device_id}/query`; Access
+   subscribes domain-wide queries and publishes the Device
+   `.../d/{device_id}/reply` with `whalerein-target`; a Host publishes previews
+   directly to a granted Device's `.../d/{device_id}/live`. Direct preview traffic
+   uses QoS 0; control and query lanes stay QoS 1. The plugin ACL itself is
+   topic-based and does not encode QoS.
 5. Record artifact digests and take a coordinated PostgreSQL backup. Preserve
    Host command-deduplication records and identity with it.
 6. Export unresolved operations before stopping anything: `request_id`,
@@ -374,18 +383,18 @@ committed control message.
 3. **Deploy the matching set.** Start PostgreSQL, broker, Access (wait for
    `/readyz`), Host runtime/DSH plugin, then clients. The order prevents a Host
    from registering against an incomplete broker.
-4. **Gate readiness on epoch 4.**
+4. **Gate readiness on epoch 5.**
    - `/readyz` is green: database write probe, MQTT session,
      presence/policy reconciliation, and storage writability/headroom.
-   - Access accepted the Host's `HostReady` with `relay_version=4` and a valid
+   - Access accepted the Host's `HostReady` with `relay_version=5` and a valid
      receive advertisement.
-   - Each client connected with epoch 4, subscribed its own `event`, `notice`
-     and `live` topics, and published `ready` on its own topic; Access
+   - Each client connected with epoch 5, subscribed its own `event`, `notice`,
+     `reply` and `live` topics, and published `ready` on its own topic; Access
      registered the current connection generation.
-   - An epoch-3 client or other old artifact fails with
+   - An epoch-3 or epoch-4 client or other old artifact fails with
      `protocol_version_incompatible` before business delivery.
-   - The broker shows the eight topics, and the deployed peers use QoS 1
-     control and QoS 0 live, with no `ack` acceptance.
+   - The broker shows the nine topics, and the deployed peers use QoS 1 control
+     and query lanes with QoS 0 direct live, and no `ack` acceptance.
    - Payload free space remains above the reserve.
 5. **Reattach and recover.** Reconnect Host and clients, publish fresh `ready`
    advertisements, rerun the original watch/history reads. Recover an
@@ -397,9 +406,10 @@ committed control message.
 `/readyz` is necessary but not sufficient for the epoch gate. This repository
 has no endpoint that reports a connected Host's or client's relay epoch, so the
 operator must record the Host/client epoch evidence and broker policy evidence
-separately. `live_preview_dropped_total{reason}` (Access side, bounded reasons
-`disconnected`, `backpressure`, `publish`) reports preview drops; a sustained
-rise means live display loss only, never control delivery failure.
+separately. Host diagnostics report dropped previews; sustained loss means live
+display loss only, never control or query delivery failure. Access holds query
+waiters in memory only, so an Access restart during the cut drops them and a
+safe read must be retried within its caller deadline.
 
 ### Rollback
 
@@ -410,7 +420,7 @@ A rollback that runs both contracts is unsupported. Rollback requires, in order:
 3. matching old artifacts and broker policy for the whole set;
 4. a verified recovery procedure for commands admitted under the new release.
 
-Epoch 4 applies new migrations, and the old binary refuses a newer migration
+Epoch 5 applies new migrations, and the old binary refuses a newer migration
 ledger. Rollback is therefore a coordinated pre-cut restore with matching older
 artifacts plus the documented invalidation/re-enrollment, or an operator-built
 binary that supports the new schema. It is not an in-place binary swap, and it

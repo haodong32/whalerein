@@ -3,9 +3,9 @@
 [System overview](../architecture.md) · [Plugin](dsh-plugin.md) · [Setup](../../access/README.md)
 
 Access is a Go monolith for transport authorization, pairing registration,
-durable request/status copies, and encrypted relay. PostgreSQL owns durable
-server state; the pinned Mosquitto 2.1.4 line (with the WhaleRein broker
-plugin) supplies transport and connection facts.
+durable command status copies, transient query correlation, and encrypted
+relay. PostgreSQL owns durable server state; the pinned Mosquitto 2.1.4 line
+(with the WhaleRein broker plugin) supplies transport and connection facts.
 
 Access implements Standalone mode in one process with installation-scoped resources.
 External account mode, separate API/relay deployments and regional automation
@@ -22,7 +22,7 @@ Unknown modes fail configuration validation; there is no external-account fallba
 | `internal/pairing/` | Invitations, HELLO/FINISH, grant creation, host authorization. |
 | `internal/requests/` | Validation, dedupe, forwarding leases/retries, result application. |
 | `internal/events/` | Route opaque events by outer device ID. |
-| `internal/broker/` | MQTT, topics, transient correlation, presence, disconnect. |
+| `internal/broker/` | MQTT, topics, transient query admission and correlation, presence, disconnect. |
 | `internal/payload/` | Node-local temporary ciphertext admission, staged write, hard expiry, reader leases, reconciliation and cleanup. |
 | `internal/store/` | SQL, transactions, migrations, cleanup. |
 | `internal/clientaddr/` | Ingress client address resolution, windowed pseudonyms, log redaction. |
@@ -86,7 +86,7 @@ There is no silent fallback from system verification to custom roots.
 | `schema_migrations` | Applied migration names and SHA-256 checksums. |
 | `grants` | Host/device authorization, enrollment generation, revocation and replay acknowledgement. |
 | `pairing_tokens` | Invitation hash, expiry, use marker, failure count. |
-| `requests` | Bodies/status, relay epoch, inline or opaque reference representation, command identity/digest, forwarding lease/retries, exact client-lease state/deadline, pending cancellation replay and durable notice intent. |
+| `requests` | Durable command bodies/status, relay epoch, inline or opaque reference representation, command identity/digest, forwarding lease/retries, exact client-lease state/deadline, pending cancellation replay and durable notice intent. Ordinary queries create no row here. |
 | `temporary_ciphertext_objects` | Node-owned temporary ciphertext reservation, scope, state, exact length/digest, hard expiry, reader count, cleanup retries and grant fence revisions. |
 | `temporary_ciphertext_leases` | Idempotent reader leases that keep capacity charged until close. |
 
@@ -149,6 +149,33 @@ Final statuses cannot be overwritten; `unknown` may become succeeded/failed.
 Expiry cleanup removes bodies but retains identity, digest, and status. Late
 results cannot restore expired bodies. Access never generates DSH success.
 
+## Query admission
+
+The epoch-5 query lane is transient. A Device publishes one `HostRequest` on
+`.../h/<host>/d/<device>/query` at QoS 1 with the fixed response topic, the
+`request_id` as Correlation Data, a deadline-derived Message Expiry Interval and
+the Broker-stamped `whalerein-connection` property. Access admits it only when
+the relay epoch, topic/body scope, response topic, correlation, deadline,
+connection reference and current grant/enrollment all match. It then forwards
+the same request on the existing `.../request` topic with
+`HostRequest.connection_ref`, `grant_generation` and `enrollment_generation`
+filled, and keeps one in-memory waiter keyed by host, device, connection
+reference and request id with the immutable admitted scope. No durable request
+row is written.
+
+The Host replies on `.../result`. Access matches the result to the waiter,
+checks any referenced result object against the original scope and current
+grant, marks it issued, and publishes the reply on
+`.../d/<device_id>/reply` at QoS 1 with Correlation Data, the remaining Message
+Expiry Interval and `whalerein-target` set to the admitted connection
+reference. Then it removes the waiter. `HANDSHAKE` and `QUERY` kinds are the only
+kinds admitted on this ingress; `COMMAND` keeps its durable HTTPS path.
+
+Access restart drops every transient waiter. A Device sees no reply and may
+retry a safe read within its caller deadline. An object already issued before
+the restart remains fetchable through its durable reservation while the
+original deadline and current authorization still match.
+
 ## Exact request liveness and cancellation
 
 A non-terminal one-shot request owns one client lease on its existing request
@@ -174,11 +201,13 @@ independent and stronger than transport or lease liveness.
 Oversized relay payloads and attachment parts use one dedicated quota directory
 per Access node. PostgreSQL records the opaque object id, owning node/owner,
 complete scope (host, optional device/session/channel, exactly one request,
-message or event identity, purpose and part), grant fence revisions, state,
-charged and exact bytes, SHA-256 digest, hard expiry, reader count and bounded
-cleanup retry state. Capacity is charged from reservation until the file is
-deleted: partial, ready and expired bytes all count against per-object,
-per-host and per-node limits plus object and active-upload counts.
+message or event identity, purpose and part), the request, enrollment
+generation and Broker connection reference for a query-scoped result, grant
+fence revisions, state, charged and exact bytes, SHA-256 digest, hard expiry,
+reader count and bounded cleanup retry state. Capacity is charged from
+reservation until the file is deleted: partial, ready and expired bytes all
+count against per-object, per-host and per-node limits plus object and
+active-upload counts.
 
 Admission reserves atomically under node- and host-scoped advisory locks and
 also checks actual filesystem headroom against the configured reserve. A body
@@ -266,20 +295,37 @@ not a shared batch timestamp. Host revocation watermarks survive re-pairing;
 old notices preserve newer peers and old COMMIT retries cannot restore revoked
 incarnations. Existing grants migrate as generation zero.
 
-Presence updates reject timestamps older than the cached connection fact. Cached
-freshness never authorizes grants. A Host is online only after `HostReady`
-confirms its request subscription, and cached observations expire after
-`presence.cache_ttl` unless a broker event or snapshot refreshes them.
+A revocation freezes one enrollment, grant or device scope. Access keeps the
+durable pending/enforced state and retries the same scoped operation until the
+Broker confirms the matching fence. The Broker re-checks the receiving
+connection, target and current policy at final delivery, including queued
+bytes, so a superseded enrollment or grant cannot publish, subscribe, receive
+queued data or fetch protected objects afterward. Access closes only
+connections that serve the revoked scope, and a delayed enforcement pass
+cannot affect a newer connection or grant under the same stable ID. Bytes
+already handed to transport may still arrive; no positive release decision is
+cached.
+
+Presence in the Host directory is Broker-derived. Access applies ordered
+`connected`/`disconnected` lifecycle events by sequence and repairs a missed
+event from a sequence-bounded broker snapshot that also carries the broker
+epoch. A delayed event or a snapshot entry for a superseded connection
+reference is stale. Cached freshness never authorizes grants. A Host is online
+only after `HostReady` confirms its request subscription on the current
+connection; cached observations expire after `presence.cache_ttl` unless a
+broker event or snapshot refreshes them. A device-only network loss changes
+that Device's local connection state, not the Host directory status. There is
+no device-Will presence fallback.
 
 ## Broker and listeners
 
 The broker plugin delegates CONNECT validation to the internal listener and
-installs the returned per-connection policy locally; publish, subscribe,
-delivery and Will decisions never call Access. Presence comes from ordered
-broker connection notifications plus a sequence-bounded snapshot, with the
-device last will and HostReady as existing fallbacks. Active disconnect uses the
-private `$CONTROL/whalerein/v1` interface. See
-[Mosquitto line](mosquitto.md).
+installs the returned per-connection policy locally; publish, subscribe and
+delivery decisions never call Access. Presence comes from ordered broker
+connection notifications plus a sequence-bounded snapshot carrying the broker
+epoch, with HostReady as the readiness gate. A device Will is not a presence or
+revocation source. Active disconnect uses the private
+`$CONTROL/whalerein/v1` interface. See [Mosquitto line](mosquitto.md).
 
 Connection-test clients use username `probe:<host_id>` and a random client ID
 `whalerein-probe-<32 lowercase hex digits>`. Access validates the same provisioning
@@ -297,8 +343,10 @@ not the normal host's topic permissions or protocol execution.
 
 See the [wire contract](../../proto/v1/WIRE.md#logical-mqtt-transport) for the
 complete-packet relay. Access publishes one MQTT 5 PUBLISH per application
-message and requires `relay_version=4` on every request, result, event, live
-preview, readiness proof and receive advertisement. A hop computes the exact
+message it relays and requires `relay_version=5` on every request, result,
+event, query request/reply, readiness proof and receive advertisement it
+handles; a direct preview enforces the same epoch at its Host publisher. A hop
+computes the exact
 encoded packet for its topic and publishes inline when the packet fits the
 minimum of the local profile, the broker CONNACK/configured packet limit and the
 receiver advertisement. An oversized durable body is staged as exact ciphertext
@@ -311,17 +359,14 @@ in-flight semaphore and bounded waiting bytes, so a blocked flow cannot stall an
 unrelated small message. There are no application fragments, reassembly
 buffers, transfer receipts or device ACK topics.
 
-The QoS 0 live class bypasses that control queue. Access subscribes to the Host
-live topic (`h/+/live`), authenticates the actual publisher, requires an active
-grant and republishes the same opaque `EventEnvelope` to the authenticated
-Device `.../d/{device_id}/live` topic using only the outer `device_id`. It adds
-no durable row, outbox entry, receipt or notice and never waits for an
-acknowledgement. A bounded set of live handoff slots drops the preview on local
-backpressure instead of blocking control delivery; a disconnected Access MQTT
-session or a rejected QoS 0 publish also drops it. `/metrics` exposes
-`live_preview_dropped_total{reason}` with the bounded reasons `disconnected`,
-`backpressure` and `publish`; no host, device, request or content identity is
-attached.
+The QoS 0 live class bypasses that control queue and Access entirely. The Host
+publishes each preview directly on the granted Device's
+`.../d/{device_id}/live` topic; the Broker policy checks the authenticated Host
+publisher, the exact Host/Device topic and the current grant at delivery.
+Access neither subscribes to nor republishes a preview, adds no durable row,
+outbox entry, receipt or notice, and never waits for an acknowledgement. A
+dropped preview affects derived display state only and never blocks control or
+query traffic.
 
 ## Durable request notices
 
@@ -339,20 +384,21 @@ logged. `/metrics` exposes only the pending count, oldest intent age and retry
 count.
 
 Broker ACLs follow the same topics: a Device publishes only its own
-`.../d/{device_id}/ready` advertisement and last will; it subscribes to its own
-event, notice and live topics and never publishes an acknowledgement. A Host
-publishes its own result, event and live topics. Access publishes the request,
-device event, device notice and device live topics and subscribes to results,
-events, Host live previews, device advertisements and last wills. Traffic on the
-Host live and Device live topics is QoS 0; control topics stay QoS 1. The plugin
-policy is topic-based, so Access, Host and Core select the QoS by topic.
-Per-connection receive advertisements are keyed by the broker-derived connection
-generation, so a sibling reconnect never clears another receiver's budget; a
-grant or App-session revocation fences all of them.
+`.../d/{device_id}/ready` advertisement and its own
+`.../d/{device_id}/query` requests; it subscribes to its own event, notice,
+reply and live topics and never publishes an acknowledgement. A Host publishes
+its own result and event topics and the direct `.../d/{device_id}/live` preview
+for granted Devices. Access publishes the request, device event, device notice
+and device reply topics and subscribes to results, events, device queries and
+device advertisements. Device previews are QoS 0; control and query topics stay
+QoS 1. The plugin policy is topic-based, so Access, Host and Core select the QoS
+by topic. Per-connection receive advertisements are keyed by the broker-derived
+connection generation, so a sibling reconnect never clears another receiver's
+budget; a grant or App-session revocation fences all of them.
 
 Conversation payloads remain opaque to Access. The typed v1 Harness contract changes Host/Core domain handling, not grant ownership or server session authority. Bulk MQTT admission waits within bounded count/byte/context limits; controls bypass bulk admission.
 
-A valid epoch-4 HostReady re-establishes transport capability after an Access
+A valid epoch-5 HostReady re-establishes transport capability after an Access
 restart even when the Host stayed connected. Access answers it with one
 `REQUEST_KIND_ACCESS_READY` request carrying Access's own receive advertisement
 and refreshes it only when the effective budget or connection generation

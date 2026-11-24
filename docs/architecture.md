@@ -46,15 +46,20 @@ same database. Deployment configuration stays in `deploy/`.
 ## Request and event paths
 
 ```text
-Request: Core --HTTPS--> Access/PostgreSQL --MQTT--> Plugin
-Result:  Plugin --MQTT--> Access/PostgreSQL --HTTPS polling--> Core
+Command: Core --HTTPS--> Access/PostgreSQL --MQTT--> Plugin
+Result:  Plugin --MQTT--> Access/PostgreSQL --HTTPS result read--> Core
+Query:   Core --MQTT query lane--> Access --MQTT request--> Plugin
+Reply:   Plugin --MQTT result--> Access --MQTT reply--> Core
 Event:   Plugin --MQTT--> Access --MQTT device topic--> Core
+Preview: Plugin --MQTT QoS 0 device live topic--> Core
 ```
 
-After pairing, handshakes, queries, controls, and synchronization all use
-`POST /v1/hosts/{host_id}/requests`. Results are read by `request_id` through
-`GET /v1/requests/{request_id}`. Session operations have no separate HTTP routes.
-The plugin opens outbound connections and no HTTP listener.
+After pairing, Noise handshakes and session queries use the MQTT 5 query lane;
+durable commands still use `POST /v1/hosts/{host_id}/requests` with the exact
+`POST /v1/requests/{request_id}/heartbeat` and an authoritative result read by
+`request_id`. Session operations have no separate HTTP routes, and the retired
+post-pairing HTTPS handshake/query path is not a fallback. The plugin opens
+outbound connections and no HTTP listener.
 
 [`whalerein.proto`](../proto/v1/whalerein.proto) is the only message schema:
 proto3 JSON over HTTPS, binary protobuf over MQTT. The

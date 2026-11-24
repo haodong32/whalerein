@@ -49,8 +49,9 @@ produce a Message. Preview text is provisional, never committed history.
 ## Source adapter
 
 The Host consumes a source adapter with lifecycle, session listing/lookup,
-`watch`, `readHistory`, `readState`, `readQuestionStamp`, `listQuestionPage`,
-`getQuestion`, and command execution operations. `watch` takes explicit
+`watch`, `readVersionMarkers`, `readHistory`, `readState`, `readQuestionStamp`,
+`listQuestionPage`, `getQuestion`, and command execution operations. `watch`
+takes explicit
 interests (conversation and/or questions); a questions-only observation does not
 read history or require a history head. The adapter translates native data into
 the shared types and advertises per-session capabilities such as resumable
@@ -81,8 +82,12 @@ or unavailable ranges require a reset/snapshot; they do not clear pairing.
 To close the live/sync race, Core subscribes first, starts a channel-scoped Host
 watch, installs the baseline history/state, then reconciles buffered updates.
 Reconnect or view replacement clears provisional output and recovers committed
-history plus current runtime/approval state. Watch leases and publication queues
-are bounded; expiry never changes device grants.
+history plus current runtime/approval state. An observation is bound to its
+authenticated connection instance; a five-second `CheckVersions` query returns
+only read-only version markers and never renews or extends ownership. Host
+coalesces overlapping checks per session and facet, and a Questions-only check
+does not read conversation. Publication queues are bounded; neither connection
+loss nor check expiry changes device grants.
 
 Core owns provisional ordering, duplicate/stale filtering and final-message
 precedence. Only committed messages enter the encrypted cache or advance the

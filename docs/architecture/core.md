@@ -37,7 +37,7 @@ Core enums; the versioned wire enums are converted at the protocol boundary.
 | `conversation` | Bounded provisional Attempts, typed blocks, one tool activity per call, order, resets and final-message precedence. |
 | `history` | Independent bounded committed-history pages, exact message references, source/cache selection and projection fencing. |
 | `cache` | Encrypted Host-scoped messages, summaries, snapshot staging and command metadata. |
-| `access` | HTTPS and device MQTT, including the complete-message inline/reference control relay and QoS 0 live preview reception. |
+| `access` | HTTPS for the durable command lane, plus the single device MQTT connection with the MQTT 5 query lane, the complete-message inline/reference control relay and direct QoS 0 live preview reception. |
 | `diagnostics` | Redacted live events, bounded operation history and exports. |
 | `account` | Cloud App sessions, verified account scope, regional permission renewal, and durable sign-out retries. |
 | `api/instance.rs` | Explicit client TOML, instance manifests, scoped trust, and SecretStore namespaces. |
@@ -158,10 +158,15 @@ when every page certifies the same complete stamp. Stale, Unavailable,
 Unsupported, Loading and Current-empty remain distinct, and observing or listing
 never acquires a native answer claim.
 Watching subscribes MQTT before registering a source Watch and synchronizing its
-fixed history cut. A bounded background pump continues processing receipts during
-HTTP history reads. Channel/watch replacement rejects old updates. RefreshWatch
-reconciles the source history head and current state every five seconds; a lost
-final notification can therefore recover without subsequent event traffic.
+fixed history cut. A bounded background pump continues processing control and
+query traffic while HTTPS object reads run. Channel/watch replacement rejects
+old updates. The observation is bound to the authenticated Broker connection
+reference and observation generation, not to a renewable lease. Every five
+seconds Core issues one read-only `CheckVersions{session_id}` query per actively
+observed Host, with at most one check in flight; Host coalesces overlapping
+checks by session and facet and returns `VersionChecks`. A lost final
+notification is therefore repaired from authoritative markers without
+subsequent event traffic, and the check never extends the observation.
 A cold-cache snapshot is committed locally without being reported as new output;
 only changes after the synchronized cut and later live updates are delivered.
 A one-shot `session watch` forces a fresh snapshot and reports the complete
@@ -170,10 +175,11 @@ A reconnect or a `BatchOutcome::Gap` recovers the missed committed messages and
 delivers each unseen message identity exactly once, deduplicated against what
 this viewer already printed. The same dedupe prevents a replayed batch or a
 snapshot that overlaps live output from printing a message twice.
-One client instance owns one active observation. The observation holds an
-OS-released lease. A competing watch fails with `conflict` while send and wait
-remain available. CLI processes using the same Device can hold independent
-Host channels, so a send or its reply polling can coexist with a live watch.
+One client instance owns one active observation. The observation is bound to
+one authenticated connection generation. A competing watch fails with
+`conflict` while send and wait remain available. CLI processes using the same
+Device can hold independent Host channels, so a send and a live watch can
+coexist on the same connection owner.
 Closing or replacing an observation stops its recovery,
 staging and scoped delivery while a separate answer command can continue.
 
@@ -240,12 +246,12 @@ artifact and validated before any connection use: the complete MQTT packet
 budget, logical envelope, aggregate reservations, timeout ordering and the
 minimum control message must all fit. Invalid relations fail `Core::open`.
 Changes take effect on restart. The relay uses one coordinated epoch
-(`relay_version = 4`): every received `EventEnvelope`, live preview and
-`RequestStateNotice` must advertise it, and a peer with any other epoch is
-rejected with `protocol_version_incompatible`. Core subscribes to its control
-event and notice topics at QoS 1 and to its own Device live topic
+(`relay_version = 5`): every received `EventEnvelope`, direct live preview,
+query reply and `RequestStateNotice` must advertise it, and a peer with any
+other epoch is rejected with `protocol_version_incompatible`. Core subscribes to
+its control event and notice topics at QoS 1 and to its own Device live topic
 `.../d/{device_id}/live` at QoS 0. A live preview must carry inline ciphertext
-at epoch 4; a reference, missing nonce or foreign epoch is rejected. Live
+at epoch 5; a reference, missing nonce or foreign epoch is rejected. Live
 frames feed the same observation pipeline and sequence/duplicate path as control
 events, with no acknowledgement, retransmission or control blocking: a gap or
 loss marks only the preview incomplete, and the committed message or an
@@ -267,10 +273,24 @@ matching `payload_digest`. `result_max_bytes` is bound to the request and every
 stored result is read under that exact bound. No content is written to transport
 diagnostics.
 
+Within one Core instance there is exactly one MQTT connection owner per Host. It
+carries command notices, control events, direct previews and query replies for
+every consumer of that Host, including a foreground command wait; it no longer
+opens an auxiliary foreground receiver. The owner subscribes to
+`.../d/{device_id}/reply` before publishing a query and keeps a waiter registry
+keyed by request id and connection generation. A reply for another request,
+device, Host or generation never completes a waiter. Reconnect fails pending
+waiters with a retryable transport error, and a safe read is reissued within the
+remaining caller deadline. Post-pairing Noise now runs on this query lane rather
+than an HTTPS handshake. The command lane keeps HTTPS submission, exact
+heartbeat and authoritative result read, and its notice handling stays on the
+same owner.
+
 The initial device transport has one active watch per Core instance. Competing
 calls fail explicitly rather than opening clients with the same MQTT identity.
 Timeout/callback cancellation releases admission and aborts the pump; normal
-completion attempts bounded Unwatch cleanup, with lease expiry as fallback.
+completion attempts bounded Unwatch cleanup, and connection close, ordered
+disconnect or snapshot reconciliation bounds abandoned observations.
 Multi-session MQTT multiplexing is deferred until required by a real consumer.
 
 A client installation identity is the per-instance id plus its Noise static

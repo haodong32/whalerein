@@ -25,9 +25,11 @@ visible text; reset replaces a provisional block. Adjacent deltas can coalesce f
 20 ms or an 8 KiB UTF-8 target without crossing identity/block/order boundaries.
 Provider internal chunks do not create gaps in this normalized sequence.
 
-On relay epoch 4 the Host publishes each live preview as one complete
-packet-sized message at QoS 0 on its `.../live` topic, not as a fragment,
-acknowledged transfer frame or HTTPS reference. It takes the smallest usable
+On relay epoch 5 the Host publishes each live preview as one complete
+packet-sized message at QoS 0 directly on the granted Device's
+`.../d/{device_id}/live` topic, not as a fragment, acknowledged transfer frame
+or HTTPS reference. Access neither subscribes to nor republishes previews. It
+takes the smallest usable
 outbound budget across its local profile, Access's advertised receive budget and
 the Device `ChannelHello.receive` budget, splits only on valid UTF-8 boundaries,
 assigns contiguous normalized intervals and rechecks the fully encoded QoS 0
@@ -41,8 +43,8 @@ reference to complete HTTPS ciphertext. A Device publishes its `ready`
 subscribes to its own QoS 0 `.../d/{device_id}/live` topic beside its control
 event and notice topics. Access publishes a packet-sized `RequestStateNotice` on
 the Device `notice` topic only from durably committed state. A lost notice is
-repaired from authoritative state and the watch lease refresh, and a notice is
-never proof that native execution completed.
+repaired from authoritative state and the next read-only `CheckVersions` query,
+and a notice is never proof that native execution completed.
 
 A committed Message has a stable identity, role and ordered typed blocks. When
 it settles a live Attempt, MessageUpsert carries the origin reference. That is the
@@ -106,12 +108,16 @@ pump continues handling receipts while HTTP queries execute. Typed updates wait
 until the baseline is installed and reconcile against its cursor. The pump has
 RAII cancellation; deadlines/callback stops cannot leave a detached subscription.
 
-RefreshWatches every five seconds reconciles the authoritative source head and
-current runtime/approval state, even if the last push notification was lost.
-Runtime/approval revisions suppress stale state. Unwatch is attempted on normal
-completion; channel cleanup or the 30-second lease bounds abandoned watches.
-Preview gaps do not request historical token replay; the authoritative Message
-repairs them. Approval decisions revalidate the real pending action at execution.
+`CheckVersions` every five seconds returns read-only authoritative version
+markers for the active observations, even if the last push notification was
+lost. Runtime/approval revisions suppress stale state, overlapping checks are
+coalesced by Host per session and facet, and a Questions-only check does not
+read conversation. The check never extends ownership. Unwatch
+is attempted on normal completion; explicit close, ordered disconnect, snapshot
+repair or a Broker epoch change closes only the matching connection instance's
+observations. Preview gaps do not request historical token replay; the
+authoritative Message repairs them. Approval decisions revalidate the real
+pending action at execution.
 
 ## Resource and identity policy
 
