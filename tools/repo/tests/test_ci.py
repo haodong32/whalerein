@@ -124,6 +124,7 @@ def test_ios_matrix_selects_the_requested_suite():
     ]
     assert [job["target"] for job in ci.ios_matrix("full")["include"]] == [
         "ios-unit",
+        "ios-unit",
         "ios-ui",
         "ios-ui",
         "ios-ui",
