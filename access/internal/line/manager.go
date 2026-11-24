@@ -340,11 +340,19 @@ func (m *Manager) enforce(ctx context.Context, frozen store.RevocationScope) (st
 			continue
 		}
 		m.forget(deviceID)
+		// A device-wide revocation has no surviving Host scope on that
+		// connection, so it must close at the Broker and let the client
+		// observe an authoritative refusal. A single-grant revocation keeps
+		// the connection when another Host's authority remains.
+		kick := "0"
+		if scope.DeviceWide {
+			kick = "1"
+		}
 		base := []string{
 			"device " + deviceID,
 			fmt.Sprintf("generation %d", grant.Revision()),
 			"host " + grant.HostID,
-			"kick 0",
+			"kick " + kick,
 		}
 		if _, err := m.request(ctx, "deny", base...); err != nil && !isNotConnected(err) {
 			return receipt, fmt.Errorf("line: fence revoked grant: %w", err)
