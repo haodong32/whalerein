@@ -152,6 +152,10 @@ The Debug state gallery (`conversation.gallery`) lists the same catalog and
 rebuilds the runtime group when a scenario is applied, so a state is inspectable
 on device without a UI test.
 
+GitHub-hosted Unit and UI jobs use Xcode 27.2 and an iOS 27 simulator. Full
+verification also runs the Unit plan on iOS 18 with Xcode 16.4 to check the
+deployment baseline.
+
 ## Local integration stack
 
 `tools/ios-stack/` starts the disposable backend and writes a state contract
