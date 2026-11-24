@@ -166,18 +166,19 @@ func (h harness) enroll(t *testing.T, hostID, workspace, operationID string, iss
 	}
 
 	authorization := h.provider.issue(t, &whalereinv1.ExternalAuthorization{
-		AuthVersion:     external.AuthVersion,
-		AuthorizationId: "auth-" + operationID,
-		Purpose:         external.PurposeHostEnrollment,
-		WorkspaceId:     workspace,
-		RegionId:        regionID,
-		OperationId:     operationID,
-		Precondition:    "initial_enrollment",
-		HostId:          hostID,
-		HostPublicKeys:  [][]byte{signingPublic, noisePublic},
-		IssuedAtUnixMs:  issuedAt.UnixMilli(),
-		ExpiresAtUnixMs: expiresAt.UnixMilli(),
-		Nonce:           []byte("0123456789abcdef"),
+		AuthVersion:        external.AuthVersion,
+		AuthorizationId:    "auth-" + operationID,
+		Purpose:            external.PurposeHostEnrollment,
+		WorkspaceId:        workspace,
+		RegionId:           regionID,
+		OperationId:        operationID,
+		EnrollmentRevision: "1",
+		Precondition:       "initial_enrollment",
+		HostId:             hostID,
+		HostPublicKeys:     [][]byte{signingPublic, noisePublic},
+		IssuedAtUnixMs:     issuedAt.UnixMilli(),
+		ExpiresAtUnixMs:    expiresAt.UnixMilli(),
+		Nonce:              []byte("0123456789abcdef"),
 	})
 
 	request := &whalereinv1.HostEnrollmentRequest{
@@ -451,17 +452,18 @@ func TestConflictingPayloadIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	authorization := h.provider.issue(t, &whalereinv1.ExternalAuthorization{
-		AuthVersion:     external.AuthVersion,
-		AuthorizationId: original.GetAuthorization().GetAuthorizationId(),
-		Purpose:         external.PurposeHostEnrollment,
-		WorkspaceId:     "ws-fixture-1",
-		RegionId:        regionID,
-		OperationId:     "op-1",
-		HostId:          "host-1",
-		HostPublicKeys:  [][]byte{signingPublic, noise},
-		IssuedAtUnixMs:  now.UnixMilli(),
-		ExpiresAtUnixMs: now.Add(5 * time.Minute).UnixMilli(),
-		Nonce:           []byte("0123456789abcdef"),
+		AuthVersion:        external.AuthVersion,
+		AuthorizationId:    original.GetAuthorization().GetAuthorizationId(),
+		Purpose:            external.PurposeHostEnrollment,
+		WorkspaceId:        "ws-fixture-1",
+		RegionId:           regionID,
+		OperationId:        "op-1",
+		EnrollmentRevision: "1",
+		HostId:             "host-1",
+		HostPublicKeys:     [][]byte{signingPublic, noise},
+		IssuedAtUnixMs:     now.UnixMilli(),
+		ExpiresAtUnixMs:    now.Add(5 * time.Minute).UnixMilli(),
+		Nonce:              []byte("0123456789abcdef"),
 	})
 	changed := &whalereinv1.HostEnrollmentRequest{
 		Authorization:        authorization,

@@ -360,7 +360,7 @@ func TestMigration019FencesRetainedCiphertextWithoutBackfill(t *testing.T) {
 	s := openStoreAtMigration(t, "018_device_session_authority.sql")
 	ctx := context.Background()
 	now := time.Now().UTC()
-	seedDevice(t, s, "host", "device")
+	seedLegacyDevice(t, s, "host", "device")
 	if _, err := s.Pool().Exec(ctx, `INSERT INTO requests
 		(request_id,host_id,device_id,kind,status,result_body,expires_at,forward_state,created_at,updated_at)
 		VALUES ('retained','host','device',2,'succeeded',$1,$2,'none',$3,$3)`,

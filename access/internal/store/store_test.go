@@ -373,6 +373,28 @@ func seedDevice(t *testing.T, s *store.Store, hostID, deviceID string) {
 	}
 }
 
+// seedLegacyDevice writes the pre-generation grant shape for migration tests.
+func seedLegacyDevice(t *testing.T, s *store.Store, hostID, deviceID string) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := s.EnsureHost(ctx, hostID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool().Exec(ctx, `INSERT INTO devices(device_id,public_key_fingerprint,created_at,updated_at)
+		VALUES($1,'fp',$2,$2)`, deviceID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool().Exec(ctx, `INSERT INTO device_credentials(auth_hash,device_id,created_at)
+		VALUES($1,$2,$3)`, []byte("auth-"+deviceID), deviceID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool().Exec(ctx, `INSERT INTO grants(host_id,device_id,created_at,updated_at,grant_generation)
+		VALUES($1,$2,$3,$3,1)`, hostID, deviceID, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newRequest(id, hostID, deviceID, commandID string, digest []byte, status whalereinv1.OnlineStatus, forward store.ForwardState, now time.Time) store.Request {
 	return store.Request{
 		RequestID:       id,
@@ -1516,20 +1538,18 @@ func TestPairingRevocationFenceRollsBackWithFailedRevoke(t *testing.T) {
 func TestPairingRevocationFenceMigrationFencesLegacyPendingClaims(t *testing.T) {
 	// Start from the real pre-008 schema so the upgrade runs the production
 	// migration path instead of dropping columns from a current database.
-	s := openStoreAtMigration(t, "007_query_retention.sql")
+	s := openStoreAtMigration(t, "017_device_sessions.sql")
 	ctx := context.Background()
 	now := time.Now().UTC()
 	if _, err := s.EnsureHost(ctx, "migration-host"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreatePairedDevice(ctx, "migration-host", "migration-device", "pin", []byte("migration-auth"), now); err != nil {
-		t.Fatal(err)
-	}
+	seedLegacyDevice(t, s, "migration-host", "migration-device")
 	hash := bytes.Repeat([]byte{8}, 32)
 	if err := s.CreatePairingToken(ctx, hash, "migration-host", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.Pool().Exec(ctx, `DROP VIEW grant_authority;
+	_, err := s.Pool().Exec(ctx, `DROP VIEW IF EXISTS grant_authority;
       ALTER TABLE pairing_operations DROP COLUMN device_generation;
       ALTER TABLE pairing_operations DROP COLUMN host_generation;
       ALTER TABLE grants DROP COLUMN revocation_generation;
