@@ -571,12 +571,28 @@ impl Core {
         result
     }
 
+    /// Largest first visible page that can travel inline on the MQTT reply
+    /// lane. The packet includes the HostResult envelope, HistoryPage and
+    /// batch framing, so only the remainder is available to committed
+    /// messages. Later pages and bulk synchronization keep their caller bound.
+    fn first_page_inline_bytes(&self, host_id: &str) -> u32 {
+        let local = self.transport_budget();
+        let receive = self.runtime.host_receive(host_id).unwrap_or(local);
+        let packet = local.packet_bytes.min(receive.packet_bytes);
+        packet.saturating_sub(4 * 1024).max(1024).min(MAX_PAGE_BYTES)
+    }
+
     async fn history_page_online(
         &self,
         request: &HistoryPageRequest,
         max_messages: u32,
         max_bytes: u32,
     ) -> CoreResult<HistoryPage> {
+        let max_bytes = if request.continuation.is_none() {
+            max_bytes.min(self.first_page_inline_bytes(&request.session.host_id))
+        } else {
+            max_bytes
+        };
         let binding = match &request.continuation {
             Some(continuation) => Some(self.continuation_from_token(
                 continuation,
