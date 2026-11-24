@@ -939,16 +939,18 @@ func (s *Service) publishTimeout() time.Duration {
 // deviceOfflineEvent is the only host-scoped presence payload Access publishes.
 // It never carries message content, credentials, paths or pairing tokens.
 type deviceOfflineEvent struct {
-	Event      string `json:"event"`
-	DeviceID   string `json:"device_id"`
-	Reason     string `json:"reason"`
-	ObservedAt string `json:"observed_at"`
+	Event         string `json:"event"`
+	DeviceID      string `json:"device_id"`
+	Reason        string `json:"reason"`
+	ObservedAt    string `json:"observed_at"`
+	ConnectionRef string `json:"connection_ref,omitempty"`
+	BrokerEpoch   string `json:"broker_epoch,omitempty"`
 }
 
 // handleDeviceOffline publishes one device_offline JSON event to each host
 // holding a live grant for the device. Hosts are resolved through the store
 // callback; the client id never implies a host.
-func (s *Service) handleDeviceOffline(deviceID, reason string, observedAt time.Time) {
+func (s *Service) handleDeviceOffline(deviceID, reason string, observedAt time.Time, ref ConnectionRef) {
 	if !validID(deviceID) {
 		s.metrics.PresenceInvalid()
 		return
@@ -974,10 +976,12 @@ func (s *Service) handleDeviceOffline(deviceID, reason string, observedAt time.T
 		return
 	}
 	payload, err := json.Marshal(deviceOfflineEvent{
-		Event:      deviceOfflineEventName,
-		DeviceID:   deviceID,
-		Reason:     reason,
-		ObservedAt: observedAt.UTC().Format(time.RFC3339Nano),
+		Event:         "connection_closed",
+		DeviceID:      deviceID,
+		Reason:        reason,
+		ObservedAt:    observedAt.UTC().Format(time.RFC3339Nano),
+		ConnectionRef: ref.String(),
+		BrokerEpoch:   ref.Epoch,
 	})
 	if err != nil {
 		s.metrics.DeviceOfflinePublishFailed()

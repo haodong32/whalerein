@@ -95,7 +95,7 @@ func TestHandleNotificationIgnoresSupersededDeviceConnection(t *testing.T) {
 	p := newPresence()
 	p.ApplySnapshot(nil, 1)
 	emitted := []string{}
-	p.SetDeviceOfflineHandler(func(deviceID, source string, _ time.Time) {
+	p.SetDeviceOfflineHandler(func(deviceID, source string, _ time.Time, _ ConnectionRef) {
 		emitted = append(emitted, deviceID+":"+source)
 	})
 	p.HandleNotification(&Notification{Sequence: 2, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 5, AtUnixMilli: 2000})

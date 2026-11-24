@@ -17,7 +17,7 @@ type presenceTransition struct {
 func TestDevicePresenceOfflineCallbackFiresOncePerTransitionAndResets(t *testing.T) {
 	presence := newPresence()
 	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
+	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time, _ ConnectionRef) {
 		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
 	})
 	base := time.Unix(1000, 0)
@@ -58,7 +58,7 @@ func TestDeviceWillUnknownEntryFiresAndInvalidPayloadsAreDropped(t *testing.T) {
 	presence := newPresence()
 	presence.now = func() time.Time { return time.Unix(2000, 0) }
 	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
+	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time, _ ConnectionRef) {
 		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
 	})
 
@@ -100,7 +100,7 @@ func TestDeviceWillCannotOverrideANewerConnection(t *testing.T) {
 	base := time.Unix(4000, 0)
 	presence.now = func() time.Time { return base }
 	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
+	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time, _ ConnectionRef) {
 		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
 	})
 
@@ -161,7 +161,7 @@ func TestPresenceCacheTTLExpiresADeviceAndFansOutOffline(t *testing.T) {
 	base := time.Unix(6000, 0)
 	presence.now = func() time.Time { return base }
 	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
+	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time, _ ConnectionRef) {
 		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
 	})
 	presence.SetDeviceOnline("d1", true, base)
@@ -190,7 +190,7 @@ func TestSnapshotRepairsALostDeviceDisconnect(t *testing.T) {
 	base := time.Unix(7000, 0)
 	presence.now = func() time.Time { return base }
 	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
+	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time, _ ConnectionRef) {
 		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
 	})
 	presence.SetDeviceOnline("lost", true, base)
@@ -228,7 +228,7 @@ func TestBrokerDisconnectIsPrimaryAndDeduplicatesTheFollowingWill(t *testing.T) 
 	presence := newPresence()
 	presence.now = func() time.Time { return time.Unix(3000, 0) }
 	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
+	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time, _ ConnectionRef) {
 		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
 	})
 

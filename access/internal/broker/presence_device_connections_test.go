@@ -12,7 +12,7 @@ type deviceOfflineEdge struct {
 
 func newDeviceOfflineRecorder(p *Presence) *[]deviceOfflineEdge {
 	edges := &[]deviceOfflineEdge{}
-	p.SetDeviceOfflineHandler(func(deviceID, source string, _ time.Time) {
+	p.SetDeviceOfflineHandler(func(deviceID, source string, _ time.Time, _ ConnectionRef) {
 		*edges = append(*edges, deviceOfflineEdge{deviceID: deviceID, source: source})
 	})
 	return edges

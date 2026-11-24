@@ -28,7 +28,7 @@ func TestDeviceOfflinePublishesHostScopedJsonToEveryAuthorizedHost(t *testing.T)
 		return []string{"h1", "h2"}, nil
 	})
 	observed := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
-	service.handleDeviceOffline("d1", PresenceSourceWill, observed)
+	service.handleDeviceOffline("d1", PresenceSourceWill, observed, ConnectionRef{})
 
 	session.mu.Lock()
 	defer session.mu.Unlock()
@@ -50,7 +50,7 @@ func TestDeviceOfflinePublishesHostScopedJsonToEveryAuthorizedHost(t *testing.T)
 	if err := json.Unmarshal(session.payloads[0], &event); err != nil {
 		t.Fatal(err)
 	}
-	if event.Event != "device_offline" || event.DeviceID != "d1" || event.Reason != "will" {
+	if event.Event != "connection_closed" || event.DeviceID != "d1" || event.Reason != "will" {
 		t.Fatalf("event = %+v", event)
 	}
 	if _, err := time.Parse(time.RFC3339Nano, event.ObservedAt); err != nil {
@@ -65,7 +65,7 @@ func TestDeviceOfflineUnknownDeviceHasNoHostsAndPublishesNothing(t *testing.T) {
 	service, session := offlineService(t, func(context.Context, string) ([]string, error) {
 		return nil, nil
 	})
-	service.handleDeviceOffline("missing", PresenceSourceBroker, time.Now())
+	service.handleDeviceOffline("missing", PresenceSourceBroker, time.Now(), ConnectionRef{})
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	if len(session.published) != 0 {
@@ -77,13 +77,13 @@ func TestDeviceOfflineFailurePathsAreBoundedAndCounted(t *testing.T) {
 	lookupErr, _ := offlineService(t, func(context.Context, string) ([]string, error) {
 		return nil, errors.New("database unavailable")
 	})
-	lookupErr.handleDeviceOffline("d1", PresenceSourceBroker, time.Now())
+	lookupErr.handleDeviceOffline("d1", PresenceSourceBroker, time.Now(), ConnectionRef{})
 	if got := testutil.ToFloat64(lookupErr.metrics.DeviceOfflinePublishFail); got != 1 {
 		t.Fatalf("lookup failure metric = %v", got)
 	}
 
 	noResolver, noResolverSession := offlineService(t, nil)
-	noResolver.handleDeviceOffline("d1", PresenceSourceBroker, time.Now())
+	noResolver.handleDeviceOffline("d1", PresenceSourceBroker, time.Now(), ConnectionRef{})
 	if got := testutil.ToFloat64(noResolver.metrics.DeviceOfflinePublishFail); got != 1 {
 		t.Fatalf("missing resolver metric = %v", got)
 	}
@@ -94,7 +94,7 @@ func TestDeviceOfflineFailurePathsAreBoundedAndCounted(t *testing.T) {
 	noResolverSession.mu.Unlock()
 
 	invalidID, invalidSession := offlineService(t, nil)
-	invalidID.handleDeviceOffline("bad/id", PresenceSourceBroker, time.Now())
+	invalidID.handleDeviceOffline("bad/id", PresenceSourceBroker, time.Now(), ConnectionRef{})
 	if got := testutil.ToFloat64(invalidID.metrics.PresenceInvalidPayloads); got != 1 {
 		t.Fatalf("invalid device metric = %v", got)
 	}
@@ -110,7 +110,7 @@ func TestDeviceOfflinePublishFailureIsCountedAndSkipsInvalidHosts(t *testing.T) 
 		return []string{"bad/host", "h1"}, nil
 	})
 	session.publishErr = errors.New("broker unavailable")
-	service.handleDeviceOffline("d1", PresenceSourceBroker, time.Now())
+	service.handleDeviceOffline("d1", PresenceSourceBroker, time.Now(), ConnectionRef{})
 	if got := testutil.ToFloat64(service.metrics.DeviceOfflinePublishFail); got != 2 {
 		t.Fatalf("publish failure metric = %v", got)
 	}
@@ -188,7 +188,7 @@ func TestBrokerDisconnectNotificationPublishesHostScopedJsonOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	session.mu.Unlock()
-	if event.Event != "device_offline" || event.DeviceID != "d1" || event.Reason != PresenceSourceBroker {
+	if event.Event != "connection_closed" || event.DeviceID != "d1" || event.Reason != PresenceSourceBroker {
 		t.Fatalf("event = %+v", event)
 	}
 

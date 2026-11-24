@@ -29,7 +29,7 @@ const (
 
 // DeviceOfflineHandler runs once for each accepted online -> offline edge.
 // observedAt is the source timestamp used for stale-event rejection.
-type DeviceOfflineHandler func(deviceID, source string, observedAt time.Time)
+type DeviceOfflineHandler func(deviceID, source string, observedAt time.Time, ref ConnectionRef)
 
 // liveConnection is one admitted device connection the presence registry can
 // target for a scoped revocation. The client id is carried because a device
@@ -297,7 +297,7 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 		p.metrics.PresenceEvent(source, "offline")
 	}
 	if transition && handler != nil {
-		handler(deviceID, source, at)
+		handler(deviceID, source, at, ConnectionRef{Epoch: p.epoch, ID: connID})
 	}
 }
 func cloneConnections(connections map[uint64]struct{}) map[uint64]struct{} {
@@ -325,23 +325,27 @@ func (p *Presence) Expire(now time.Time) int {
 			expired++
 		}
 	}
-	var devices []string
+	type expiredDevice struct {
+		id  string
+		ref ConnectionRef
+	}
+	var devices []expiredDevice
 	for deviceID, entry := range p.devices {
 		if entry.online && p.stale(entry, now) {
 			p.devices[deviceID] = presenceEntry{online: false, at: entry.at, seenAt: now, connID: entry.connID, seq: entry.seq}
-			devices = append(devices, deviceID)
+			devices = append(devices, expiredDevice{id: deviceID, ref: ConnectionRef{Epoch: p.epoch, ID: entry.connID}})
 			expired++
 		}
 	}
 	handler := p.deviceOfflineHandler
 	p.mu.Unlock()
 	p.publishCounts()
-	for _, deviceID := range devices {
+	for _, device := range devices {
 		if p.metrics != nil {
 			p.metrics.PresenceEvent(PresenceSourceExpired, "offline")
 		}
 		if handler != nil {
-			handler(deviceID, PresenceSourceExpired, now)
+			handler(device.id, PresenceSourceExpired, now, device.ref)
 		}
 	}
 	return expired
@@ -711,7 +715,11 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 		previous.seenAt = now
 		hosts[hostID] = previous
 	}
-	var recovered []string
+	type recoveredDevice struct {
+		id  string
+		ref ConnectionRef
+	}
+	var recovered []recoveredDevice
 	for deviceID, previous := range p.devices {
 		if !previous.online {
 			continue
@@ -725,7 +733,7 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 		if ok && next.online {
 			continue
 		}
-		recovered = append(recovered, deviceID)
+		recovered = append(recovered, recoveredDevice{id: deviceID, ref: ConnectionRef{Epoch: p.epoch, ID: previous.connID}})
 	}
 	// The snapshot is the authoritative current connection set; every stale
 	// reference from an older broker epoch or replaced connection disappears.
@@ -766,12 +774,12 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 	handler := p.deviceOfflineHandler
 	p.mu.Unlock()
 	p.publishCounts()
-	for _, deviceID := range recovered {
+	for _, device := range recovered {
 		if p.metrics != nil {
 			p.metrics.PresenceEvent(PresenceSourceSnapshot, "offline")
 		}
 		if handler != nil {
-			handler(deviceID, PresenceSourceSnapshot, now)
+			handler(device.id, PresenceSourceSnapshot, now, device.ref)
 		}
 	}
 }
