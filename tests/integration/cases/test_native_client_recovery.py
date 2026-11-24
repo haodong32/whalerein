@@ -19,7 +19,7 @@ def platform_keyring(tmp_path):
         yield env
 
 
-def test_hard_cut_standalone_pair_restart_and_follow_reply(scenario, platform_keyring):
+def test_standalone_pair_restart_and_follow_reply(scenario, platform_keyring):
     """Recover interrupted pairing and the original native reply across an Access restart."""
     client = CutoverClient(scenario.directory, "standalone-instance", platform_keyring)
     session_id = scenario.create()
@@ -113,7 +113,7 @@ def test_hard_cut_standalone_pair_restart_and_follow_reply(scenario, platform_ke
 
 
 
-def test_hard_cut_native_dsh_advanced_controls(scenario, platform_keyring):
+def test_native_dsh_advanced_controls(scenario, platform_keyring):
     """The new CLI creates and forks native sessions and preserves capability guards."""
     client = CutoverClient(scenario.directory, "advanced-controls", platform_keyring)
     invitation = http(
@@ -216,7 +216,7 @@ def test_hard_cut_native_dsh_advanced_controls(scenario, platform_keyring):
     assert scenario.request("test-model-catalog-only-counts") == {"read": 0, "select": 0}
 
 
-def test_hard_cut_native_dsh_queue_approval_question_and_interrupt(scenario, platform_keyring):
+def test_native_dsh_queue_approval_question_and_interrupt(scenario, platform_keyring):
     """Exercise native pending work and guarded user input through the new CLI."""
     client = CutoverClient(scenario.directory, "guarded-controls", platform_keyring)
     invitation = http(
