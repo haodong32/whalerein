@@ -586,6 +586,21 @@ func (s *Service) Finish(ctx context.Context, req FinishRequest) (Object, error)
 // and closes the returned reader.
 func (s *Service) Fetch(ctx context.Context, req ObjectRequest) (FetchResult, error) {
 	object, err := s.loadObject(ctx, req, func(object store.PayloadObject) error {
+		if req.BearerToken != "" {
+			// A paired Device resolves an issued result/history object with its
+			// transport token. Unissued ciphertext never leaves the directory.
+			identity, err := s.auth.AuthenticateDeviceToken(ctx, req.BearerToken)
+			if err != nil {
+				return ErrUnauthorized
+			}
+			if identity.DeviceID == "" || identity.DeviceID != object.DeviceID {
+				return ErrForbidden
+			}
+			if object.IssuedAt == nil || object.RequestID == "" || object.ConnectionRef == "" {
+				return ErrForbidden
+			}
+			return nil
+		}
 		return s.verifyHost(ctx, auth.RelayAuthObject, req, auth.RelayFields{
 			RelayVersion:   req.RelayVersion,
 			HostID:         object.HostID,

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/whalerein/whalerein/access/internal/auth"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
 
@@ -145,6 +146,47 @@ func TestRelayFetchRequiresAnIssuedQueryObject(t *testing.T) {
 	}
 	if len(payloads.opened) != 1 {
 		t.Fatal("issued query object was not released")
+	}
+}
+
+func TestRelayDeviceFetchRequiresItsOwnIssuedObject(t *testing.T) {
+	service, authority, metadata, payloads := newTestService(t, true)
+	metadata.grant = testGrant()
+	object := testObject()
+	object.RequestID = "request-1"
+	object.MessageID = ""
+	object.ConnectionRef = "0123456789abcdef:7"
+	object.AppSession = ""
+	issuedAt := testNow.Add(-time.Second)
+	object.IssuedAt = &issuedAt
+	metadata.objects[object.ObjectID] = object
+	payloads.object = object
+
+	// A foreign Device token never reads another Device's object.
+	authority.identity = auth.Identity{DeviceID: "device-2"}
+	if _, err := service.Fetch(context.Background(), ObjectRequest{
+		ObjectID: object.ObjectID, RelayVersion: Epoch, BearerToken: "token",
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("foreign device fetch = %v", err)
+	}
+	// The owner still needs an issued query object.
+	unissued := object
+	unissued.IssuedAt = nil
+	metadata.objects[object.ObjectID] = unissued
+	authority.identity = auth.Identity{DeviceID: "device-1"}
+	if _, err := service.Fetch(context.Background(), ObjectRequest{
+		ObjectID: object.ObjectID, RelayVersion: Epoch, BearerToken: "token",
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("unissued device fetch = %v", err)
+	}
+	metadata.objects[object.ObjectID] = object
+	if _, err := service.Fetch(context.Background(), ObjectRequest{
+		ObjectID: object.ObjectID, RelayVersion: Epoch, BearerToken: "token",
+	}); err != nil {
+		t.Fatalf("issued device fetch: %v", err)
+	}
+	if len(payloads.opened) != 1 {
+		t.Fatalf("issued device object released %d times", len(payloads.opened))
 	}
 }
 
