@@ -140,6 +140,19 @@ jobs:
         with:
           ios-major: ${{ matrix.ios_major || '27' }}
 
+      - name: Boot the iPhone simulator
+        timeout-minutes: 8
+        env:
+          SIMULATOR: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          if ! xcrun simctl bootstatus "$SIMULATOR" -b ||
+             ! xcrun simctl spawn "$SIMULATOR" launchctl list >/dev/null; then
+            xcrun simctl shutdown "$SIMULATOR" || true
+            xcrun simctl bootstatus "$SIMULATOR" -b
+            xcrun simctl spawn "$SIMULATOR" launchctl list >/dev/null
+          fi
+
       - name: Run native test selection
         shell: bash
         env:
@@ -188,6 +201,7 @@ jobs:
             .data/runs/ios-ci/report.json
             .data/runs/ios-ci/report.html
             .data/runs/ios-ci/native.xcresult
+            .data/runs/ios-ci/xctest-inventory.json
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 7
