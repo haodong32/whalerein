@@ -9,7 +9,9 @@ SET enrollment_generation = e.generation
 FROM external_enrollments e
 WHERE e.host_id = g.host_id;
 
-CREATE OR REPLACE VIEW grant_authority AS
+DROP VIEW IF EXISTS grant_authority;
+
+CREATE VIEW grant_authority AS
 SELECT g.*,
     g.revoked_at IS NULL
     AND (
