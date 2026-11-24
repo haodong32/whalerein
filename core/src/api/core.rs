@@ -815,7 +815,10 @@ impl Core {
         envelope: &whalerein_proto::EventEnvelope,
     ) -> CoreResult<whalerein_proto::EventEnvelope> {
         let access = self.access_client().await?;
-        crate::access::transport::resolve_event_envelope(&access, envelope)
+        // A referenced control event must fit the local control-envelope
+        // budget; refuse a larger declaration before any fetch.
+        let max_ciphertext_bytes = self.transport_budget().envelope_bytes;
+        crate::access::transport::resolve_event_envelope(&access, envelope, max_ciphertext_bytes)
             .await
             .map_err(CoreError::from)
     }
@@ -827,7 +830,8 @@ impl Core {
         reference: &whalerein_proto::PayloadReference,
     ) -> CoreResult<Vec<u8>> {
         let access = self.access_client().await?;
-        crate::access::transport::resolve_reference(&access, reference)
+        let max_ciphertext_bytes = self.transport_budget().envelope_bytes;
+        crate::access::transport::resolve_reference(&access, reference, max_ciphertext_bytes)
             .await
             .map_err(CoreError::from)
     }

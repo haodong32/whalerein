@@ -337,6 +337,16 @@ fn invalid(detail: &'static str) -> AccessError {
     }
 }
 
+fn payload_too_large(detail: &'static str) -> AccessError {
+    AccessError {
+        kind: super::AccessErrorKind::Protocol,
+        status: None,
+        code: Some(ErrorCode::PayloadTooLarge),
+        message: detail.into(),
+        reason: String::new(),
+    }
+}
+
 /// Reject a relay envelope whose epoch is not the coordinated epoch 4.
 pub fn require_relay_epoch(version: u32) -> Result<(), AccessError> {
     if version == RELAY_EPOCH_V4 {
@@ -462,14 +472,19 @@ pub fn validate_request_state_representation(
 }
 
 /// Resolve a stored request status to its complete verified result body.
-/// `None` means the recorded outcome has no complete body.
+/// `None` means the recorded outcome has no complete body. `max_ciphertext_bytes`
+/// is the bound the request admitted to Access: a reference that declares more
+/// is refused before any fetch.
 pub async fn resolve_request_state_body(
     client: &AccessClient,
     state: &whalerein_proto::RequestState,
+    max_ciphertext_bytes: u64,
 ) -> Result<Option<Vec<u8>>, AccessError> {
     validate_request_state_representation(state)?;
     match &state.result_reference {
-        Some(reference) => Ok(Some(resolve_reference(client, reference).await?)),
+        Some(reference) => Ok(Some(
+            resolve_reference(client, reference, max_ciphertext_bytes).await?,
+        )),
         None if state.result_body.is_empty() => Ok(None),
         None => Ok(Some(state.result_body.clone())),
     }
@@ -478,10 +493,13 @@ pub async fn resolve_request_state_body(
 /// Fetch one referenced ciphertext from the Access HTTPS directory and verify
 /// the exact reserved length and SHA-256 before returning it. A truncated,
 /// longer, corrupt or substituted body is rejected: a failed fetch never
-/// becomes a completed message.
+/// becomes a completed message. A reference that declares more than
+/// `max_ciphertext_bytes` is refused before the request so a peer cannot make
+/// the client buffer an unbounded object.
 pub async fn resolve_reference(
     client: &AccessClient,
     reference: &PayloadReference,
+    max_ciphertext_bytes: u64,
 ) -> Result<Vec<u8>, AccessError> {
     if reference.object_id.len() != 32
         || !reference
@@ -493,6 +511,11 @@ pub async fn resolve_reference(
     }
     if reference.sha256.len() != 32 {
         return Err(invalid("invalid payload reference digest"));
+    }
+    if reference.ciphertext_bytes > max_ciphertext_bytes {
+        return Err(payload_too_large(
+            "referenced ciphertext exceeds the admitted transport bound",
+        ));
     }
     let bytes = client.fetch_relay_object(reference).await?;
     if bytes.len() as u64 != reference.ciphertext_bytes {
@@ -514,10 +537,13 @@ pub async fn resolve_reference(
 pub async fn resolve_result_body(
     client: &AccessClient,
     result: &HostResult,
+    max_ciphertext_bytes: u64,
 ) -> Result<Option<Vec<u8>>, AccessError> {
     validate_result_representation(result)?;
     match &result.result_reference {
-        Some(reference) => Ok(Some(resolve_reference(client, reference).await?)),
+        Some(reference) => Ok(Some(
+            resolve_reference(client, reference, max_ciphertext_bytes).await?,
+        )),
         None if result.result_body.is_empty() => Ok(None),
         None => Ok(Some(result.result_body.clone())),
     }
@@ -529,12 +555,13 @@ pub async fn resolve_result_body(
 pub async fn resolve_event_envelope(
     client: &AccessClient,
     envelope: &EventEnvelope,
+    max_ciphertext_bytes: u64,
 ) -> Result<EventEnvelope, AccessError> {
     validate_event_representation(envelope)?;
     let Some(reference) = &envelope.payload_reference else {
         return Ok(envelope.clone());
     };
-    let ciphertext = resolve_reference(client, reference).await?;
+    let ciphertext = resolve_reference(client, reference, max_ciphertext_bytes).await?;
     let mut resolved = envelope.clone();
     resolved.ciphertext = ciphertext;
     resolved.payload_reference = None;

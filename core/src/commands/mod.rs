@@ -384,7 +384,8 @@ impl CommandService {
             .access
             .wait_for_request_observed(&request, false, transport)
             .await?;
-        let state = self.resolve_state(state).await?;
+        let bound = self.admitted_result_bound(&request);
+        let state = self.resolve_state(state, bound).await?;
         let status = DomainStatus::from_proto(state.status).unwrap_or(DomainStatus::Unknown);
         let result = decrypt_response_raw(channel, &aad, &state).map_err(|error| {
             if source_sensitive
@@ -630,7 +631,8 @@ impl CommandService {
                 Some(receipt.expires_at_unix_ms),
             )
             .await?;
-        let state = self.resolve_state(state).await?;
+        let bound = self.admitted_result_bound(&request);
+        let state = self.resolve_state(state, bound).await?;
         let status = DomainStatus::from_proto(state.status).unwrap_or(DomainStatus::Unknown);
         if matches!(
             status,
@@ -1146,15 +1148,35 @@ impl CommandService {
 
     /// Resolve a stored status copy to its complete verified result body so the
     /// rest of the command path applies identical AEAD and business checks for
-    /// the inline and referenced representations.
-    async fn resolve_state(&self, state: RequestState) -> CoreResult<RequestState> {
-        let body = crate::access::transport::resolve_request_state_body(&self.access, &state)
-            .await
-            .map_err(CoreError::from)?;
+    /// the inline and referenced representations. `max_ciphertext_bytes` is
+    /// the result bound the request admitted to Access.
+    async fn resolve_state(
+        &self,
+        state: RequestState,
+        max_ciphertext_bytes: u64,
+    ) -> CoreResult<RequestState> {
+        let body = crate::access::transport::resolve_request_state_body(
+            &self.access,
+            &state,
+            max_ciphertext_bytes,
+        )
+        .await
+        .map_err(CoreError::from)?;
         let mut resolved = state;
         resolved.result_body = body.unwrap_or_default();
         resolved.result_reference = None;
         Ok(resolved)
+    }
+
+    /// The result bound this request admitted to Access. A referenced result
+    /// that declares more is refused before it is downloaded.
+    fn admitted_result_bound(&self, request: &HostRequest) -> u64 {
+        request
+            .transport
+            .as_ref()
+            .map_or(self.transport.envelope_bytes, |transport| {
+                transport.result_max_bytes
+            })
     }
 
     /// Attach this invocation's scoped MQTT receiver. The receiver subscribes
@@ -3777,5 +3799,127 @@ mod relay_command_tests {
             .is_ok();
         assert!(accepted);
         drop(notices);
+    }
+
+    /// Every response must be bounded. The reference carrier exists to deliver
+    /// content above the inline bound, but a reference may not declare more than
+    /// the result bound the request admitted to Access: the client refuses it
+    /// with `payload_too_large` before fetching, instead of sizing the directory
+    /// read from the peer-declared `ciphertext_bytes` and buffering the object
+    /// first. A Host, or anything able to publish an envelope under a valid
+    /// Device token, can no longer make the client buffer an arbitrary amount of
+    /// memory for one result or event.
+    #[tokio::test]
+    async fn a_referenced_result_above_the_admitted_bound_is_not_downloaded() {
+        use whalerein_proto::Ping;
+
+        let object_id = "e".repeat(32);
+        let oversized = vec![7u8; 2 * 1024 * 1024];
+        let served = Arc::new(Mutex::new(0usize));
+        let submitted: Arc<Mutex<Option<HostRequest>>> = Arc::new(Mutex::new(None));
+        let reference = PayloadReference {
+            object_id: object_id.clone(),
+            owner_node_id: "node-1".into(),
+            ciphertext_bytes: oversized.len() as u64,
+            sha256: sha256(&oversized).to_vec(),
+            expires_at_unix_ms: 9,
+            purpose: PayloadPurpose::Result as i32,
+        };
+        let handler_reference = reference.clone();
+        let handler_body = oversized.clone();
+        let handler_served = served.clone();
+        let handler_submitted = submitted.clone();
+        let server = MockServer::start(Arc::new(move |mock| {
+            match (mock.method.as_str(), mock.path.as_str()) {
+                ("POST", "/v1/hosts/h-1/requests") => {
+                    let request: HostRequest = serde_json::from_slice(&mock.body).unwrap();
+                    let receipt = RequestReceipt {
+                        request_id: request.request_id.clone(),
+                        status: whalerein_proto::OnlineStatus::Received as i32,
+                        command_id: request.command_id.clone(),
+                        expires_at_unix_ms: request.expires_at_unix_ms,
+                    };
+                    *handler_submitted.lock().unwrap() = Some(request);
+                    MockResponse::json(200, &receipt)
+                }
+                ("GET", path) if path.starts_with("/v1/requests/") => {
+                    let request = handler_submitted
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("submitted first");
+                    MockResponse::json(
+                        200,
+                        &RequestState {
+                            request_id: request.request_id.clone(),
+                            host_id: request.host_id.clone(),
+                            device_id: request.device_id.clone(),
+                            status: whalerein_proto::OnlineStatus::Succeeded as i32,
+                            command_id: request.command_id.clone(),
+                            result_reference: Some(handler_reference.clone()),
+                            ..Default::default()
+                        },
+                    )
+                }
+                ("GET", path) if path.starts_with("/v1/relay/objects/") => {
+                    *handler_served.lock().unwrap() += handler_body.len();
+                    MockResponse {
+                        status: 200,
+                        body: handler_body.clone(),
+                        delay_ms: 0,
+                    }
+                }
+                _ => MockResponse::empty(404),
+            }
+        }))
+        .await;
+        let service = service(&server, Arc::new(Cache::open_in_memory([8; 32]).unwrap()))
+            .with_transport_budget(TransportBudget {
+                packet_bytes: 4096,
+                packet_overhead_bytes: 512,
+                envelope_bytes: 16 * 1024,
+                reserved_bytes: 16 * 1024,
+                bulk_concurrency: 1,
+                transfer_timeout_ms: 2_000,
+                profile: crate::access::transport::TransportProfile::Default,
+            });
+        let channel = SecureChannel::from_handshake(&[9u8; 32], "p", "chan", "h-1", "d-1").unwrap();
+        let error = service
+            .query(
+                "h-1",
+                "d-1",
+                &channel,
+                RequestPayload {
+                    payload: Some(whalerein_proto::request_payload::Payload::Ping(Ping {
+                        client_time_unix_ms: 1,
+                    })),
+                },
+            )
+            .await
+            .expect_err("a result above the admitted bound must be refused");
+        let bound = submitted
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("submitted request")
+            .transport
+            .expect("transport metadata")
+            .result_max_bytes;
+        assert!(
+            reference.ciphertext_bytes > bound,
+            "the fixture reference must exceed the admitted result bound"
+        );
+        let downloaded = *served.lock().unwrap() as u64;
+        assert!(
+            downloaded <= bound,
+            "the client downloaded {downloaded} bytes for one result although it admitted at most {bound} \
+             (error was {}, so the whole object was fetched before any bound applied)",
+            error.code()
+        );
+        assert_eq!(
+            error.code(),
+            "payload_too_large",
+            "the client must refuse a referenced result above its admitted bound"
+        );
     }
 }

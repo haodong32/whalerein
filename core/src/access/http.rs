@@ -1756,7 +1756,7 @@ mod relay_tests {
             }))
             .await;
             let client = AccessClient::new(server.url(), Some("device-token".into())).unwrap();
-            let resolved = resolve_reference(&client, &reference(b"payload")).await;
+            let resolved = resolve_reference(&client, &reference(b"payload"), 1024).await;
             assert_eq!(resolved.is_ok(), expected, "{body:?}");
         }
 
@@ -1769,7 +1769,7 @@ mod relay_tests {
         }))
         .await;
         let client = AccessClient::new(server.url(), Some("device-token".into())).unwrap();
-        assert!(resolve_reference(&client, &reference(b"payload"))
+        assert!(resolve_reference(&client, &reference(b"payload"), 1024)
             .await
             .is_err());
     }
@@ -1783,7 +1783,7 @@ mod relay_tests {
         }))
         .await;
         let client = AccessClient::new(server.url(), Some("device-token".into())).unwrap();
-        let error = resolve_reference(&client, &reference(b"payload"))
+        let error = resolve_reference(&client, &reference(b"payload"), 1024)
             .await
             .unwrap_err();
         assert_eq!(error.code, Some(ErrorCode::Expired));

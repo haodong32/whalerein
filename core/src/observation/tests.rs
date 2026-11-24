@@ -1419,3 +1419,138 @@ async fn a_transient_lease_failure_keeps_the_stream_open() {
     observation.close().await;
     peer.abort();
 }
+
+// ---------------------------------------------------------------------------
+// Approvals reliability and lease-refusal classification (CORE-1 / CORE-2)
+// ---------------------------------------------------------------------------
+
+fn pending_approval(approval_id: &str) -> whalerein_proto::Approval {
+    whalerein_proto::Approval {
+        approval_id: approval_id.into(),
+        session_id: "session-1".into(),
+        tool_name: "shell".into(),
+        call_id: "call-1".into(),
+        reason: "run a command".into(),
+        digest: vec![7u8; 32],
+        version: 1,
+        expires_at_unix_ms: 9_000_000_000_000,
+        state: whalerein_proto::ApprovalState::Pending as i32,
+        decision: whalerein_proto::ApprovalDecision::Unspecified as i32,
+    }
+}
+
+/// A transient failure of the per-state approvals query must not present an
+/// empty pending set for a session whose approval the viewer already saw. The
+/// state-event path keeps the last emitted approvals and retries the bounded
+/// read on the next lease tick instead of publishing an empty list for a
+/// revision the lease marker has already passed.
+#[tokio::test]
+async fn a_transient_approvals_read_failure_keeps_visible_pending_approvals() {
+    let (_dir, core, access, listener) = setup(false).await;
+    access.host.lock().unwrap().approvals = vec![pending_approval("approval-1")];
+    let key = core.session_key("session-1").await.unwrap();
+    let peer_core = core.clone();
+    let (go_tx, go_rx) = tokio::sync::oneshot::channel();
+    let mut go_tx = Some(go_tx);
+    let peer = tokio::spawn(async move {
+        let mut stream = subscribe(&listener).await;
+        let _ = go_rx.await;
+        // A normal transition event with a newer revision: Core reads the
+        // pending approvals through ApprovalList when it applies it.
+        publish_control(
+            &mut stream,
+            state_event(&peer_core, "session-1", "watch-1", 2),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let mut baseline = None;
+    for _ in 0..10 {
+        if let SessionEventPayload::Conversation(ViewUpdate::State(state)) =
+            next_event(&mut observation).await.payload
+        {
+            baseline = Some(state.approvals.len());
+            break;
+        }
+    }
+    assert_eq!(
+        baseline,
+        Some(1),
+        "the watch baseline exposes the pending approval read from the Host"
+    );
+    // The next bounded approvals read fails transiently (a network blip), while
+    // the Host delivers a newer state revision.
+    access.host.lock().unwrap().query_error_once = Some(whalerein_proto::ErrorCode::Unavailable);
+    let _ = go_tx.take().expect("go sender").send(());
+    let mut delivered = None;
+    for _ in 0..10 {
+        if let SessionEventPayload::Conversation(ViewUpdate::State(state)) =
+            next_event(&mut observation).await.payload
+        {
+            if state.revision == 2 {
+                delivered = Some(state.approvals.len());
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        delivered,
+        Some(1),
+        "a failed approvals read must not erase the pending approval the viewer must answer"
+    );
+    observation.close().await;
+    peer.abort();
+}
+
+/// WIRE.md says a deterministic refusal ends the observation with its own code
+/// instead of reconnecting. A Host that does not know the renewal payload
+/// rejects it with `invalid_argument` ("RequestPayload carries no known payload
+/// variant"), which is a `fix_input` code and therefore terminal. An earlier
+/// classifier matched the non-existent code string `invalid_input`, so this
+/// refusal was retried until the caller's deadline hid the real cause.
+#[tokio::test]
+async fn a_malformed_lease_refusal_ends_the_watch_with_its_real_code() {
+    let (_dir, core, access, listener) = setup(false).await;
+    access.host.lock().unwrap().refresh_error = Some(whalerein_proto::ErrorCode::InvalidArgument);
+    let key = core.session_key("session-1").await.unwrap();
+    let peer = tokio::spawn(async move {
+        let _stream = subscribe(&listener).await;
+        // Hold the subscription so the retry loop stays on a live connection.
+        tokio::time::sleep(Duration::from_secs(25)).await;
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::conversation(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    // The first lease tick fires five seconds after attach, so three ticks fit
+    // in this window when the refusal is (wrongly) treated as transient.
+    let ended = tokio::time::timeout(Duration::from_secs(12), async {
+        while observation.next_event().await.is_some() {}
+    })
+    .await
+    .is_ok();
+    assert!(
+        ended,
+        "a deterministic invalid_argument refusal must end the observation with its real code"
+    );
+    assert_eq!(
+        observation
+            .take_terminal_error()
+            .expect("the deterministic cause is available")
+            .code(),
+        "invalid_argument"
+    );
+    peer.abort();
+}
