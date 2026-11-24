@@ -823,19 +823,6 @@ impl Core {
             .map_err(CoreError::from)
     }
 
-    /// Fetch one referenced ciphertext with the current Device bearer.
-    #[allow(dead_code)]
-    pub(crate) async fn fetch_relay_payload(
-        &self,
-        reference: &whalerein_proto::PayloadReference,
-    ) -> CoreResult<Vec<u8>> {
-        let access = self.access_client().await?;
-        let max_ciphertext_bytes = self.transport_budget().envelope_bytes;
-        crate::access::transport::resolve_reference(&access, reference, max_ciphertext_bytes)
-            .await
-            .map_err(CoreError::from)
-    }
-
     fn current_config(&self) -> Option<PersistedConfig> {
         self.config.read().expect("config lock").clone()
     }
