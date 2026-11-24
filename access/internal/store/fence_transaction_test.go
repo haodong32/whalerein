@@ -154,7 +154,7 @@ func (tx *revokeGrantTx) Exec(_ context.Context, sql string, args ...any) (pgcon
 			tx.t.Fatal("wrong device scope")
 		}
 	case "grant":
-		if len(args) != 3 || args[0] != "host" || args[1] != "device" {
+		if len(args) != 4 || args[0] != "host" || args[1] != "device" {
 			tx.t.Fatal("wrong grant scope")
 		}
 	}
@@ -375,7 +375,7 @@ func (tx *writePairingTx) Exec(_ context.Context, sql string, args ...any) (pgco
 			tx.t.Fatal("wrong credential scope")
 		}
 	case "grant":
-		if len(args) != 3 || args[0] != "host" || args[1] != "device" {
+		if len(args) != 4 || args[0] != "host" || args[1] != "device" {
 			tx.t.Fatal("wrong grant scope")
 		}
 	}
@@ -407,7 +407,7 @@ func TestWritePairedDeviceFailsClosedWithoutChangingOtherHosts(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &writePairingTx{t: t, fail: tc.fail, zero: tc.zero}
-			err := writePairedDevice(context.Background(), tx, "host", "device", "fingerprint", []byte{1}, time.Time{})
+			err := writePairedDevice(context.Background(), tx, "host", "device", "fingerprint", []byte{1}, 0, time.Time{})
 			if !errors.Is(err, tc.want) || !reflect.DeepEqual(tx.steps, tc.steps) {
 				t.Fatalf("error=%v steps=%v", err, tx.steps)
 			}

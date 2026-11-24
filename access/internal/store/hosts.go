@@ -252,7 +252,7 @@ func (s *Store) CreatePairedDevice(ctx context.Context, hostID, deviceID, public
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := writePairedDevice(ctx, tx, hostID, deviceID, publicKeyFingerprint, authHash, at); err != nil {
+	if err := writePairedDevice(ctx, tx, hostID, deviceID, publicKeyFingerprint, authHash, 0, at); err != nil {
 		return err
 	}
 
@@ -422,7 +422,7 @@ func (s *Store) CountActiveGrants(ctx context.Context, deviceID string) (int, er
 }
 
 // writePairedDevice never rebinds an existing device ID to another public key.
-func writePairedDevice(ctx context.Context, tx pgx.Tx, hostID, deviceID, publicKeyFingerprint string, authHash []byte, at time.Time) error {
+func writePairedDevice(ctx context.Context, tx pgx.Tx, hostID, deviceID, publicKeyFingerprint string, authHash []byte, enrollmentGeneration int64, at time.Time) error {
 	if command, err := tx.Exec(ctx, `
 		INSERT INTO devices (device_id, public_key_fingerprint, created_at, updated_at)
         VALUES ($1, $2, $3, $3)
@@ -453,11 +453,13 @@ func writePairedDevice(ctx context.Context, tx pgx.Tx, hostID, deviceID, publicK
 	}
 
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO grants (host_id, device_id, created_at, updated_at, revoked_at, replayed_at, grant_generation)
-		VALUES ($1, $2, $3, $3, NULL, NULL, 1)
+		INSERT INTO grants (host_id, device_id, created_at, updated_at, revoked_at, replayed_at, grant_generation, enrollment_generation)
+		VALUES ($1, $2, $3, $3, NULL, NULL, 1, $4)
 		ON CONFLICT (host_id, device_id) DO UPDATE
-		SET updated_at = EXCLUDED.updated_at, revoked_at = NULL, replayed_at = NULL, grant_generation = grants.grant_generation + 1`,
-		hostID, deviceID, at); err != nil {
+		SET updated_at = EXCLUDED.updated_at, revoked_at = NULL, replayed_at = NULL,
+		    grant_generation = grants.grant_generation + 1,
+		    enrollment_generation = EXCLUDED.enrollment_generation`,
+		hostID, deviceID, at, enrollmentGeneration); err != nil {
 		return fmt.Errorf("create grant: %w", err)
 	}
 
@@ -550,7 +552,11 @@ func commitPairing(ctx context.Context, begin func(context.Context) (pgx.Tx, err
 	if command.RowsAffected() != 1 {
 		return false, nil
 	}
-	if err := writePairedDevice(ctx, tx, hostID, deviceID, fingerprint, authHash, at); err != nil {
+	enrollmentGeneration := int64(0)
+	if cloud {
+		enrollmentGeneration = revisionGeneration(operation.CloudEnrollmentRevision)
+	}
+	if err := writePairedDevice(ctx, tx, hostID, deviceID, fingerprint, authHash, enrollmentGeneration, at); err != nil {
 		return false, err
 	}
 	var committedBody []byte
