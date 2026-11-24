@@ -10,7 +10,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { MqttAccess } from '../../../../host/runtime/src/access/mqtt.js'
+import { MqttAccess, replyProperties } from '../../../../host/runtime/src/access/mqtt.js'
 import { publishPacketBytes } from '../../../../host/runtime/src/access/packet.js'
 import { codec } from '../../../../host/runtime/src/protocol.js'
 import {
@@ -39,6 +39,11 @@ function envelope(hostId, requestId, body) {
   })
 }
 
+// Epoch-5 replies carry their Message Expiry as an MQTT property outside the
+// protobuf payload, so the packet boundary must include it exactly like the
+// production publisher (default relay TTL, no caller Correlation Data).
+const REPLY_PROPERTIES_BYTES = replyProperties({ expirySeconds: 300 }).propertiesBytes
+
 // The exact packet size never needs the topic's message body to be published:
 // publishPacketBytes only needs the payload length. Use the real codec shape.
 function packetSize(topic, bodyLength, hostId) {
@@ -53,7 +58,7 @@ function packetSize(topic, bodyLength, hostId) {
     protocol_version: 1,
     relay_version: 5,
   }).length
-  return publishPacketBytes(topic, size)
+  return publishPacketBytes(topic, size, { propertiesBytes: REPLY_PROPERTIES_BYTES })
 }
 
 function maxBodyForPacket(topic, limit, hostId) {
