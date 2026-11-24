@@ -110,7 +110,7 @@ func TestBrokerPolicyBuildsDeviceGrantsAndHostPreviewScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if device.Kind != policy.KindDevice || device.DeviceID != "d1" || device.Will != "whalerein/v1/presence/device/d1" {
+	if device.Kind != policy.KindDevice || device.DeviceID != "d1" || device.Will != "" {
 		t.Fatalf("device policy = %+v", device)
 	}
 	if len(device.Entries) != 11 { // ten topic entries for h1 plus the will.

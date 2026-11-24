@@ -10,9 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use prost::Message;
-use rumqttc::v5::mqttbytes::v5::{
-    LastWill, LastWillProperties, Packet, PublishProperties, SubscribeReasonCode,
-};
+use rumqttc::v5::mqttbytes::v5::{Packet, PublishProperties, SubscribeReasonCode};
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::{AsyncClient, ConnectionError, Event, MqttOptions, StateError};
 use rumqttc::{TlsConfiguration, Transport};
@@ -27,10 +25,9 @@ use super::AccessError;
 use crate::diagnostics::journal::{DiagnosticKind, Diagnostics};
 
 pub const EVENT_TOPIC_PREFIX: &str = "whalerein/v1/h";
-pub const PRESENCE_TOPIC_PREFIX: &str = "whalerein/v1/presence/device";
 pub const DEFAULT_MQTT_PORT: u16 = 8883;
-/// A hard-disconnected device must be observable promptly. Access treats the
-/// broker last will as a fallback for missing `$SYS` lifecycle events.
+/// A hard-disconnected device must be observable promptly through the Broker
+/// lifecycle notifications; epoch 5 has no Device Will fallback.
 pub const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(10);
 pub const BACKOFF_BASE: Duration = Duration::from_millis(500);
 pub const BACKOFF_CAP: Duration = Duration::from_secs(30);
@@ -157,11 +154,8 @@ impl MqttSettings {
         let mut options = MqttOptions::new(client_id, self.host.clone(), self.port);
         let username =
             session_id.map_or_else(|| device_username(device_id), |id| format!("session:{id}"));
-        // Only the device-scoped connection owns the shared presence will. A
-        // regional cloud-session identity never publishes it.
-        if session_id.is_none() {
-            options.set_last_will(device_last_will(device_id));
-        }
+        // Epoch 5 removes the presence Will. Access derives disconnect from
+        // the Broker-stamped lifecycle notification instead.
         options
             .set_credentials(username, token)
             .set_keep_alive(self.keep_alive)
@@ -220,47 +214,6 @@ pub fn device_reply_topic(host_id: &str, device_id: &str) -> String {
 
 /// Reserved MQTT 5 user property carrying the Broker-stamped target connection.
 pub const TARGET_PROPERTY: &str = "whalerein-target";
-
-/// Device-scoped last-will topic. It carries no host id because one device may
-/// be authorized by several hosts; Access fans the event out to each grant.
-pub fn device_presence_topic(device_id: &str) -> String {
-    format!("{PRESENCE_TOPIC_PREFIX}/{device_id}")
-}
-
-#[derive(serde::Serialize)]
-struct DeviceWill<'a> {
-    event: &'static str,
-    device_id: &'a str,
-}
-
-/// Compact, content-free last-will payload. It contains only the fixed event
-/// name and the device identity; never a token, host id or message content.
-fn device_will_payload(device_id: &str) -> Vec<u8> {
-    let will = DeviceWill {
-        event: "device_offline",
-        device_id,
-    };
-    serde_json::to_vec(&will).unwrap_or_else(|_| Vec::new())
-}
-
-/// Non-retained QoS 1 last will. A clean DISCONNECT does not publish it.
-fn device_last_will(device_id: &str) -> LastWill {
-    LastWill::new(
-        device_presence_topic(device_id),
-        device_will_payload(device_id),
-        QoS::AtLeastOnce,
-        false,
-        Some(LastWillProperties {
-            delay_interval: Some(3),
-            payload_format_indicator: None,
-            message_expiry_interval: None,
-            content_type: None,
-            response_topic: None,
-            correlation_data: None,
-            user_properties: Vec::new(),
-        }),
-    )
-}
 
 /// Exponential backoff with a bounded jitter fraction.
 pub fn backoff_delay(attempt: u32, jitter_fraction: f64) -> Duration {
@@ -839,10 +792,6 @@ mod tests {
             device_live_topic("h-1", "d-1"),
             "whalerein/v1/h/h-1/d/d-1/live"
         );
-        assert_eq!(
-            device_presence_topic("d-1"),
-            "whalerein/v1/presence/device/d-1"
-        );
         assert_eq!(device_client_id("d-1"), "whalerein-device-d-1");
         assert_eq!(device_username("d-1"), "device:d-1");
     }
@@ -924,25 +873,12 @@ mod tests {
     }
 
     #[test]
-    fn configures_a_short_keepalive_and_content_free_device_scoped_will() {
+    fn configures_a_short_keepalive_and_no_device_will() {
         let settings = MqttSettings::parse("mqtt://broker.test:1884").unwrap();
         assert_eq!(DEFAULT_KEEP_ALIVE, Duration::from_secs(10));
         let options = settings.options("d-1", "secret-token").unwrap();
         assert_eq!(options.keep_alive(), Duration::from_secs(10));
-
-        let will = options.last_will().expect("last will is configured");
-        assert_eq!(
-            will.topic.as_ref(),
-            b"whalerein/v1/presence/device/d-1".as_slice()
-        );
-        assert_eq!(will.qos, QoS::AtLeastOnce);
-        assert!(!will.retain);
-
-        let payload = String::from_utf8(will.message.to_vec()).unwrap();
-        assert_eq!(payload, r#"{"event":"device_offline","device_id":"d-1"}"#);
-        assert!(!payload.contains("secret-token"));
-        assert!(!payload.contains("h-1"));
-        assert!(!payload.contains("password"));
+        assert!(options.last_will().is_none(), "epoch 5 has no Device Will");
     }
 
     #[test]

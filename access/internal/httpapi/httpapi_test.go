@@ -589,7 +589,6 @@ func TestInternalBrokerConnectReturnsPolicyTextAndDeniesBadCredentials(t *testin
 	f.auth.brokerIdentity = auth.BrokerIdentity{Kind: auth.KindDevice, DeviceID: "d1"}
 	device := form(url.Values{
 		"clientid": {"whalerein-device-d1"}, "username": {"device:d1"}, "password": {"device-token"},
-		"will": {"whalerein/v1/presence/device/d1"},
 	})
 	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/connect", device, map[string]string{InternalHeader: "internal-token"})
 	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
@@ -599,8 +598,17 @@ func TestInternalBrokerConnectReturnsPolicyTextAndDeniesBadCredentials(t *testin
 	if recorder.Body.String() != want {
 		t.Fatalf("policy body = %q, want %q", recorder.Body.String(), want)
 	}
-	if !strings.Contains(recorder.Body.String(), "kind device") || !strings.Contains(recorder.Body.String(), "will whalerein/v1/presence/device/d1") {
+	if !strings.Contains(recorder.Body.String(), "kind device") || strings.Contains(recorder.Body.String(), "will ") {
 		t.Fatalf("policy body = %q", recorder.Body.String())
+	}
+	// A Will is not part of the epoch-5 cohort.
+	withWill := form(url.Values{
+		"clientid": {"whalerein-device-d1"}, "username": {"device:d1"}, "password": {"device-token"},
+		"will": {"whalerein/v1/presence/device/d1"},
+	})
+	recorder = doRequest(t, f.server.InternalHandler(), http.MethodPost, "/internal/broker/connect", withWill, map[string]string{InternalHeader: "internal-token"})
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "deny will_not_authorized") {
+		t.Fatalf("will connect = %d %q", recorder.Code, recorder.Body.String())
 	}
 
 	// Bad credentials produce a versioned deny body, not an HTTP error.

@@ -92,7 +92,8 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 			}
 		}
 	case KindDevice:
-		connection.Will = presenceRoot + deviceID
+		// Epoch 5 derives presence from Broker lifecycle notifications; no
+		// Device Will is published or ingested.
 		seen := map[string]struct{}{}
 		for _, grant := range grants {
 			if !grant.Active || grant.HostID == "" {
@@ -146,13 +147,10 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 
 // WillAllowed reports whether a CONNECT Will topic is inside the policy.
 func (c Connection) WillAllowed(topic string) bool {
-	if topic == "" {
-		return true
-	}
-	if c.Kind != KindDevice || c.Will == "" || topic != c.Will {
-		return false
-	}
-	return true
+	// The epoch-5 cohort has no Device Will. A CONNECT without one is allowed;
+	// a CONNECT that asks for one is rejected rather than accepted as a hidden
+	// presence fallback.
+	return topic == ""
 }
 
 // Format renders the versioned broker policy response.

@@ -57,7 +57,7 @@ func TestBuildDevicePolicyUsesOnlyActiveGrantsAndSetsTheWill(t *testing.T) {
 		{HostID: "", DeviceID: "d1", Active: true, GrantGeneration: 3},
 		{HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 4},
 	})
-	if connection.Kind != KindDevice || connection.DeviceID != "d1" || connection.Will != "whalerein/v1/presence/device/d1" || connection.Revision != 1 {
+	if connection.Kind != KindDevice || connection.DeviceID != "d1" || connection.Will != "" || connection.Revision != 1 {
 		t.Fatalf("connection = %+v", connection)
 	}
 	want := []Entry{
@@ -144,7 +144,7 @@ func TestFormatRendersTheVersionedHostAndDevicePolicy(t *testing.T) {
 			connection: Build(KindDevice, "", "d1", []store.AdmissionGrant{
 				{HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 1},
 			}),
-			want: "whalerein/1\nok\nkind device\ndevice d1\nrevision 1\nready 1\nwill whalerein/v1/presence/device/d1\n" +
+			want: "whalerein/1\nok\nkind device\ndevice d1\nrevision 1\nready 1\n" +
 				"acl read 1 h1 whalerein/v1/h/h1/d/d1/event\n" +
 				"acl read 1 h1 whalerein/v1/h/h1/d/d1/live\n" +
 				"acl read 1 h1 whalerein/v1/h/h1/d/d1/notice\n" +
@@ -172,22 +172,17 @@ func TestFormatRendersTheVersionedHostAndDevicePolicy(t *testing.T) {
 	}
 }
 
-func TestWillAllowedOnlyAcceptsTheDevicesOwnWill(t *testing.T) {
-	device := Build(KindDevice, "", "d1", nil)
-	if !device.WillAllowed("") {
-		t.Fatal("empty will rejected")
+func TestWillAllowedRejectsEveryWill(t *testing.T) {
+	connection := Build(KindDevice, "", "d1", []store.AdmissionGrant{
+		{HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 1},
+	})
+	if !connection.WillAllowed("") {
+		t.Fatal("a CONNECT without a Will must be allowed")
 	}
-	if !device.WillAllowed("whalerein/v1/presence/device/d1") {
-		t.Fatal("own will rejected")
-	}
-	for _, topic := range []string{"whalerein/v1/presence/device/d2", "whalerein/v1/presence/device/+", "other"} {
-		if device.WillAllowed(topic) {
-			t.Fatalf("foreign will %q accepted", topic)
+	for _, topic := range []string{"whalerein/v1/presence/device/d1", "whalerein/v1/presence/device/d2"} {
+		if connection.WillAllowed(topic) {
+			t.Fatalf("epoch-5 Device policy accepted a Will: %q", topic)
 		}
-	}
-	host := Build(KindHost, "h1", "", nil)
-	if !host.WillAllowed("") || host.WillAllowed("whalerein/v1/presence/device/d1") {
-		t.Fatal("host will policy")
 	}
 }
 
