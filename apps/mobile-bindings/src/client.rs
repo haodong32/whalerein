@@ -838,7 +838,27 @@ impl MobileCore {
                 }
                 result
             }
-            Err(RecvTimeoutError::Timeout) => Err(MobileError::timeout()),
+            // No prompt reached the caller, so this attempt must not keep
+            // blocking a retry: fence its generation and abort the Core task.
+            // A prompt that races this timeout is rejected, never delivered,
+            // and the abandoned attempt reports no pairing event.
+            Err(RecvTimeoutError::Timeout) => {
+                let abort = {
+                    let mut state = self.lock_pairing();
+                    if state.generation == generation {
+                        self.next_pairing_generation();
+                        state.running = false;
+                        state.decision = None;
+                        state.abort.take()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(abort) = abort {
+                    abort.abort();
+                }
+                Err(MobileError::timeout())
+            }
         }
     }
 

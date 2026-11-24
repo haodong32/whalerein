@@ -51,7 +51,7 @@ fn watch_fatal(error: &CoreError) -> bool {
     // A deterministic failure (an oversized or malformed response) is
     // guaranteed to repeat: rebuilding the connection cannot change the
     // outcome, and looping would present it as a network problem.
-    if matches!(error.code(), "payload_too_large" | "invalid_input") {
+    if matches!(error.code(), "payload_too_large" | "invalid_argument") {
         return true;
     }
     if matches!(
@@ -742,6 +742,10 @@ async fn run_connection(
         .as_ref()
         .map(|state| state.projection_id.clone())
         .unwrap_or_default();
+    // The last approvals delivered to the viewer. A bounded read that fails
+    // transiently must not publish an empty list, so the cache survives until
+    // a later read succeeds.
+    let mut approvals = ApprovalCache::default();
     if interests.conversation {
         let initial = initial.as_ref().expect("conversation baseline");
         if projection.is_empty() || projection.len() > 128 {
@@ -775,9 +779,9 @@ async fn run_connection(
         // through their own bounded query. A failed read must not erase the
         // pending approvals a later event or lease tick will restore, so the
         // baseline is emitted only with what Core actually read.
-        let approvals = fetch_approvals(core, key).await.unwrap_or_default();
+        approvals.items = fetch_approvals(core, key).await.unwrap_or_default();
         let mut baseline: crate::conversation::SessionState = initial.clone().into();
-        baseline.approvals = approvals;
+        baseline.approvals = approvals.items.clone();
         if sink.failed || !sink.emit(&ViewUpdate::State(baseline)).await {
             pump.finish().await;
             return Ok(End::Done);
@@ -801,6 +805,7 @@ async fn run_connection(
         state_revision,
         projection,
         conversation,
+        approvals,
         control_rx,
         live_rx,
         events,
@@ -818,6 +823,15 @@ async fn run_connection(
     .await
 }
 
+/// The approvals last delivered to the viewer, kept so a transiently failed
+/// bounded read cannot erase a pending approval. `stale` asks the next lease
+/// tick to retry the read that failed.
+#[derive(Debug, Default)]
+struct ApprovalCache {
+    items: Vec<crate::conversation::Approval>,
+    stale: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn conversation_loop(
     core: &Core,
@@ -832,6 +846,7 @@ async fn conversation_loop(
     initial_revision: u64,
     mut projection: String,
     conversation: &mut Conversation,
+    mut approvals: ApprovalCache,
     mut control_rx: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
     mut live_rx: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
     events: &mpsc::Sender<SessionEvent>,
@@ -905,6 +920,7 @@ async fn conversation_loop(
                     &mut state_revision,
                     &mut projection,
                     conversation,
+                    &mut approvals,
                     events,
                     questions,
                     sync.as_ref(),
@@ -945,6 +961,7 @@ async fn conversation_loop(
                     &mut state_revision,
                     &mut projection,
                     conversation,
+                    &mut approvals,
                     events,
                     questions,
                     sync.as_ref(),
@@ -1022,12 +1039,17 @@ async fn conversation_loop(
                     pump.finish().await;
                     return Ok(End::Reconnect);
                 }
-                if lease.revision > state_revision {
-                    // A newer revision without a delivered state event means a
-                    // hint was lost. Rebuild the same bounded state the event
-                    // would have carried: markers from the lease and approvals
-                    // from their own paged query.
-                    if let Some(approvals) = fetch_approvals(core, key).await {
+                // A newer revision without a delivered state event means a
+                // hint was lost; an approvals read left stale by an earlier
+                // state event is retried here for the same revision. Rebuild
+                // the same bounded state the event would have carried: markers
+                // from the lease and approvals from their own paged query.
+                let rebuild = lease.revision > state_revision
+                    || (approvals.stale && lease.revision >= state_revision);
+                if rebuild {
+                    if let Some(fresh) = fetch_approvals(core, key).await {
+                        approvals.items = fresh;
+                        approvals.stale = false;
                         state_revision = lease.revision;
                         let state = crate::conversation::SessionState {
                             session: Some(wire_key.clone().into()),
@@ -1037,7 +1059,7 @@ async fn conversation_loop(
                             projection_id: lease.projection_id.clone(),
                             run_phase: crate::conversation::RunPhase::try_from(lease.run_phase)
                                 .unwrap_or_default(),
-                            approvals,
+                            approvals: approvals.items.clone(),
                         };
                         if !send_event(
                             events,
@@ -1153,8 +1175,13 @@ async fn renew_watch_lease(core: &Core, key: &SessionKey, watch_id: &str) -> Lea
                     LeaseRenewal::Terminal(CoreError::AuthorityClosed("unauthorized".into()))
                 }
                 // Retrying a deterministic refusal with a new connection
-                // cannot succeed and would mask the real cause.
-                "payload_too_large" | "invalid_input" => LeaseRenewal::Terminal(core_error),
+                // cannot succeed and would mask the real cause. `fix_input`
+                // and `upgrade` codes are terminal for the current attempt,
+                // exactly as WIRE.md classifies them.
+                "payload_too_large" | "invalid_argument" => LeaseRenewal::Terminal(core_error),
+                "unsupported_capability" | "protocol_version_incompatible" => {
+                    LeaseRenewal::Terminal(core_error)
+                }
                 _ => LeaseRenewal::Retry,
             };
         }
@@ -1208,6 +1235,7 @@ async fn handle_envelope(
     state_revision: &mut u64,
     projection: &mut String,
     conversation: &mut Conversation,
+    approvals: &mut ApprovalCache,
     events: &mpsc::Sender<SessionEvent>,
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
     sync: Option<&crate::sync::SyncService>,
@@ -1252,6 +1280,7 @@ async fn handle_envelope(
         state_revision,
         projection,
         conversation,
+        approvals,
         events,
         questions,
         sync,
@@ -1272,6 +1301,7 @@ async fn handle_update(
     state_revision: &mut u64,
     projection: &mut String,
     conversation: &mut Conversation,
+    approvals: &mut ApprovalCache,
     events: &mpsc::Sender<SessionEvent>,
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
     sync: Option<&crate::sync::SyncService>,
@@ -1396,9 +1426,18 @@ async fn handle_update(
                 *state_revision = state.revision;
                 // A state event carries transition markers; approvals are
                 // merged from their bounded query so they stay current without
-                // riding the event.
+                // riding the event. A transiently failed read keeps the last
+                // emitted approvals and marks them stale so the next lease
+                // tick retries instead of visibly erasing a pending approval.
                 let mut next: crate::conversation::SessionState = state.into();
-                next.approvals = fetch_approvals(core, key).await.unwrap_or_default();
+                match fetch_approvals(core, key).await {
+                    Some(fresh) => {
+                        approvals.items = fresh;
+                        approvals.stale = false;
+                    }
+                    None => approvals.stale = true,
+                }
+                next.approvals = approvals.items.clone();
                 if !send_event(
                     events,
                     key,

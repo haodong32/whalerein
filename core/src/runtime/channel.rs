@@ -347,9 +347,15 @@ async fn send_handshake(
     let state = access.wait_for_request(&request, false).await?;
     match OnlineStatus::from_proto(state.status) {
         Some(OnlineStatus::Succeeded) => {
-            let body = crate::access::transport::resolve_request_state_body(access, &state)
-                .await
-                .map_err(CoreError::from)?;
+            // A handshake result is one control envelope; its reference may not
+            // declare more than the local envelope budget.
+            let body = crate::access::transport::resolve_request_state_body(
+                access,
+                &state,
+                access.transport_budget().envelope_bytes,
+            )
+            .await
+            .map_err(CoreError::from)?;
             Ok(body.unwrap_or_default())
         }
         Some(OnlineStatus::HostOffline) => Err(CoreError::HostOffline),

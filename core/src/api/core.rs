@@ -815,19 +815,10 @@ impl Core {
         envelope: &whalerein_proto::EventEnvelope,
     ) -> CoreResult<whalerein_proto::EventEnvelope> {
         let access = self.access_client().await?;
-        crate::access::transport::resolve_event_envelope(&access, envelope)
-            .await
-            .map_err(CoreError::from)
-    }
-
-    /// Fetch one referenced ciphertext with the current Device bearer.
-    #[allow(dead_code)]
-    pub(crate) async fn fetch_relay_payload(
-        &self,
-        reference: &whalerein_proto::PayloadReference,
-    ) -> CoreResult<Vec<u8>> {
-        let access = self.access_client().await?;
-        crate::access::transport::resolve_reference(&access, reference)
+        // A referenced control event must fit the local control-envelope
+        // budget; refuse a larger declaration before any fetch.
+        let max_ciphertext_bytes = self.transport_budget().envelope_bytes;
+        crate::access::transport::resolve_event_envelope(&access, envelope, max_ciphertext_bytes)
             .await
             .map_err(CoreError::from)
     }

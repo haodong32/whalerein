@@ -987,7 +987,7 @@ moved history head repairs the transcript through paged reads; a newer revision
 rebuilds state from markers plus the approvals query. A lease answer never
 carries content, so a renewal cannot fail for size reasons and be mistaken for a
 connection problem. Deterministic refusals (`payload_too_large`,
-`invalid_input`) end the observation with their own code instead of reconnecting;
+`invalid_argument`) end the observation with their own code instead of reconnecting;
 transient ones leave the stream untouched until the next tick. Unwatch is best
 effort; channel cleanup/lease expiry bounds abandoned resources. Current Core
 admits one active watch per instance so device MQTT client identities cannot

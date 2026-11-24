@@ -290,8 +290,9 @@ Semantics:
 - `startWatch` replaces an earlier watch; stale updates are discarded.
   `stopWatch` aborts the Rust task and emits `watchEnded`.
 - `pairingStart` waits up to 20 s for Core's Noise-verified prompt and returns
-  it (also queued as `pairingPrompt`). A timeout is typed; the task continues
-  and can still deliver `pairingPrompt`/`pairingFinished`.
+  it (also queued as `pairingPrompt`). A timeout is typed and aborts that
+  attempt, so an immediate retry starts a fresh one; a prompt that races the
+  timeout is rejected, never delivered.
 - `revoke` blocks until Core confirms revocation, then stops the watch.
   `forgetDevice` also stops the watch; Core requires the profile to be revoked
   (or unpaired) first, so a paired unrevoked profile returns `conflict`.

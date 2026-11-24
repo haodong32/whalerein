@@ -59,7 +59,14 @@ func (s *Service) hostDenial(ctx context.Context, hostID string) error {
 	}
 	enrollment, err := reader.Enrollment(ctx, hostID)
 	if errors.Is(err, store.ErrNotFound) {
-		return &AuthorityDenial{Reason: ReasonHostRemoved, StatusCode: 403}
+		if s.cfg.RequireHostEnrollment {
+			// External mode requires an enrollment row, so its absence means
+			// the Host was removed from the account service.
+			return &AuthorityDenial{Reason: ReasonHostRemoved, StatusCode: 403}
+		}
+		// Standalone never writes external_enrollments rows, so an absent row
+		// says nothing about the Host; the revoked grant is the actual cause.
+		return &AuthorityDenial{Reason: ReasonGrantRevoked, StatusCode: 403}
 	}
 	if err != nil {
 		return &AuthorityDenial{Reason: ReasonAuthorityUnavailable, StatusCode: 503, Cause: err}

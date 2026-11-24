@@ -249,6 +249,9 @@ export class ConnectionManager {
       stagingEnabled: staging !== null,
       developerToolsEnabled: this.#developerToolsEnabled(),
       approvalUrl: this.#state === 'awaiting_approval' ? (intent?.approveUrl ?? null) : null,
+      // The removal handoff must survive a settings reload, page reload and
+      // Host restart while Cloud has not confirmed the intent yet.
+      removalUrl: typeof record?.pending?.removalUrl === 'string' ? record.pending.removalUrl : '',
       error: this.#errorCode === null ? null : { code: this.#errorCode },
       connected: this.#connected,
       devices: this.#runtime?.clientDevices?.() ?? null,
@@ -288,7 +291,7 @@ export class ConnectionManager {
         // Host identity. Cloud allocates the next enrollment revision and
         // resets the workspace removal intent when it approves that request.
         readd = true
-        await this.#registry.setPending(record.id, { removal: null, paused: false })
+        await this.#registry.setPending(record.id, { removal: null, removalUrl: null, paused: false })
         await this.#registry.clearPendingPhase(record.id)
         await this.#clearPollCredential(record)
         this.#intentJournal(record)?.clear()
@@ -516,6 +519,9 @@ export class ConnectionManager {
       // browser confirmation creates the durable intent; `refreshRemoval`
       // observes it and fences activation only after that proof.
       const url = `${apiOrigin}/hosts/${encodeURIComponent(hostId)}?removal=1`
+      // Retain the confirmation target so a closed or reloaded settings page
+      // can reopen the same handoff; it is cleared once removal is observed.
+      await this.#registry.setPending(record.id, { removalUrl: url })
       return { state: 'confirm_removal', url, remoteRevocation: 'unconfirmed' }
     })
   }
@@ -558,7 +564,7 @@ export class ConnectionManager {
       this.#generation += 1
       this.#abortPolling()
       await this.#stopRuntime()
-      await this.#registry.setPending(record.id, { removal: 'removed' })
+      await this.#registry.setPending(record.id, { removal: 'removed', removalUrl: null })
       await this.#clearTransportCredential(record)
       this.#setState('removed', null)
     } else if (state === 'failed' || state === 'rejected' || state === 'none') {
@@ -566,7 +572,11 @@ export class ConnectionManager {
       // A rejected or never-committed removal leaves the binding live. Stop
       // waiting and resume only when the profile has a usable credential and
       // the user did not pause it. `none` on a cold start must not reconnect
-      // solely because a stale local intent disappeared.
+      // solely because a stale local intent disappeared. The handoff target
+      // is no longer useful once the intent is terminal.
+      if (record.pending?.removalUrl) {
+        await this.#registry.setPending(record.id, { removalUrl: null })
+      }
       if (record.pending?.removal === 'removing') {
         await this.#resumeAfterRemoval(record, {
           resume: state === 'none' ? resumeOnNone : true,
@@ -1484,7 +1494,22 @@ export class ConnectionManager {
             onReady: () => {
               if (generation === this.#generation && !this.#disposed) {
                 this.#connected = true
-                if (!['removing', 'removed'].includes(this.#state)) this.#setState('connected', null)
+                if (!['removing', 'removed'].includes(this.#state)) {
+                  this.#setState('connected', null)
+                  // Readiness can arrive after the initial ready wait timed out
+                  // (a slow resume). The transport is connected now, so the
+                  // persisted explicit pause must not survive: the next start
+                  // would otherwise treat the Host as intentionally paused.
+                  try {
+                    const record = this.#activeRecord()
+                    if (record?.pending?.paused === true) {
+                      this.#registry.setPending(record.id, { paused: false })
+                    }
+                  } catch {
+                    // The live state stays connected; the next start retries
+                    // the reconnect loop instead of a silent pause.
+                  }
+                }
               }
               handlers.onReady?.()
             },

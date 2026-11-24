@@ -2322,3 +2322,65 @@ fn redacted_diagnostics_never_carry_synthetic_private_markers() {
     // The report is written only after the caller asks for it.
     assert!(path.exists());
 }
+
+/// HOST-5: a `pairing_start` that times out waiting for Core's prompt must not
+/// leave the background attempt marked running. The caller has no attempt id and
+/// no prompt, so an immediate retry is not refused as a conflict.
+#[test]
+fn pairing_start_timeout_allows_a_retry() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // A TCP listener that completes the HTTP connection but never answers keeps
+    // the Core pairing HELLO pending past the binding's 20 s prompt window.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let server = std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while !thread_stop.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _)) => held.push(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        drop(held);
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let invitation =
+        format!("whalerein://pair?v=1&access=http%3A%2F%2F127.0.0.1%3A{port}&host=host-1&token=t");
+
+    let started = Instant::now();
+    let first = core.pairing_start(invitation.clone());
+    assert_eq!(
+        first.as_ref().unwrap_err().code(),
+        "timeout",
+        "the HELLO is never answered: {first:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(19),
+        "the prompt wait is the documented 20 s window: {:?}",
+        started.elapsed()
+    );
+
+    let retry = core.pairing_start(invitation);
+    assert!(
+        retry
+            .as_ref()
+            .err()
+            .is_none_or(|error| error.code() != "conflict"),
+        "a timed-out pairing_start gave the caller no prompt, so the retry must \
+         not be refused as an already-running attempt: {retry:?}"
+    );
+
+    core.pairing_cancel();
+    stop.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+}

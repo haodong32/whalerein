@@ -581,9 +581,12 @@ fn render_attachment_rows(
     out
 }
 
-fn history_continue_command(key: &SessionKey, continuation: &str) -> String {
+fn history_continue_command(key: &SessionKey, continuation: &str, from_cache: bool) -> String {
+    // A cache-sourced continuation must be read with `--cache`: the online
+    // read rejects its token as `snapshot_required`.
+    let cache = if from_cache { " --cache" } else { "" };
     format!(
-        "whalerein session history {} --host {} --continuation {}",
+        "whalerein session history {} --host {}{cache} --continuation {}",
         shell_quote(&key.session_id),
         shell_quote(&key.host_id),
         shell_quote(continuation)
@@ -623,7 +626,7 @@ pub fn render_history_page(key: &SessionKey, page: &HistoryPage, show_reasoning:
             let token = continuation.to_string();
             out.push_str(&format!(
                 "Continuation: {token}\nContinue older history:\n  {}\n",
-                history_continue_command(key, &token)
+                history_continue_command(key, &token, page.source == HistorySource::Cache)
             ));
         }
         _ => out.push_str("End of history: the oldest message in this cut was reached.\n"),

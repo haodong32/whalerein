@@ -36,11 +36,17 @@ const TLS_TRUST_CODES = new Set([
   'ERR_SSL_TLSV1_ALERT_UNKNOWN_CA', 'ERR_SSL_SSLV3_ALERT_BAD_CERTIFICATE',
 ])
 
+/** MQTT 5 CONNACK reason codes that prove the saved credential is refused. */
+const REFUSED_CREDENTIAL_CODES = new Set([4, 5, 134, 135])
+
 /** Classify a transport failure for honest status and retry policy. */
 export function classifyTransportFailure(errorCode, reasonCode) {
-  const reason = Number(reasonCode)
   // MQTT 5 CONNACK: bad user name/password (4/134) or not authorized (5/135).
-  if ([4, 5, 134, 135].includes(reason)) return 'unauthorized'
+  // mqtt@5 reports a refused CONNACK as an `error` event carrying the numeric
+  // reason code in `error.code` and never emits a `disconnect` packet, so the
+  // numeric code must count wherever it arrives.
+  if (REFUSED_CREDENTIAL_CODES.has(Number(reasonCode))) return 'unauthorized'
+  if (typeof errorCode === 'number' && REFUSED_CREDENTIAL_CODES.has(errorCode)) return 'unauthorized'
   if (TLS_TRUST_CODES.has(String(errorCode))) return 'tls_trust'
   return 'unavailable'
 }
@@ -447,7 +453,6 @@ export class MqttAccess {
     this.#accessReceive = null
     this.#connected = true
     if (this.#attempts > 1) this.#reconnects++
-    this.#backoffMs = this.reconnectMinMs
     this.#lastErrorCode = ''
     // The host sets revocations_pending synchronously here, before the
     // request subscription can deliver a channel handshake.
@@ -479,6 +484,10 @@ export class MqttAccess {
       return
     }
     if (generation !== this.#generation || this.#stopped || !this.#connected) return
+    // Reset the backoff only after the whole ready cycle succeeded. Resetting
+    // it at CONNACK would let a broker that accepts the connection but keeps
+    // refusing the subscription stay at reconnectMinMs forever.
+    this.#backoffMs = this.reconnectMinMs
     for (const waiter of this.#connectWaiters) waiter.resolve?.()
     this.#connectWaiters.clear()
     this.#handlers.onReady?.()

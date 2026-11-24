@@ -22,8 +22,8 @@ use super::{AccessClient, AccessError};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use whalerein_proto::{
-    ChannelHello, ChannelReady, ErrorCode, EventEnvelope, HostRequest, HostResult,
-    PayloadReference, ReceiveAdvertisement, RequestKind, TransportBudget as WireTransportBudget,
+    ChannelHello, ChannelReady, ErrorCode, EventEnvelope, HostRequest, PayloadReference,
+    ReceiveAdvertisement, RequestKind, TransportBudget as WireTransportBudget,
 };
 
 /// The only accepted MQTT relay epoch.
@@ -337,6 +337,16 @@ fn invalid(detail: &'static str) -> AccessError {
     }
 }
 
+fn payload_too_large(detail: &'static str) -> AccessError {
+    AccessError {
+        kind: super::AccessErrorKind::Protocol,
+        status: None,
+        code: Some(ErrorCode::PayloadTooLarge),
+        message: detail.into(),
+        reason: String::new(),
+    }
+}
+
 /// Reject a relay envelope whose epoch is not the coordinated epoch 4.
 pub fn require_relay_epoch(version: u32) -> Result<(), AccessError> {
     if version == RELAY_EPOCH_V4 {
@@ -402,19 +412,6 @@ pub fn validate_request_representation(request: &HostRequest) -> Result<(), Acce
     Ok(())
 }
 
-/// Validate the per-hop representation rule for a Host result. A result body
-/// may be absent when the complete body could not be admitted; the recorded
-/// outcome is unchanged. Both representations at once is ambiguous.
-pub fn validate_result_representation(result: &HostResult) -> Result<(), AccessError> {
-    require_relay_epoch(result.relay_version)?;
-    if !result.result_body.is_empty() && result.result_reference.is_some() {
-        return Err(invalid(
-            "exactly one of result_body and result_reference may be set",
-        ));
-    }
-    Ok(())
-}
-
 /// Validate the per-hop representation rule for a live event. The nonce is
 /// framing metadata and is always present; exactly one of the ciphertext and
 /// its reference is set.
@@ -462,14 +459,19 @@ pub fn validate_request_state_representation(
 }
 
 /// Resolve a stored request status to its complete verified result body.
-/// `None` means the recorded outcome has no complete body.
+/// `None` means the recorded outcome has no complete body. `max_ciphertext_bytes`
+/// is the bound the request admitted to Access: a reference that declares more
+/// is refused before any fetch.
 pub async fn resolve_request_state_body(
     client: &AccessClient,
     state: &whalerein_proto::RequestState,
+    max_ciphertext_bytes: u64,
 ) -> Result<Option<Vec<u8>>, AccessError> {
     validate_request_state_representation(state)?;
     match &state.result_reference {
-        Some(reference) => Ok(Some(resolve_reference(client, reference).await?)),
+        Some(reference) => Ok(Some(
+            resolve_reference(client, reference, max_ciphertext_bytes).await?,
+        )),
         None if state.result_body.is_empty() => Ok(None),
         None => Ok(Some(state.result_body.clone())),
     }
@@ -478,10 +480,13 @@ pub async fn resolve_request_state_body(
 /// Fetch one referenced ciphertext from the Access HTTPS directory and verify
 /// the exact reserved length and SHA-256 before returning it. A truncated,
 /// longer, corrupt or substituted body is rejected: a failed fetch never
-/// becomes a completed message.
+/// becomes a completed message. A reference that declares more than
+/// `max_ciphertext_bytes` is refused before the request so a peer cannot make
+/// the client buffer an unbounded object.
 pub async fn resolve_reference(
     client: &AccessClient,
     reference: &PayloadReference,
+    max_ciphertext_bytes: u64,
 ) -> Result<Vec<u8>, AccessError> {
     if reference.object_id.len() != 32
         || !reference
@@ -493,6 +498,11 @@ pub async fn resolve_reference(
     }
     if reference.sha256.len() != 32 {
         return Err(invalid("invalid payload reference digest"));
+    }
+    if reference.ciphertext_bytes > max_ciphertext_bytes {
+        return Err(payload_too_large(
+            "referenced ciphertext exceeds the admitted transport bound",
+        ));
     }
     let bytes = client.fetch_relay_object(reference).await?;
     if bytes.len() as u64 != reference.ciphertext_bytes {
@@ -508,33 +518,19 @@ pub async fn resolve_reference(
     Ok(bytes)
 }
 
-/// Resolve a Host result body to its complete verified bytes. `None` means the
-/// result recorded an outcome without a complete body (metadata-only terminal).
-#[allow(dead_code)]
-pub async fn resolve_result_body(
-    client: &AccessClient,
-    result: &HostResult,
-) -> Result<Option<Vec<u8>>, AccessError> {
-    validate_result_representation(result)?;
-    match &result.result_reference {
-        Some(reference) => Ok(Some(resolve_reference(client, reference).await?)),
-        None if result.result_body.is_empty() => Ok(None),
-        None => Ok(Some(result.result_body.clone())),
-    }
-}
-
 /// Resolve one live event to its complete ciphertext. The returned envelope
 /// carries the verified inline representation so AEAD and business validation
 /// are identical for both carriers.
 pub async fn resolve_event_envelope(
     client: &AccessClient,
     envelope: &EventEnvelope,
+    max_ciphertext_bytes: u64,
 ) -> Result<EventEnvelope, AccessError> {
     validate_event_representation(envelope)?;
     let Some(reference) = &envelope.payload_reference else {
         return Ok(envelope.clone());
     };
-    let ciphertext = resolve_reference(client, reference).await?;
+    let ciphertext = resolve_reference(client, reference, max_ciphertext_bytes).await?;
     let mut resolved = envelope.clone();
     resolved.ciphertext = ciphertext;
     resolved.payload_reference = None;
@@ -567,8 +563,8 @@ pub fn varint_len(value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use whalerein_proto::PayloadPurpose;
     use whalerein_proto::{request_payload, EventPayload, SessionUpdate};
-    use whalerein_proto::{HostResult, OnlineStatus, PayloadPurpose};
 
     fn reference() -> PayloadReference {
         PayloadReference {
@@ -710,34 +706,6 @@ mod tests {
         let _ = SessionUpdate::default();
         let _ = EventPayload::default();
         let _ = request_payload::Payload::Ping(Default::default());
-    }
-
-    #[test]
-    fn host_result_representation_allows_a_metadata_only_terminal() {
-        let mut result = HostResult {
-            request_id: "r".into(),
-            status: OnlineStatus::Succeeded as i32,
-            relay_version: RELAY_EPOCH_V4,
-            ..Default::default()
-        };
-        assert!(validate_result_representation(&result).is_ok());
-        result.result_body = vec![1];
-        result.result_reference = Some(reference());
-        assert!(validate_result_representation(&result).is_err());
-        let mut referenced = HostResult {
-            request_id: "r".into(),
-            relay_version: RELAY_EPOCH_V4,
-            result_reference: Some(reference()),
-            ..Default::default()
-        };
-        assert!(validate_result_representation(&referenced).is_ok());
-        referenced.relay_version = 2;
-        assert_eq!(
-            validate_result_representation(&referenced)
-                .unwrap_err()
-                .code,
-            Some(ErrorCode::ProtocolVersionIncompatible)
-        );
     }
 
     #[test]

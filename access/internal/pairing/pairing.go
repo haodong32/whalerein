@@ -179,6 +179,19 @@ func New(deps Dependencies) (*Service, error) {
 	}, nil
 }
 
+// advertisedURL removes URL userinfo from a client-visible endpoint. Config
+// validation rejects credentials in public_url and broker.public_url, but this
+// package accepts a caller-built Config, so strip defensively before the value
+// is copied into a pairing URI that devices and operators can read.
+func advertisedURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.User == nil {
+		return raw
+	}
+	parsed.User = nil
+	return parsed.String()
+}
+
 // CreateInvitation creates a one-time token bound to one host. The database
 // stores only SHA-256(token).
 func (s *Service) CreateInvitation(ctx context.Context, hostID string) (*whalereinv1.PairingInvitation, error) {
@@ -203,9 +216,9 @@ func (s *Service) CreateInvitation(ctx context.Context, hostID string) (*whalere
 		return nil, fmt.Errorf("create pairing token: %w", err)
 	}
 	uri := fmt.Sprintf("whalerein://pair?v=1&access=%s",
-		url.QueryEscape(strings.TrimRight(s.cfg.PublicURL, "/")))
+		url.QueryEscape(strings.TrimRight(advertisedURL(s.cfg.PublicURL), "/")))
 	if s.cfg.MQTTURL != "" {
-		uri += "&mqtt=" + url.QueryEscape(s.cfg.MQTTURL)
+		uri += "&mqtt=" + url.QueryEscape(advertisedURL(s.cfg.MQTTURL))
 	}
 	uri += "&host=" + url.QueryEscape(hostID) + "&token=" + url.QueryEscape(token)
 	// `exp` is the cross-component invitation expiry contract: Unix seconds,

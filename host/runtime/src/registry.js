@@ -50,7 +50,7 @@ const BINDING_KEYS = new Set([
   'accessOrigin',
   'region',
 ])
-const PENDING_KEYS = new Set(['paused', 'removal', 'intentId', 'operationId', 'phase', 'uncertain'])
+const PENDING_KEYS = new Set(['paused', 'removal', 'removalUrl', 'intentId', 'operationId', 'phase', 'uncertain'])
 const PENDING_PHASES = new Set(['approval', 'enrollment', 'credential', 'removal'])
 const REMOVAL_STATES = new Set(['removing', 'removed', 'failed'])
 const RECORD_KEYS = new Set(['id', 'label', 'environment', 'mode', 'service', 'stateDir', 'bindings', 'pending', 'legacy', 'createdAt'])
@@ -189,6 +189,21 @@ function validatePending(pending) {
   }
   if (pending.phase !== undefined && !PENDING_PHASES.has(pending.phase)) fail('registry_corrupt', 'profile pending phase is invalid')
   if (pending.removal !== undefined && !REMOVAL_STATES.has(pending.removal)) fail('registry_corrupt', 'profile removal state is invalid')
+  if (pending.removalUrl !== undefined) {
+    // The retained browser-confirmation target is a credential-free web URL.
+    if (typeof pending.removalUrl !== 'string' || pending.removalUrl.length > 2048) {
+      fail('registry_corrupt', 'profile pending removal URL is invalid')
+    }
+    let url
+    try {
+      url = new URL(pending.removalUrl)
+    } catch {
+      fail('registry_corrupt', 'profile pending removal URL is invalid')
+    }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username !== '' || url.password !== '') {
+      fail('registry_corrupt', 'profile pending removal URL is invalid')
+    }
+  }
 }
 
 function validateService(service, environment, label) {
