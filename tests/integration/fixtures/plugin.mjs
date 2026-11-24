@@ -106,7 +106,7 @@ try {
   // Drop exactly one terminal command result after its journal commit.
   const publishResult = host.access.publishResult.bind(host.access)
   const protocol = codec()
-  host.access.publishResult = async bytes => {
+  host.access.publishResult = async (bytes, options = {}) => {
     const marker = path.join(process.env.WHALEREIN_STATE_DIR, 'gx-drop-terminal')
     const result = protocol.decode('whalerein.v1.HostResult', bytes)
     // Test-only metadata for exact encrypted response budget assertions; no body is persisted.
@@ -131,9 +131,9 @@ try {
       result.error_code = 'expired'
       result.error_message = 'expired'
       result.result_body = new Uint8Array()
-      return publishResult(protocol.encode('whalerein.v1.HostResult', result))
+      return publishResult(protocol.encode('whalerein.v1.HostResult', result), options)
     }
-    return publishResult(bytes)
+    return publishResult(bytes, options)
   }
 
   // Do not call the host ready before its broker connection and subscription
