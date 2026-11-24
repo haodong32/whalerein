@@ -565,31 +565,36 @@ func (QuestionAvailability) EnumDescriptor() ([]byte, []int) {
 
 // One coordinated relay contract. This value is carried as `relay_version` on
 // every relay envelope and advertisement and is independent of application
-// protocol version 1. A peer that does not advertise RELAY_EPOCH_V4 is
+// protocol version 1. A peer that does not advertise RELAY_EPOCH_V5 is
 // rejected with protocol_version_incompatible; there is no unframed or
 // fragment-based fallback.
 //
-// Epoch 4 hard-cuts epoch 3: it adds the QoS 0 live delivery class on dedicated
-// live topics next to the unchanged ordered/acked control topics. Epoch 3 is
-// reserved and never accepted; there is no dual epoch and no fallback.
+// Epoch 5 hard-cuts epoch 4: post-pairing Noise establishment, session queries
+// and observation checks use MQTT 5 request/reply on the query lane with
+// Broker-stamped connection identity and Message Expiry Interval. Device
+// previews travel directly from the Host as QoS 0; Access no longer republishes
+// them. The command lane keeps its durable HTTPS admission, heartbeat and
+// result read. Epoch 4 and earlier are reserved and never accepted; there is no
+// dual epoch and no fallback.
 type RelayEpoch int32
 
 const (
 	RelayEpoch_RELAY_EPOCH_UNSPECIFIED RelayEpoch = 0
-	// Inline-or-reference control relay over MQTT QoS 1 and HTTPS ciphertext
-	// objects, with lossy QoS 0 live previews on the live topics.
-	RelayEpoch_RELAY_EPOCH_V4 RelayEpoch = 4
+	// MQTT 5 request/reply query lane, Broker-stamped connection identity,
+	// deadline-derived Message Expiry Interval, direct device previews and
+	// inline-or-reference history transfer over MQTT QoS 1 and HTTPS objects.
+	RelayEpoch_RELAY_EPOCH_V5 RelayEpoch = 5
 )
 
 // Enum value maps for RelayEpoch.
 var (
 	RelayEpoch_name = map[int32]string{
 		0: "RELAY_EPOCH_UNSPECIFIED",
-		4: "RELAY_EPOCH_V4",
+		5: "RELAY_EPOCH_V5",
 	}
 	RelayEpoch_value = map[string]int32{
 		"RELAY_EPOCH_UNSPECIFIED": 0,
-		"RELAY_EPOCH_V4":          4,
+		"RELAY_EPOCH_V5":          5,
 	}
 )
 
@@ -1894,7 +1899,7 @@ type ReceiveAdvertisement struct {
 	Profile              TransportProfile       `protobuf:"varint,1,opt,name=profile,proto3,enum=whalerein.v1.TransportProfile" json:"profile,omitempty"`
 	Budget               *TransportBudget       `protobuf:"bytes,2,opt,name=budget,proto3" json:"budget,omitempty"`
 	ConnectionGeneration uint64                 `protobuf:"varint,3,opt,name=connection_generation,json=connectionGeneration,proto3" json:"connection_generation,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+	// Required relay epoch; must equal RELAY_EPOCH_V5 (5).
 	RelayVersion  uint32 `protobuf:"varint,4,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2067,8 +2072,13 @@ type RelayObjectReserveRequest struct {
 	// Host authority only; Device callers authenticate with a bearer token.
 	SignedAtUnixMs int64  `protobuf:"varint,11,opt,name=signed_at_unix_ms,json=signedAtUnixMs,proto3" json:"signed_at_unix_ms,omitempty"`
 	Signature      []byte `protobuf:"bytes,12,opt,name=signature,proto3" json:"signature,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Query-lane binding: the original admitted request and its Broker-stamped
+	// connection scope. Empty for durable command objects and attachment parts.
+	RequestId            string `protobuf:"bytes,13,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	EnrollmentGeneration uint64 `protobuf:"varint,14,opt,name=enrollment_generation,json=enrollmentGeneration,proto3" json:"enrollment_generation,omitempty"`
+	ConnectionRef        string `protobuf:"bytes,15,opt,name=connection_ref,json=connectionRef,proto3" json:"connection_ref,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *RelayObjectReserveRequest) Reset() {
@@ -2183,6 +2193,27 @@ func (x *RelayObjectReserveRequest) GetSignature() []byte {
 		return x.Signature
 	}
 	return nil
+}
+
+func (x *RelayObjectReserveRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *RelayObjectReserveRequest) GetEnrollmentGeneration() uint64 {
+	if x != nil {
+		return x.EnrollmentGeneration
+	}
+	return 0
+}
+
+func (x *RelayObjectReserveRequest) GetConnectionRef() string {
+	if x != nil {
+		return x.ConnectionRef
+	}
+	return ""
 }
 
 type RelayObjectReservation struct {
@@ -2492,6 +2523,9 @@ type RequestTransportMetadata struct {
 	// Access Host/device revocation generation captured at submission. A plain
 	// Host-scoped revoke bumps only this revision, so it must be fenced too.
 	RevocationGeneration uint64 `protobuf:"varint,3,opt,name=revocation_generation,json=revocationGeneration,proto3" json:"revocation_generation,omitempty"`
+	// Access managed enrollment generation captured at submission. The query
+	// lane matches it separately from the grant revision.
+	EnrollmentGeneration uint64 `protobuf:"varint,4,opt,name=enrollment_generation,json=enrollmentGeneration,proto3" json:"enrollment_generation,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -2543,6 +2577,13 @@ func (x *RequestTransportMetadata) GetGrantGeneration() uint64 {
 func (x *RequestTransportMetadata) GetRevocationGeneration() uint64 {
 	if x != nil {
 		return x.RevocationGeneration
+	}
+	return 0
+}
+
+func (x *RequestTransportMetadata) GetEnrollmentGeneration() uint64 {
+	if x != nil {
+		return x.EnrollmentGeneration
 	}
 	return 0
 }
@@ -2623,7 +2664,7 @@ type HostRequest struct {
 	Body []byte `protobuf:"bytes,11,opt,name=body,proto3" json:"body,omitempty"`
 	// Device result bound and grant generation bound by Access at admission.
 	Transport *RequestTransportMetadata `protobuf:"bytes,14,opt,name=transport,proto3" json:"transport,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V4 (4). Access rejects a
+	// Required relay epoch; must equal RELAY_EPOCH_V5 (5). Access rejects a
 	// Device request and Host rejects an Access-forwarded request otherwise with
 	// protocol_version_incompatible.
 	RelayVersion uint32 `protobuf:"varint,15,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
@@ -2632,8 +2673,21 @@ type HostRequest struct {
 	// PAIRING_CLAIM and internal Access notices are small bootstrap bodies and
 	// must stay inline, so they never carry body_reference.
 	BodyReference *PayloadReference `protobuf:"bytes,16,opt,name=body_reference,json=bodyReference,proto3" json:"body_reference,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Broker-issued `<broker-epoch>:<connection-instance>` for the authenticated
+	// Device connection that submitted a query-lane request. Access fills this
+	// from the Broker ingress stamp after admission; a Device cannot set it
+	// because it never publishes on the Access -> Host lane. Host binds
+	// observation ownership and reply affinity to it.
+	ConnectionRef string `protobuf:"bytes,17,opt,name=connection_ref,json=connectionRef,proto3" json:"connection_ref,omitempty"`
+	// Current Host/device grant generation captured by Access at query
+	// admission. Host applies its execution fence to this exact scope.
+	GrantGeneration uint64 `protobuf:"varint,18,opt,name=grant_generation,json=grantGeneration,proto3" json:"grant_generation,omitempty"`
+	// Current managed enrollment generation captured by Access at query
+	// admission. It is matched separately from the grant revision so a re-added
+	// Host or a re-paired client cannot attach to an older query.
+	EnrollmentGeneration uint64 `protobuf:"varint,19,opt,name=enrollment_generation,json=enrollmentGeneration,proto3" json:"enrollment_generation,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *HostRequest) Reset() {
@@ -2764,6 +2818,27 @@ func (x *HostRequest) GetBodyReference() *PayloadReference {
 	return nil
 }
 
+func (x *HostRequest) GetConnectionRef() string {
+	if x != nil {
+		return x.ConnectionRef
+	}
+	return ""
+}
+
+func (x *HostRequest) GetGrantGeneration() uint64 {
+	if x != nil {
+		return x.GrantGeneration
+	}
+	return 0
+}
+
+func (x *HostRequest) GetEnrollmentGeneration() uint64 {
+	if x != nil {
+		return x.EnrollmentGeneration
+	}
+	return 0
+}
+
 type HostResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -2784,7 +2859,7 @@ type HostResult struct {
 	CompletedAtUnixMs int64  `protobuf:"varint,11,opt,name=completed_at_unix_ms,json=completedAtUnixMs,proto3" json:"completed_at_unix_ms,omitempty"`
 	ProtocolVersion   uint32 `protobuf:"varint,12,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	ChannelId         string `protobuf:"bytes,13,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+	// Required relay epoch; must equal RELAY_EPOCH_V5 (5).
 	RelayVersion uint32 `protobuf:"varint,14,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
 	// Exactly one of `result_body` and `result_reference` is set when a result
 	// body exists. HostReady, pairing results and internal control results are
@@ -3236,7 +3311,7 @@ type RequestStateNotice struct {
 	CommandId       string                 `protobuf:"bytes,5,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
 	UpdatedAtUnixMs int64                  `protobuf:"varint,6,opt,name=updated_at_unix_ms,json=updatedAtUnixMs,proto3" json:"updated_at_unix_ms,omitempty"`
 	ResultReference *PayloadReference      `protobuf:"bytes,7,opt,name=result_reference,json=resultReference,proto3" json:"result_reference,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+	// Required relay epoch; must equal RELAY_EPOCH_V5 (5).
 	RelayVersion  uint32 `protobuf:"varint,8,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4156,7 +4231,7 @@ type HostReady struct {
 	AuthorizationPublicKey []byte `protobuf:"bytes,3,opt,name=authorization_public_key,json=authorizationPublicKey,proto3" json:"authorization_public_key,omitempty"`
 	// Host receive limits for the authenticated broker connection generation.
 	Receive *ReceiveAdvertisement `protobuf:"bytes,5,opt,name=receive,proto3" json:"receive,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V4 (4). Access refuses to
+	// Required relay epoch; must equal RELAY_EPOCH_V5 (5). Access refuses to
 	// mark an older or unknown epoch Host ready.
 	RelayVersion  uint32 `protobuf:"varint,6,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -4773,7 +4848,7 @@ type RequestPayload struct {
 	//	*RequestPayload_ListApprovals
 	//	*RequestPayload_ReadHistory
 	//	*RequestPayload_WatchSession
-	//	*RequestPayload_RefreshWatches
+	//	*RequestPayload_CheckVersions
 	//	*RequestPayload_UnwatchSession
 	//	*RequestPayload_ReadMessageReply
 	//	*RequestPayload_GetHostCapabilities
@@ -4935,10 +5010,10 @@ func (x *RequestPayload) GetWatchSession() *WatchSession {
 	return nil
 }
 
-func (x *RequestPayload) GetRefreshWatches() *RefreshWatches {
+func (x *RequestPayload) GetCheckVersions() *CheckVersions {
 	if x != nil {
-		if x, ok := x.Payload.(*RequestPayload_RefreshWatches); ok {
-			return x.RefreshWatches
+		if x, ok := x.Payload.(*RequestPayload_CheckVersions); ok {
+			return x.CheckVersions
 		}
 	}
 	return nil
@@ -5172,8 +5247,8 @@ type RequestPayload_WatchSession struct {
 	WatchSession *WatchSession `protobuf:"bytes,12,opt,name=watch_session,json=watchSession,proto3,oneof"`
 }
 
-type RequestPayload_RefreshWatches struct {
-	RefreshWatches *RefreshWatches `protobuf:"bytes,13,opt,name=refresh_watches,json=refreshWatches,proto3,oneof"`
+type RequestPayload_CheckVersions struct {
+	CheckVersions *CheckVersions `protobuf:"bytes,13,opt,name=check_versions,json=checkVersions,proto3,oneof"`
 }
 
 type RequestPayload_UnwatchSession struct {
@@ -5279,7 +5354,7 @@ func (*RequestPayload_ReadHistory) isRequestPayload_Payload() {}
 
 func (*RequestPayload_WatchSession) isRequestPayload_Payload() {}
 
-func (*RequestPayload_RefreshWatches) isRequestPayload_Payload() {}
+func (*RequestPayload_CheckVersions) isRequestPayload_Payload() {}
 
 func (*RequestPayload_UnwatchSession) isRequestPayload_Payload() {}
 
@@ -5333,7 +5408,7 @@ type ResponsePayload struct {
 	//	*ResponsePayload_ApprovalList
 	//	*ResponsePayload_HistoryPage
 	//	*ResponsePayload_WatchReady
-	//	*ResponsePayload_WatchStates
+	//	*ResponsePayload_VersionChecks
 	//	*ResponsePayload_SessionInfo
 	//	*ResponsePayload_MessageReply
 	//	*ResponsePayload_HostCapabilities
@@ -5468,10 +5543,10 @@ func (x *ResponsePayload) GetWatchReady() *WatchReady {
 	return nil
 }
 
-func (x *ResponsePayload) GetWatchStates() *WatchStates {
+func (x *ResponsePayload) GetVersionChecks() *VersionChecks {
 	if x != nil {
-		if x, ok := x.Payload.(*ResponsePayload_WatchStates); ok {
-			return x.WatchStates
+		if x, ok := x.Payload.(*ResponsePayload_VersionChecks); ok {
+			return x.VersionChecks
 		}
 	}
 	return nil
@@ -5680,8 +5755,8 @@ type ResponsePayload_WatchReady struct {
 	WatchReady *WatchReady `protobuf:"bytes,12,opt,name=watch_ready,json=watchReady,proto3,oneof"`
 }
 
-type ResponsePayload_WatchStates struct {
-	WatchStates *WatchStates `protobuf:"bytes,13,opt,name=watch_states,json=watchStates,proto3,oneof"`
+type ResponsePayload_VersionChecks struct {
+	VersionChecks *VersionChecks `protobuf:"bytes,13,opt,name=version_checks,json=versionChecks,proto3,oneof"`
 }
 
 type ResponsePayload_SessionInfo struct {
@@ -5770,7 +5845,7 @@ func (*ResponsePayload_HistoryPage) isResponsePayload_Payload() {}
 
 func (*ResponsePayload_WatchReady) isResponsePayload_Payload() {}
 
-func (*ResponsePayload_WatchStates) isResponsePayload_Payload() {}
+func (*ResponsePayload_VersionChecks) isResponsePayload_Payload() {}
 
 func (*ResponsePayload_SessionInfo) isResponsePayload_Payload() {}
 
@@ -8885,7 +8960,7 @@ type EventEnvelope struct {
 	Ciphertext      []byte `protobuf:"bytes,5,opt,name=ciphertext,proto3" json:"ciphertext,omitempty"`
 	CreatedAtUnixMs int64  `protobuf:"varint,6,opt,name=created_at_unix_ms,json=createdAtUnixMs,proto3" json:"created_at_unix_ms,omitempty"`
 	TraceId         string `protobuf:"bytes,7,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`
-	// Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+	// Required relay epoch; must equal RELAY_EPOCH_V5 (5).
 	RelayVersion uint32 `protobuf:"varint,8,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
 	// Complete ciphertext locator. Exactly one of `ciphertext` and
 	// `payload_reference` is set; the reference resolves to the same ciphertext
@@ -12037,27 +12112,31 @@ func (x *WatchReady) GetQuestions() *QuestionDescriptor {
 	return nil
 }
 
-type RefreshWatches struct {
+// Bounded, read-only reconciliation of authoritative DSH state for one active
+// observation. It never renews or extends a watch lease; authorization and the
+// observation generation travel in the enclosing query and authenticated
+// connection.
+type CheckVersions struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	WatchIds      []string               `protobuf:"bytes,1,rep,name=watch_ids,json=watchIds,proto3" json:"watch_ids,omitempty"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RefreshWatches) Reset() {
-	*x = RefreshWatches{}
+func (x *CheckVersions) Reset() {
+	*x = CheckVersions{}
 	mi := &file_whalerein_proto_msgTypes[126]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RefreshWatches) String() string {
+func (x *CheckVersions) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RefreshWatches) ProtoMessage() {}
+func (*CheckVersions) ProtoMessage() {}
 
-func (x *RefreshWatches) ProtoReflect() protoreflect.Message {
+func (x *CheckVersions) ProtoReflect() protoreflect.Message {
 	mi := &file_whalerein_proto_msgTypes[126]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -12069,53 +12148,49 @@ func (x *RefreshWatches) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RefreshWatches.ProtoReflect.Descriptor instead.
-func (*RefreshWatches) Descriptor() ([]byte, []int) {
+// Deprecated: Use CheckVersions.ProtoReflect.Descriptor instead.
+func (*CheckVersions) Descriptor() ([]byte, []int) {
 	return file_whalerein_proto_rawDescGZIP(), []int{126}
 }
 
-func (x *RefreshWatches) GetWatchIds() []string {
+func (x *CheckVersions) GetSessionId() string {
 	if x != nil {
-		return x.WatchIds
+		return x.SessionId
 	}
-	return nil
+	return ""
 }
 
-// Lease renewal carries no session content. Content is delivered by the
-// event stream and by the one bounded baseline read at attach; a renewal that
-// had to rebuild the baseline would grow with the transcript and eventually
-// exceed the transport budget for reasons unrelated to connectivity.
-type WatchLease struct {
-	state   protoimpl.MessageState `protogen:"open.v1"`
-	WatchId string                 `protobuf:"bytes,1,opt,name=watch_id,json=watchId,proto3" json:"watch_id,omitempty"`
-	LeaseMs uint32                 `protobuf:"varint,2,opt,name=lease_ms,json=leaseMs,proto3" json:"lease_ms,omitempty"`
-	// State transition markers only: a changed marker means the observer missed
-	// something. Structural drift is repaired by re-attaching for a fresh baseline
-	// and history drift by the paged history read; a lease never ships content.
-	Revision      uint64              `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
-	RunPhase      RunPhase            `protobuf:"varint,4,opt,name=run_phase,json=runPhase,proto3,enum=whalerein.v1.RunPhase" json:"run_phase,omitempty"`
-	LiveEpoch     string              `protobuf:"bytes,5,opt,name=live_epoch,json=liveEpoch,proto3" json:"live_epoch,omitempty"`
-	HistoryHead   string              `protobuf:"bytes,6,opt,name=history_head,json=historyHead,proto3" json:"history_head,omitempty"`
-	ProjectionId  string              `protobuf:"bytes,7,opt,name=projection_id,json=projectionId,proto3" json:"projection_id,omitempty"`
-	Questions     *QuestionDescriptor `protobuf:"bytes,8,opt,name=questions,proto3" json:"questions,omitempty"`
+// Authoritative version markers for one observation. Content stays on the
+// event stream and the paged history read; a changed marker means the observer
+// missed something, and the affected facet is rebuilt through the existing
+// authoritative reads.
+type VersionCheck struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WatchId       string                 `protobuf:"bytes,1,opt,name=watch_id,json=watchId,proto3" json:"watch_id,omitempty"`
+	Revision      uint64                 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
+	RunPhase      RunPhase               `protobuf:"varint,3,opt,name=run_phase,json=runPhase,proto3,enum=whalerein.v1.RunPhase" json:"run_phase,omitempty"`
+	LiveEpoch     string                 `protobuf:"bytes,4,opt,name=live_epoch,json=liveEpoch,proto3" json:"live_epoch,omitempty"`
+	HistoryHead   string                 `protobuf:"bytes,5,opt,name=history_head,json=historyHead,proto3" json:"history_head,omitempty"`
+	ProjectionId  string                 `protobuf:"bytes,6,opt,name=projection_id,json=projectionId,proto3" json:"projection_id,omitempty"`
+	Questions     *QuestionDescriptor    `protobuf:"bytes,7,opt,name=questions,proto3" json:"questions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *WatchLease) Reset() {
-	*x = WatchLease{}
+func (x *VersionCheck) Reset() {
+	*x = VersionCheck{}
 	mi := &file_whalerein_proto_msgTypes[127]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *WatchLease) String() string {
+func (x *VersionCheck) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*WatchLease) ProtoMessage() {}
+func (*VersionCheck) ProtoMessage() {}
 
-func (x *WatchLease) ProtoReflect() protoreflect.Message {
+func (x *VersionCheck) ProtoReflect() protoreflect.Message {
 	mi := &file_whalerein_proto_msgTypes[127]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -12127,88 +12202,81 @@ func (x *WatchLease) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use WatchLease.ProtoReflect.Descriptor instead.
-func (*WatchLease) Descriptor() ([]byte, []int) {
+// Deprecated: Use VersionCheck.ProtoReflect.Descriptor instead.
+func (*VersionCheck) Descriptor() ([]byte, []int) {
 	return file_whalerein_proto_rawDescGZIP(), []int{127}
 }
 
-func (x *WatchLease) GetWatchId() string {
+func (x *VersionCheck) GetWatchId() string {
 	if x != nil {
 		return x.WatchId
 	}
 	return ""
 }
 
-func (x *WatchLease) GetLeaseMs() uint32 {
-	if x != nil {
-		return x.LeaseMs
-	}
-	return 0
-}
-
-func (x *WatchLease) GetRevision() uint64 {
+func (x *VersionCheck) GetRevision() uint64 {
 	if x != nil {
 		return x.Revision
 	}
 	return 0
 }
 
-func (x *WatchLease) GetRunPhase() RunPhase {
+func (x *VersionCheck) GetRunPhase() RunPhase {
 	if x != nil {
 		return x.RunPhase
 	}
 	return RunPhase_RUN_PHASE_UNSPECIFIED
 }
 
-func (x *WatchLease) GetLiveEpoch() string {
+func (x *VersionCheck) GetLiveEpoch() string {
 	if x != nil {
 		return x.LiveEpoch
 	}
 	return ""
 }
 
-func (x *WatchLease) GetHistoryHead() string {
+func (x *VersionCheck) GetHistoryHead() string {
 	if x != nil {
 		return x.HistoryHead
 	}
 	return ""
 }
 
-func (x *WatchLease) GetProjectionId() string {
+func (x *VersionCheck) GetProjectionId() string {
 	if x != nil {
 		return x.ProjectionId
 	}
 	return ""
 }
 
-func (x *WatchLease) GetQuestions() *QuestionDescriptor {
+func (x *VersionCheck) GetQuestions() *QuestionDescriptor {
 	if x != nil {
 		return x.Questions
 	}
 	return nil
 }
 
-type WatchStates struct {
+type VersionChecks struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Watches       []*WatchLease          `protobuf:"bytes,1,rep,name=watches,proto3" json:"watches,omitempty"`
+	Checks        []*VersionCheck        `protobuf:"bytes,1,rep,name=checks,proto3" json:"checks,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *WatchStates) Reset() {
-	*x = WatchStates{}
+func (x *VersionChecks) Reset() {
+	*x = VersionChecks{}
 	mi := &file_whalerein_proto_msgTypes[128]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *WatchStates) String() string {
+func (x *VersionChecks) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*WatchStates) ProtoMessage() {}
+func (*VersionChecks) ProtoMessage() {}
 
-func (x *WatchStates) ProtoReflect() protoreflect.Message {
+func (x *VersionChecks) ProtoReflect() protoreflect.Message {
 	mi := &file_whalerein_proto_msgTypes[128]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -12220,14 +12288,14 @@ func (x *WatchStates) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use WatchStates.ProtoReflect.Descriptor instead.
-func (*WatchStates) Descriptor() ([]byte, []int) {
+// Deprecated: Use VersionChecks.ProtoReflect.Descriptor instead.
+func (*VersionChecks) Descriptor() ([]byte, []int) {
 	return file_whalerein_proto_rawDescGZIP(), []int{128}
 }
 
-func (x *WatchStates) GetWatches() []*WatchLease {
+func (x *VersionChecks) GetChecks() []*VersionCheck {
 	if x != nil {
-		return x.Watches
+		return x.Checks
 	}
 	return nil
 }
@@ -13649,7 +13717,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x10ciphertext_bytes\x18\x03 \x01(\x04R\x0fciphertextBytes\x12\x16\n" +
 	"\x06sha256\x18\x04 \x01(\fR\x06sha256\x12+\n" +
 	"\x12expires_at_unix_ms\x18\x05 \x01(\x03R\x0fexpiresAtUnixMs\x126\n" +
-	"\apurpose\x18\x06 \x01(\x0e2\x1c.whalerein.v1.PayloadPurposeR\apurpose\"\xbe\x03\n" +
+	"\apurpose\x18\x06 \x01(\x0e2\x1c.whalerein.v1.PayloadPurposeR\apurpose\"\xb9\x04\n" +
 	"\x19RelayObjectReserveRequest\x12#\n" +
 	"\rrelay_version\x18\x01 \x01(\rR\frelayVersion\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x1b\n" +
@@ -13665,7 +13733,11 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x12expires_at_unix_ms\x18\n" +
 	" \x01(\x03R\x0fexpiresAtUnixMs\x12)\n" +
 	"\x11signed_at_unix_ms\x18\v \x01(\x03R\x0esignedAtUnixMs\x12\x1c\n" +
-	"\tsignature\x18\f \x01(\fR\tsignature\"\xf0\x01\n" +
+	"\tsignature\x18\f \x01(\fR\tsignature\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\r \x01(\tR\trequestId\x123\n" +
+	"\x15enrollment_generation\x18\x0e \x01(\x04R\x14enrollmentGeneration\x12%\n" +
+	"\x0econnection_ref\x18\x0f \x01(\tR\rconnectionRef\"\xf0\x01\n" +
 	"\x16RelayObjectReservation\x12\x1b\n" +
 	"\tobject_id\x18\x01 \x01(\tR\bobjectId\x12\"\n" +
 	"\rowner_node_id\x18\x02 \x01(\tR\vownerNodeId\x12\x1f\n" +
@@ -13688,14 +13760,15 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x06sha256\x18\x05 \x01(\fR\x06sha256\x12+\n" +
 	"\x12expires_at_unix_ms\x18\x06 \x01(\x03R\x0fexpiresAtUnixMs\"7\n" +
 	"\x17RelayObjectDeleteResult\x12\x1c\n" +
-	"\tcancelled\x18\x01 \x01(\bR\tcancelled\"\xa4\x01\n" +
+	"\tcancelled\x18\x01 \x01(\bR\tcancelled\"\xd9\x01\n" +
 	"\x18RequestTransportMetadata\x12(\n" +
 	"\x10result_max_bytes\x18\x01 \x01(\x04R\x0eresultMaxBytes\x12)\n" +
 	"\x10grant_generation\x18\x02 \x01(\x04R\x0fgrantGeneration\x123\n" +
-	"\x15revocation_generation\x18\x03 \x01(\x04R\x14revocationGeneration\"x\n" +
+	"\x15revocation_generation\x18\x03 \x01(\x04R\x14revocationGeneration\x123\n" +
+	"\x15enrollment_generation\x18\x04 \x01(\x04R\x14enrollmentGeneration\"x\n" +
 	"\rCapabilitySet\x12<\n" +
 	"\fcapabilities\x18\x01 \x03(\x0e2\x18.whalerein.v1.CapabilityR\fcapabilities\x12)\n" +
-	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"\xee\x04\n" +
+	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"\xf5\x05\n" +
 	"\vHostRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x17\n" +
@@ -13714,7 +13787,10 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x04body\x18\v \x01(\fR\x04body\x12D\n" +
 	"\ttransport\x18\x0e \x01(\v2&.whalerein.v1.RequestTransportMetadataR\ttransport\x12#\n" +
 	"\rrelay_version\x18\x0f \x01(\rR\frelayVersion\x12E\n" +
-	"\x0ebody_reference\x18\x10 \x01(\v2\x1e.whalerein.v1.PayloadReferenceR\rbodyReferenceJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eR\x18client_transport_versionR\x17relay_transport_version\"\xdf\x04\n" +
+	"\x0ebody_reference\x18\x10 \x01(\v2\x1e.whalerein.v1.PayloadReferenceR\rbodyReference\x12%\n" +
+	"\x0econnection_ref\x18\x11 \x01(\tR\rconnectionRef\x12)\n" +
+	"\x10grant_generation\x18\x12 \x01(\x04R\x0fgrantGeneration\x123\n" +
+	"\x15enrollment_generation\x18\x13 \x01(\x04R\x14enrollmentGenerationJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eR\x18client_transport_versionR\x17relay_transport_version\"\xdf\x04\n" +
 	"\n" +
 	"HostResult\x12\x1d\n" +
 	"\n" +
@@ -13907,7 +13983,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12\x17\n" +
 	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12)\n" +
 	"\x10host_fingerprint\x18\x03 \x01(\tR\x0fhostFingerprint\x12(\n" +
-	"\x10device_auth_hash\x18\x04 \x01(\fR\x0edeviceAuthHash\"\xa2\x12\n" +
+	"\x10device_auth_hash\x18\x04 \x01(\fR\x0edeviceAuthHash\"\x9f\x12\n" +
 	"\x0eRequestPayload\x12A\n" +
 	"\rlist_sessions\x18\x01 \x01(\v2\x1a.whalerein.v1.ListSessionsH\x00R\flistSessions\x12;\n" +
 	"\vget_session\x18\x02 \x01(\v2\x18.whalerein.v1.GetSessionH\x00R\n" +
@@ -13921,8 +13997,8 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x0elist_approvals\x18\n" +
 	" \x01(\v2\x1b.whalerein.v1.ListApprovalsH\x00R\rlistApprovals\x12>\n" +
 	"\fread_history\x18\v \x01(\v2\x19.whalerein.v1.HistoryReadH\x00R\vreadHistory\x12A\n" +
-	"\rwatch_session\x18\f \x01(\v2\x1a.whalerein.v1.WatchSessionH\x00R\fwatchSession\x12G\n" +
-	"\x0frefresh_watches\x18\r \x01(\v2\x1c.whalerein.v1.RefreshWatchesH\x00R\x0erefreshWatches\x12G\n" +
+	"\rwatch_session\x18\f \x01(\v2\x1a.whalerein.v1.WatchSessionH\x00R\fwatchSession\x12D\n" +
+	"\x0echeck_versions\x18\r \x01(\v2\x1b.whalerein.v1.CheckVersionsH\x00R\rcheckVersions\x12G\n" +
 	"\x0funwatch_session\x18\x0e \x01(\v2\x1c.whalerein.v1.UnwatchSessionH\x00R\x0eunwatchSession\x12N\n" +
 	"\x12read_message_reply\x18\x0f \x01(\v2\x1e.whalerein.v1.ReadMessageReplyH\x00R\x10readMessageReply\x12X\n" +
 	"\x15get_host_capabilities\x18\xbe\x01 \x01(\v2!.whalerein.v1.GetHostCapabilitiesH\x00R\x13getHostCapabilities\x12<\n" +
@@ -13944,7 +14020,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x0fopen_attachment\x18\xc0\x02 \x01(\v2\x1c.whalerein.v1.OpenAttachmentH\x00R\x0eopenAttachment\x12H\n" +
 	"\x0fpull_attachment\x18\xc1\x02 \x01(\v2\x1c.whalerein.v1.PullAttachmentH\x00R\x0epullAttachment\x12K\n" +
 	"\x10close_attachment\x18\xc2\x02 \x01(\v2\x1d.whalerein.v1.CloseAttachmentH\x00R\x0fcloseAttachmentB\t\n" +
-	"\apayload\"\xf2\x0f\n" +
+	"\apayload\"\xf8\x0f\n" +
 	"\x0fResponsePayload\x12>\n" +
 	"\fsession_list\x18\x01 \x01(\v2\x19.whalerein.v1.SessionListH\x00R\vsessionList\x124\n" +
 	"\bapproval\x18\x04 \x01(\v2\x16.whalerein.v1.ApprovalH\x00R\bapproval\x12J\n" +
@@ -13955,8 +14031,8 @@ const file_whalerein_proto_rawDesc = "" +
 	" \x01(\v2\x1a.whalerein.v1.ApprovalListH\x00R\fapprovalList\x12>\n" +
 	"\fhistory_page\x18\v \x01(\v2\x19.whalerein.v1.HistoryPageH\x00R\vhistoryPage\x12;\n" +
 	"\vwatch_ready\x18\f \x01(\v2\x18.whalerein.v1.WatchReadyH\x00R\n" +
-	"watchReady\x12>\n" +
-	"\fwatch_states\x18\r \x01(\v2\x19.whalerein.v1.WatchStatesH\x00R\vwatchStates\x12A\n" +
+	"watchReady\x12D\n" +
+	"\x0eversion_checks\x18\r \x01(\v2\x1b.whalerein.v1.VersionChecksH\x00R\rversionChecks\x12A\n" +
 	"\fsession_info\x18\x0e \x01(\v2\x1c.whalerein.v1.SessionSummaryH\x00R\vsessionInfo\x12A\n" +
 	"\rmessage_reply\x18\x0f \x01(\v2\x1a.whalerein.v1.MessageReplyH\x00R\fmessageReply\x12N\n" +
 	"\x11host_capabilities\x18\xbe\x01 \x01(\v2\x1e.whalerein.v1.HostCapabilitiesH\x00R\x10hostCapabilities\x12B\n" +
@@ -14504,22 +14580,21 @@ const file_whalerein_proto_rawDesc = "" +
 	"\bwatch_id\x18\x01 \x01(\tR\awatchId\x120\n" +
 	"\x05state\x18\x02 \x01(\v2\x1a.whalerein.v1.SessionStateR\x05state\x12\x19\n" +
 	"\blease_ms\x18\x03 \x01(\rR\aleaseMs\x12>\n" +
-	"\tquestions\x18\x04 \x01(\v2 .whalerein.v1.QuestionDescriptorR\tquestions\"-\n" +
-	"\x0eRefreshWatches\x12\x1b\n" +
-	"\twatch_ids\x18\x01 \x03(\tR\bwatchIds\"\xba\x02\n" +
+	"\tquestions\x18\x04 \x01(\v2 .whalerein.v1.QuestionDescriptorR\tquestions\".\n" +
+	"\rCheckVersions\x12\x1d\n" +
 	"\n" +
-	"WatchLease\x12\x19\n" +
-	"\bwatch_id\x18\x01 \x01(\tR\awatchId\x12\x19\n" +
-	"\blease_ms\x18\x02 \x01(\rR\aleaseMs\x12\x1a\n" +
-	"\brevision\x18\x03 \x01(\x04R\brevision\x123\n" +
-	"\trun_phase\x18\x04 \x01(\x0e2\x16.whalerein.v1.RunPhaseR\brunPhase\x12\x1d\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\"\xa1\x02\n" +
+	"\fVersionCheck\x12\x19\n" +
+	"\bwatch_id\x18\x01 \x01(\tR\awatchId\x12\x1a\n" +
+	"\brevision\x18\x02 \x01(\x04R\brevision\x123\n" +
+	"\trun_phase\x18\x03 \x01(\x0e2\x16.whalerein.v1.RunPhaseR\brunPhase\x12\x1d\n" +
 	"\n" +
-	"live_epoch\x18\x05 \x01(\tR\tliveEpoch\x12!\n" +
-	"\fhistory_head\x18\x06 \x01(\tR\vhistoryHead\x12#\n" +
-	"\rprojection_id\x18\a \x01(\tR\fprojectionId\x12>\n" +
-	"\tquestions\x18\b \x01(\v2 .whalerein.v1.QuestionDescriptorR\tquestions\"A\n" +
-	"\vWatchStates\x122\n" +
-	"\awatches\x18\x01 \x03(\v2\x18.whalerein.v1.WatchLeaseR\awatches\"+\n" +
+	"live_epoch\x18\x04 \x01(\tR\tliveEpoch\x12!\n" +
+	"\fhistory_head\x18\x05 \x01(\tR\vhistoryHead\x12#\n" +
+	"\rprojection_id\x18\x06 \x01(\tR\fprojectionId\x12>\n" +
+	"\tquestions\x18\a \x01(\v2 .whalerein.v1.QuestionDescriptorR\tquestions\"C\n" +
+	"\rVersionChecks\x122\n" +
+	"\x06checks\x18\x01 \x03(\v2\x1a.whalerein.v1.VersionCheckR\x06checks\"+\n" +
 	"\x0eUnwatchSession\x12\x19\n" +
 	"\bwatch_id\x18\x01 \x01(\tR\awatchId\"d\n" +
 	"\vWaitSession\x12\x1d\n" +
@@ -14722,11 +14797,11 @@ const file_whalerein_proto_rawDesc = "" +
 	"!QUESTION_AVAILABILITY_UNSPECIFIED\x10\x00\x12%\n" +
 	"!QUESTION_AVAILABILITY_UNSUPPORTED\x10\x01\x12%\n" +
 	"!QUESTION_AVAILABILITY_UNAVAILABLE\x10\x02\x12#\n" +
-	"\x1fQUESTION_AVAILABILITY_AVAILABLE\x10\x03*S\n" +
+	"\x1fQUESTION_AVAILABILITY_AVAILABLE\x10\x03*i\n" +
 	"\n" +
 	"RelayEpoch\x12\x1b\n" +
 	"\x17RELAY_EPOCH_UNSPECIFIED\x10\x00\x12\x12\n" +
-	"\x0eRELAY_EPOCH_V4\x10\x04\"\x04\b\x03\x10\x03*\x0eRELAY_EPOCH_V3*\x90\x01\n" +
+	"\x0eRELAY_EPOCH_V5\x10\x05\"\x04\b\x03\x10\x03\"\x04\b\x04\x10\x04*\x0eRELAY_EPOCH_V3*\x0eRELAY_EPOCH_V4*\x90\x01\n" +
 	"\x10TransportProfile\x12!\n" +
 	"\x1dTRANSPORT_PROFILE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19TRANSPORT_PROFILE_DEFAULT\x10\x01\x12\x1d\n" +
@@ -15026,9 +15101,9 @@ var file_whalerein_proto_goTypes = []any{
 	(*ObservationInterests)(nil),      // 153: whalerein.v1.ObservationInterests
 	(*WatchSession)(nil),              // 154: whalerein.v1.WatchSession
 	(*WatchReady)(nil),                // 155: whalerein.v1.WatchReady
-	(*RefreshWatches)(nil),            // 156: whalerein.v1.RefreshWatches
-	(*WatchLease)(nil),                // 157: whalerein.v1.WatchLease
-	(*WatchStates)(nil),               // 158: whalerein.v1.WatchStates
+	(*CheckVersions)(nil),             // 156: whalerein.v1.CheckVersions
+	(*VersionCheck)(nil),              // 157: whalerein.v1.VersionCheck
+	(*VersionChecks)(nil),             // 158: whalerein.v1.VersionChecks
 	(*UnwatchSession)(nil),            // 159: whalerein.v1.UnwatchSession
 	(*WaitSession)(nil),               // 160: whalerein.v1.WaitSession
 	(*CancelSessionWait)(nil),         // 161: whalerein.v1.CancelSessionWait
@@ -15093,7 +15168,7 @@ var file_whalerein_proto_depIdxs = []int32{
 	102, // 39: whalerein.v1.RequestPayload.list_approvals:type_name -> whalerein.v1.ListApprovals
 	135, // 40: whalerein.v1.RequestPayload.read_history:type_name -> whalerein.v1.HistoryRead
 	154, // 41: whalerein.v1.RequestPayload.watch_session:type_name -> whalerein.v1.WatchSession
-	156, // 42: whalerein.v1.RequestPayload.refresh_watches:type_name -> whalerein.v1.RefreshWatches
+	156, // 42: whalerein.v1.RequestPayload.check_versions:type_name -> whalerein.v1.CheckVersions
 	159, // 43: whalerein.v1.RequestPayload.unwatch_session:type_name -> whalerein.v1.UnwatchSession
 	145, // 44: whalerein.v1.RequestPayload.read_message_reply:type_name -> whalerein.v1.ReadMessageReply
 	66,  // 45: whalerein.v1.RequestPayload.get_host_capabilities:type_name -> whalerein.v1.GetHostCapabilities
@@ -15122,7 +15197,7 @@ var file_whalerein_proto_depIdxs = []int32{
 	103, // 68: whalerein.v1.ResponsePayload.approval_list:type_name -> whalerein.v1.ApprovalList
 	136, // 69: whalerein.v1.ResponsePayload.history_page:type_name -> whalerein.v1.HistoryPage
 	155, // 70: whalerein.v1.ResponsePayload.watch_ready:type_name -> whalerein.v1.WatchReady
-	158, // 71: whalerein.v1.ResponsePayload.watch_states:type_name -> whalerein.v1.WatchStates
+	158, // 71: whalerein.v1.ResponsePayload.version_checks:type_name -> whalerein.v1.VersionChecks
 	110, // 72: whalerein.v1.ResponsePayload.session_info:type_name -> whalerein.v1.SessionSummary
 	146, // 73: whalerein.v1.ResponsePayload.message_reply:type_name -> whalerein.v1.MessageReply
 	67,  // 74: whalerein.v1.ResponsePayload.host_capabilities:type_name -> whalerein.v1.HostCapabilities
@@ -15238,9 +15313,9 @@ var file_whalerein_proto_depIdxs = []int32{
 	153, // 184: whalerein.v1.WatchSession.interests:type_name -> whalerein.v1.ObservationInterests
 	150, // 185: whalerein.v1.WatchReady.state:type_name -> whalerein.v1.SessionState
 	91,  // 186: whalerein.v1.WatchReady.questions:type_name -> whalerein.v1.QuestionDescriptor
-	15,  // 187: whalerein.v1.WatchLease.run_phase:type_name -> whalerein.v1.RunPhase
-	91,  // 188: whalerein.v1.WatchLease.questions:type_name -> whalerein.v1.QuestionDescriptor
-	157, // 189: whalerein.v1.WatchStates.watches:type_name -> whalerein.v1.WatchLease
+	15,  // 187: whalerein.v1.VersionCheck.run_phase:type_name -> whalerein.v1.RunPhase
+	91,  // 188: whalerein.v1.VersionCheck.questions:type_name -> whalerein.v1.QuestionDescriptor
+	157, // 189: whalerein.v1.VersionChecks.checks:type_name -> whalerein.v1.VersionCheck
 	25,  // 190: whalerein.v1.SessionWaitState.pending_input:type_name -> whalerein.v1.InputKind
 	24,  // 191: whalerein.v1.SessionWaitResult.reason:type_name -> whalerein.v1.WaitReason
 	163, // 192: whalerein.v1.SessionWaitResult.state:type_name -> whalerein.v1.SessionWaitState
@@ -15279,7 +15354,7 @@ func file_whalerein_proto_init() {
 		(*RequestPayload_ListApprovals)(nil),
 		(*RequestPayload_ReadHistory)(nil),
 		(*RequestPayload_WatchSession)(nil),
-		(*RequestPayload_RefreshWatches)(nil),
+		(*RequestPayload_CheckVersions)(nil),
 		(*RequestPayload_UnwatchSession)(nil),
 		(*RequestPayload_ReadMessageReply)(nil),
 		(*RequestPayload_GetHostCapabilities)(nil),
@@ -15310,7 +15385,7 @@ func file_whalerein_proto_init() {
 		(*ResponsePayload_ApprovalList)(nil),
 		(*ResponsePayload_HistoryPage)(nil),
 		(*ResponsePayload_WatchReady)(nil),
-		(*ResponsePayload_WatchStates)(nil),
+		(*ResponsePayload_VersionChecks)(nil),
 		(*ResponsePayload_SessionInfo)(nil),
 		(*ResponsePayload_MessageReply)(nil),
 		(*ResponsePayload_HostCapabilities)(nil),

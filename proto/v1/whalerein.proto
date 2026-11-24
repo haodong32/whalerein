@@ -10,10 +10,12 @@ option go_package = "github.com/whalerein/whalerein/proto/v1/bindings/go;whalere
 // binary protobuf encoding. There is no second OpenAPI or JSON Schema.
 //
 // The application protocol version stays 1. The MQTT relay uses one
-// coordinated epoch, RELAY_EPOCH_V4 (4): control messages travel inline in one
+// coordinated epoch, RELAY_EPOCH_V5 (5): control messages travel inline in one
 // MQTT PUBLISH when the full encoded packet fits, or as a packet-sized
-// PayloadReference to complete HTTPS ciphertext, while live previews travel
-// fire-and-forget on dedicated QoS 0 live topics. There is no fragment,
+// PayloadReference to complete HTTPS ciphertext. Queries and post-pairing Noise
+// use the MQTT 5 request/reply lane with Broker-stamped connection identity and
+// deadline-derived Message Expiry Interval, while previews travel fire-and-
+// forget from the Host on dedicated QoS 0 device topics. There is no fragment,
 // reassembly or application receipt protocol and no legacy relay fallback.
 
 // ---------------------------------------------------------------------------
@@ -140,20 +142,25 @@ enum QuestionAvailability {
 
 // One coordinated relay contract. This value is carried as `relay_version` on
 // every relay envelope and advertisement and is independent of application
-// protocol version 1. A peer that does not advertise RELAY_EPOCH_V4 is
+// protocol version 1. A peer that does not advertise RELAY_EPOCH_V5 is
 // rejected with protocol_version_incompatible; there is no unframed or
 // fragment-based fallback.
 //
-// Epoch 4 hard-cuts epoch 3: it adds the QoS 0 live delivery class on dedicated
-// live topics next to the unchanged ordered/acked control topics. Epoch 3 is
-// reserved and never accepted; there is no dual epoch and no fallback.
+// Epoch 5 hard-cuts epoch 4: post-pairing Noise establishment, session queries
+// and observation checks use MQTT 5 request/reply on the query lane with
+// Broker-stamped connection identity and Message Expiry Interval. Device
+// previews travel directly from the Host as QoS 0; Access no longer republishes
+// them. The command lane keeps its durable HTTPS admission, heartbeat and
+// result read. Epoch 4 and earlier are reserved and never accepted; there is no
+// dual epoch and no fallback.
 enum RelayEpoch {
   RELAY_EPOCH_UNSPECIFIED = 0;
-  reserved 3;
-  reserved "RELAY_EPOCH_V3";
-  // Inline-or-reference control relay over MQTT QoS 1 and HTTPS ciphertext
-  // objects, with lossy QoS 0 live previews on the live topics.
-  RELAY_EPOCH_V4 = 4;
+  reserved 3, 4;
+  reserved "RELAY_EPOCH_V3", "RELAY_EPOCH_V4";
+  // MQTT 5 request/reply query lane, Broker-stamped connection identity,
+  // deadline-derived Message Expiry Interval, direct device previews and
+  // inline-or-reference history transfer over MQTT QoS 1 and HTTPS objects.
+  RELAY_EPOCH_V5 = 5;
 }
 
 // Shared packaged transport profile vocabulary. The executable defaults and
@@ -202,7 +209,7 @@ message ReceiveAdvertisement {
   TransportProfile profile = 1;
   TransportBudget budget = 2;
   uint64 connection_generation = 3;
-  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+  // Required relay epoch; must equal RELAY_EPOCH_V5 (5).
   uint32 relay_version = 4;
 }
 
@@ -255,6 +262,11 @@ message RelayObjectReserveRequest {
   // Host authority only; Device callers authenticate with a bearer token.
   int64 signed_at_unix_ms = 11;
   bytes signature = 12;
+  // Query-lane binding: the original admitted request and its Broker-stamped
+  // connection scope. Empty for durable command objects and attachment parts.
+  string request_id = 13;
+  uint64 enrollment_generation = 14;
+  string connection_ref = 15;
 }
 
 message RelayObjectReservation {
@@ -305,6 +317,9 @@ message RequestTransportMetadata {
   // Access Host/device revocation generation captured at submission. A plain
   // Host-scoped revoke bumps only this revision, so it must be fenced too.
   uint64 revocation_generation = 3;
+  // Access managed enrollment generation captured at submission. The query
+  // lane matches it separately from the grant revision.
+  uint64 enrollment_generation = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +357,7 @@ message HostRequest {
   reserved "client_transport_version", "relay_transport_version";
   // Device result bound and grant generation bound by Access at admission.
   RequestTransportMetadata transport = 14;
-  // Required relay epoch; must equal RELAY_EPOCH_V4 (4). Access rejects a
+  // Required relay epoch; must equal RELAY_EPOCH_V5 (5). Access rejects a
   // Device request and Host rejects an Access-forwarded request otherwise with
   // protocol_version_incompatible.
   uint32 relay_version = 15;
@@ -351,6 +366,19 @@ message HostRequest {
   // PAIRING_CLAIM and internal Access notices are small bootstrap bodies and
   // must stay inline, so they never carry body_reference.
   PayloadReference body_reference = 16;
+  // Broker-issued `<broker-epoch>:<connection-instance>` for the authenticated
+  // Device connection that submitted a query-lane request. Access fills this
+  // from the Broker ingress stamp after admission; a Device cannot set it
+  // because it never publishes on the Access -> Host lane. Host binds
+  // observation ownership and reply affinity to it.
+  string connection_ref = 17;
+  // Current Host/device grant generation captured by Access at query
+  // admission. Host applies its execution fence to this exact scope.
+  uint64 grant_generation = 18;
+  // Current managed enrollment generation captured by Access at query
+  // admission. It is matched separately from the grant revision so a re-added
+  // Host or a re-paired client cannot attach to an older query.
+  uint64 enrollment_generation = 19;
 }
 
 message HostResult {
@@ -372,7 +400,7 @@ message HostResult {
   int64 completed_at_unix_ms = 11;
   uint32 protocol_version = 12;
   string channel_id = 13;
-  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+  // Required relay epoch; must equal RELAY_EPOCH_V5 (5).
   uint32 relay_version = 14;
   // Exactly one of `result_body` and `result_reference` is set when a result
   // body exists. HostReady, pairing results and internal control results are
@@ -433,7 +461,7 @@ message RequestStateNotice {
   string command_id = 5;
   int64 updated_at_unix_ms = 6;
   PayloadReference result_reference = 7;
-  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+  // Required relay epoch; must equal RELAY_EPOCH_V5 (5).
   uint32 relay_version = 8;
 }
 
@@ -563,7 +591,7 @@ message HostReady {
   reserved "transport_version";
   // Host receive limits for the authenticated broker connection generation.
   ReceiveAdvertisement receive = 5;
-  // Required relay epoch; must equal RELAY_EPOCH_V4 (4). Access refuses to
+  // Required relay epoch; must equal RELAY_EPOCH_V5 (5). Access refuses to
   // mark an older or unknown epoch Host ready.
   uint32 relay_version = 6;
 }
@@ -658,7 +686,7 @@ message RequestPayload {
     ListApprovals list_approvals = 10;
     HistoryRead read_history = 11;
     WatchSession watch_session = 12;
-    RefreshWatches refresh_watches = 13;
+    CheckVersions check_versions = 13;
     UnwatchSession unwatch_session = 14;
     ReadMessageReply read_message_reply = 15;
     GetHostCapabilities get_host_capabilities = 190;
@@ -695,7 +723,7 @@ message ResponsePayload {
     ApprovalList approval_list = 10;
     HistoryPage history_page = 11;
     WatchReady watch_ready = 12;
-    WatchStates watch_states = 13;
+    VersionChecks version_checks = 13;
     SessionSummary session_info = 14;
     MessageReply message_reply = 15;
     HostCapabilities host_capabilities = 190;
@@ -987,7 +1015,7 @@ message EventEnvelope {
   bytes ciphertext = 5;
   int64 created_at_unix_ms = 6;
   string trace_id = 7;
-  // Required relay epoch; must equal RELAY_EPOCH_V4 (4).
+  // Required relay epoch; must equal RELAY_EPOCH_V5 (5).
   uint32 relay_version = 8;
   // Complete ciphertext locator. Exactly one of `ciphertext` and
   // `payload_reference` is set; the reference resolves to the same ciphertext
@@ -1361,25 +1389,25 @@ message WatchReady {
   // Question readiness for this observation. Required for questions interest.
   QuestionDescriptor questions = 4;
 }
-message RefreshWatches { repeated string watch_ids = 1; }
-// Lease renewal carries no session content. Content is delivered by the
-// event stream and by the one bounded baseline read at attach; a renewal that
-// had to rebuild the baseline would grow with the transcript and eventually
-// exceed the transport budget for reasons unrelated to connectivity.
-message WatchLease {
+// Bounded, read-only reconciliation of authoritative DSH state for one active
+// observation. It never renews or extends a watch lease; authorization and the
+// observation generation travel in the enclosing query and authenticated
+// connection.
+message CheckVersions { string session_id = 1; }
+// Authoritative version markers for one observation. Content stays on the
+// event stream and the paged history read; a changed marker means the observer
+// missed something, and the affected facet is rebuilt through the existing
+// authoritative reads.
+message VersionCheck {
   string watch_id = 1;
-  uint32 lease_ms = 2;
-  // State transition markers only: a changed marker means the observer missed
-  // something. Structural drift is repaired by re-attaching for a fresh baseline
-  // and history drift by the paged history read; a lease never ships content.
-  uint64 revision = 3;
-  RunPhase run_phase = 4;
-  string live_epoch = 5;
-  string history_head = 6;
-  string projection_id = 7;
-  QuestionDescriptor questions = 8;
+  uint64 revision = 2;
+  RunPhase run_phase = 3;
+  string live_epoch = 4;
+  string history_head = 5;
+  string projection_id = 6;
+  QuestionDescriptor questions = 7;
 }
-message WatchStates { repeated WatchLease watches = 1; }
+message VersionChecks { repeated VersionCheck checks = 1; }
 message UnwatchSession { string watch_id = 1; }
 
 // Ephemeral, read-only observations. The enclosing request owns authorization

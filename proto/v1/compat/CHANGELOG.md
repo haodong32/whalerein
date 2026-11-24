@@ -56,3 +56,18 @@ Rationale: Pending approvals left SessionState. Session state is a bounded trans
 
 - removed field SessionState.approvals (tag 6)
 
+## Breaking change accepted
+
+Rationale: Coordinated relay epoch 5 hard cut: MQTT 5 query request/reply replaces the post-pairing HTTPS handshake and durable query/poll path, queries carry Broker connection and enrollment scope, and RefreshWatches is replaced by a read-only version check. Application protocol stays version 1 and durable credentials, grants, source history and command recovery identities are retained.
+
+- removed message RefreshWatches
+- tag 13 of RequestPayload was reused from refresh_watches to check_versions
+- changed type_name of RequestPayload.refresh_watches: 'whalerein.v1.RefreshWatches' -> 'whalerein.v1.CheckVersions'
+- changed json_name of RequestPayload.refresh_watches: 'refreshWatches' -> 'checkVersions'
+- tag 13 of ResponsePayload was reused from watch_states to version_checks
+- changed type_name of ResponsePayload.watch_states: 'whalerein.v1.WatchStates' -> 'whalerein.v1.VersionChecks'
+- changed json_name of ResponsePayload.watch_states: 'watchStates' -> 'versionChecks'
+- removed message WatchLease
+- removed message WatchStates
+- removed enum value RelayEpoch.RELAY_EPOCH_V4 (4)
+

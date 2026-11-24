@@ -150,10 +150,11 @@ the result body; callers must not infer business failure from that absence.
 whalerein/v1/h/{host_id}/request
 whalerein/v1/h/{host_id}/result
 whalerein/v1/h/{host_id}/event
-whalerein/v1/h/{host_id}/live
 whalerein/v1/h/{host_id}/d/{device_id}/event
 whalerein/v1/h/{host_id}/d/{device_id}/notice
 whalerein/v1/h/{host_id}/d/{device_id}/ready
+whalerein/v1/h/{host_id}/d/{device_id}/query
+whalerein/v1/h/{host_id}/d/{device_id}/reply
 whalerein/v1/h/{host_id}/d/{device_id}/live
 ```
 

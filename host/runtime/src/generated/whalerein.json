@@ -109,14 +109,19 @@
             "RelayEpoch": {
               "values": {
                 "RELAY_EPOCH_UNSPECIFIED": 0,
-                "RELAY_EPOCH_V4": 4
+                "RELAY_EPOCH_V5": 5
               },
               "reserved": [
                 [
                   3,
                   3
                 ],
-                "RELAY_EPOCH_V3"
+                [
+                  4,
+                  4
+                ],
+                "RELAY_EPOCH_V3",
+                "RELAY_EPOCH_V4"
               ]
             },
             "TransportProfile": {
@@ -275,6 +280,18 @@
                 "signature": {
                   "type": "bytes",
                   "id": 12
+                },
+                "request_id": {
+                  "type": "string",
+                  "id": 13
+                },
+                "enrollment_generation": {
+                  "type": "uint64",
+                  "id": 14
+                },
+                "connection_ref": {
+                  "type": "string",
+                  "id": 15
                 }
               }
             },
@@ -379,6 +396,10 @@
                 "revocation_generation": {
                   "type": "uint64",
                   "id": 3
+                },
+                "enrollment_generation": {
+                  "type": "uint64",
+                  "id": 4
                 }
               }
             },
@@ -452,6 +473,18 @@
                 "body_reference": {
                   "type": "PayloadReference",
                   "id": 16
+                },
+                "connection_ref": {
+                  "type": "string",
+                  "id": 17
+                },
+                "grant_generation": {
+                  "type": "uint64",
+                  "id": 18
+                },
+                "enrollment_generation": {
+                  "type": "uint64",
+                  "id": 19
                 }
               },
               "reserved": [
@@ -1133,7 +1166,7 @@
                     "list_approvals",
                     "read_history",
                     "watch_session",
-                    "refresh_watches",
+                    "check_versions",
                     "unwatch_session",
                     "read_message_reply",
                     "get_host_capabilities",
@@ -1202,8 +1235,8 @@
                   "type": "WatchSession",
                   "id": 12
                 },
-                "refresh_watches": {
-                  "type": "RefreshWatches",
+                "check_versions": {
+                  "type": "CheckVersions",
                   "id": 13
                 },
                 "unwatch_session": {
@@ -1300,7 +1333,7 @@
                     "approval_list",
                     "history_page",
                     "watch_ready",
-                    "watch_states",
+                    "version_checks",
                     "session_info",
                     "message_reply",
                     "host_capabilities",
@@ -1354,8 +1387,8 @@
                   "type": "WatchReady",
                   "id": 12
                 },
-                "watch_states": {
-                  "type": "WatchStates",
+                "version_checks": {
+                  "type": "VersionChecks",
                   "id": 13
                 },
                 "session_info": {
@@ -3529,56 +3562,51 @@
                 }
               }
             },
-            "RefreshWatches": {
+            "CheckVersions": {
               "fields": {
-                "watch_ids": {
-                  "rule": "repeated",
+                "session_id": {
                   "type": "string",
                   "id": 1
                 }
               }
             },
-            "WatchLease": {
+            "VersionCheck": {
               "fields": {
                 "watch_id": {
                   "type": "string",
                   "id": 1
                 },
-                "lease_ms": {
-                  "type": "uint32",
-                  "id": 2
-                },
                 "revision": {
                   "type": "uint64",
-                  "id": 3
+                  "id": 2
                 },
                 "run_phase": {
                   "type": "RunPhase",
-                  "id": 4
+                  "id": 3
                 },
                 "live_epoch": {
                   "type": "string",
-                  "id": 5
+                  "id": 4
                 },
                 "history_head": {
                   "type": "string",
-                  "id": 6
+                  "id": 5
                 },
                 "projection_id": {
                   "type": "string",
-                  "id": 7
+                  "id": 6
                 },
                 "questions": {
                   "type": "QuestionDescriptor",
-                  "id": 8
+                  "id": 7
                 }
               }
             },
-            "WatchStates": {
+            "VersionChecks": {
               "fields": {
-                "watches": {
+                "checks": {
                   "rule": "repeated",
-                  "type": "WatchLease",
+                  "type": "VersionCheck",
                   "id": 1
                 }
               }
