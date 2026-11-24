@@ -107,7 +107,9 @@ import com.whalerein.android.state.support.ExportWriteResult
  * Tests use the exact `:state` interfaces the production graph supplies; no
  * Core, Keystore, JNA or network is involved.
  */
-class FakeAppDependencies : AppDependencies {
+class FakeAppDependencies(
+    instanceId: InstanceId = InstanceId("test-instance"),
+) : AppDependencies {
     val fakeObservation = FakeObservationPort()
     val fakeHistory = FakeHistoryPort()
     val fakePendingInput = FakePendingInputPort()
@@ -200,7 +202,7 @@ class FakeAppDependencies : AppDependencies {
     override val diagnosticSink: DiagnosticSink = fakeSink
     override val coreVersion: String = "test-core"
     override val appVersion: String = "test-app"
-    override val instance: InstanceId = InstanceId("test-instance")
+    override val instance: InstanceId = instanceId
 
     override fun close() = Unit
 }
@@ -257,11 +259,21 @@ class InMemoryJournalStore : JournalStore {
     }
 }
 
-class FakeObservationPort : ObservationPort {
+class FakeObservationPort(
+    /**
+     * Optional deterministic event script. [script] receives the scoped watch
+     * and the zero-based poll index; a null result falls back to the idle watch
+     * that stays suspended until it is stopped.
+     */
+    var script: ((WatchSession, Int) -> ObservationBatch?)? = null,
+    /** Delay per scripted poll; the Gallery stretches this so streaming is visible. */
+    var stepDelayMillis: Long = 160,
+) : ObservationPort {
     var startCount = 0
     var stopCount = 0
     var lastSession: WatchSession? = null
     private val watches = mutableMapOf<String, kotlinx.coroutines.CompletableDeferred<Unit>>()
+    private val pollCounts = mutableMapOf<String, Int>()
 
     override suspend fun startWatch(request: WatchRequest): Outcome<WatchSession> {
         startCount += 1
@@ -277,6 +289,13 @@ class FakeObservationPort : ObservationPort {
     }
 
     override suspend fun pollEvents(session: WatchSession): Outcome<ObservationBatch> {
+        val step = pollCounts[session.watchId] ?: 0
+        pollCounts[session.watchId] = step + 1
+        val scripted = script?.invoke(session, step)
+        if (scripted != null) {
+            if (stepDelayMillis > 0) kotlinx.coroutines.delay(stepDelayMillis)
+            return Outcome.Success(scripted)
+        }
         // Stay suspended until the scoped watch is stopped: an active watch
         // must not spin the main looper or change the watch identity.
         watches[session.watchId]?.await()
@@ -292,13 +311,17 @@ class FakeObservationPort : ObservationPort {
     override suspend fun stopWatch(session: WatchSession): Outcome<Unit> {
         stopCount += 1
         watches.remove(session.watchId)?.complete(Unit)
+        pollCounts.remove(session.watchId)
         return Outcome.Success(Unit)
     }
 }
 
 class FakeHistoryPort : HistoryPort {
+    /** Latest committed page shared by every scope in a fixture. */
+    var messages: List<com.whalerein.android.state.conversation.Message> = emptyList()
+
     override suspend fun latestPage(scope: SessionRef, projection: String): Outcome<HistoryPage> =
-        Outcome.Success(HistoryPage(scope, projection, emptyList()))
+        Outcome.Success(HistoryPage(scope, projection, messages))
 
     override suspend fun olderPage(scope: SessionRef, cursor: HistoryCursor): Outcome<HistoryPage> =
         Outcome.Failure(CoreFailure("no_page", "no_page"))
@@ -357,6 +380,10 @@ class FakePendingInputPort : PendingInputPort {
 class FakeSessionListPort : SessionListPort {
     var snapshot: com.whalerein.android.state.conversation.SessionListSnapshot? = null
     var detail: com.whalerein.android.state.conversation.SessionDetails? = null
+    /** Optional per-session details; keeps a selection inside its own scope. */
+    var detailsBySession:
+        Map<com.whalerein.android.state.core.SessionId, com.whalerein.android.state.conversation.SessionDetails> =
+        emptyMap()
     var createResult: com.whalerein.android.state.conversation.CreatedSession? = null
     var forkResult: com.whalerein.android.state.conversation.ForkedSession? = null
 
@@ -374,7 +401,9 @@ class FakeSessionListPort : SessionListPort {
         session: com.whalerein.android.state.core.SessionRef,
     ): Outcome<com.whalerein.android.state.conversation.SessionDetails> =
         Outcome.Success(
-            detail ?: com.whalerein.android.state.conversation.SessionDetails(session = session),
+            detailsBySession[session.sessionId]
+                ?: detail?.takeIf { it.session == session }
+                ?: com.whalerein.android.state.conversation.SessionDetails(session = session),
         )
 
     override suspend fun create(

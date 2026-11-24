@@ -1,6 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
+        <!-- Debug-only launcher for reproducible Compose scenarios. A separate
+             entry keeps a scenario cold start independent from the production
+             Core graph; no release variant merges these declarations. -->
+        <activity
+            android:name=".gallery.StateGalleryActivity"
+            android:exported="true"
+            android:label="WhaleRein State Gallery"
+            android:theme="@style/Theme.WhaleRein">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- One Activity per scenario scopes the back stack, view models and
+             subscriptions to the scenario run. -->
+        <activity
+            android:name=".gallery.ScenarioActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
+            android:exported="false"
+            android:theme="@style/Theme.WhaleRein"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- Debug-only host for instrumentation tests that need ActivityResult
              launchers registered before the activity starts. -->
         <activity
