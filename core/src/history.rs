@@ -579,7 +579,7 @@ impl Core {
         let local = self.transport_budget();
         let receive = self.runtime.host_receive(host_id).unwrap_or(local);
         let packet = local.packet_bytes.min(receive.packet_bytes);
-        packet.saturating_sub(4 * 1024).max(1024).min(MAX_PAGE_BYTES)
+        packet.saturating_sub(4 * 1024).clamp(1024, MAX_PAGE_BYTES)
     }
 
     async fn history_page_online(
