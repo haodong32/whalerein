@@ -133,6 +133,7 @@ export class SecurityManager {
     maxDeviceChannels = MAX_DEVICE_CHANNELS,
     maxHostChannels = MAX_HOST_CHANNELS,
     onClosedChannels = () => {},
+    onRevokedDevices = () => {},
     onRevokedChannels = () => {},
     receiveAdvertisement = () => defaultReceiveAdvertisement(1),
   }) {
@@ -149,6 +150,7 @@ export class SecurityManager {
     this.maxDeviceChannels = maxDeviceChannels
     this.maxHostChannels = maxHostChannels
     this.onClosedChannels = onClosedChannels
+    this.onRevokedDevices = onRevokedDevices
     this.onRevokedChannels = onRevokedChannels
     this.receiveAdvertisement = receiveAdvertisement
     this.hostFingerprint = identity.fingerprint ?? fingerprint(identity.publicKey)
@@ -835,6 +837,9 @@ export class SecurityManager {
       revokedAt: notice.revoked_at_unix_ms ?? this.now(),
       now: this.now(),
     })
+    // Close observations while the channel keys still exist so each Device can
+    // receive an authenticated terminal WatchClosed with the revocation reason.
+    if (applied.length > 0) this.onRevokedDevices(applied)
     const closed = []
     for (const deviceId of applied) {
       closed.push(...this.#clearDeviceChannels(deviceId))

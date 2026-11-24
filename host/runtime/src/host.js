@@ -196,6 +196,9 @@ export class HostRuntime {
           this.#events?.onChannelsCleared(channels)
           for (const { deviceId, channelId } of channels) this.#commands?.cancelChannel(deviceId, channelId, reason)
         },
+        onRevokedDevices: (deviceIds) => {
+          this.#events?.onRevoked?.(deviceIds)
+        },
         onRevokedChannels: (channels, deviceIds) => {
           this.#events?.onChannelsCleared(channels)
           for (const deviceId of deviceIds) this.#commands?.revokeDevice(deviceId)

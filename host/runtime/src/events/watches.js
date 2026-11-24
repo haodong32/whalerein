@@ -947,6 +947,17 @@ export class WatchedEvents {
     this.#snapshotRequired.delete(channelId)
   }
 
+  /**
+   * End every observation of the revoked Devices with an authenticated
+   * terminal event while their channel keys still exist.
+   */
+  onRevoked(deviceIds) {
+    const revoked = new Set(deviceIds)
+    for (const watch of [...this.#watches.values()]) {
+      if (revoked.has(watch.deviceId)) this.#enqueueClosed(watch, 'revoked')
+    }
+  }
+
   onChannelsCleared(channels) {
     for (const { deviceId, channelId } of channels) this.#clearChannelEvents(deviceId, channelId)
   }
