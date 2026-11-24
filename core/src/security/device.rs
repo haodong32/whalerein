@@ -80,6 +80,33 @@ pub fn load_or_create(
     Ok(DeviceIdentity { device_id, key })
 }
 
+/// Replace the keypair while preserving the client id. The caller must have
+/// revoked every remote grant before committing the new key.
+pub fn replace_key(
+    secrets: &Arc<dyn SecretStore>,
+    profile: &Path,
+    key: &StaticIdentity,
+) -> Result<DeviceIdentity, SecurityError> {
+    let slot = storage_key(profile)?;
+    let bytes = secrets.load(&slot)?.ok_or(SecurityError::InvalidKey)?;
+    let stored: StoredIdentity =
+        serde_json::from_slice(&bytes).map_err(|_| SecurityError::InvalidKey)?;
+    if stored.device_id.is_empty() {
+        return Err(SecurityError::InvalidKey);
+    }
+    let next = StoredIdentity {
+        device_id: stored.device_id.clone(),
+        private_key: *key.private_key(),
+    };
+    let encoded = serde_json::to_vec(&next).map_err(|_| SecurityError::InvalidKey)?;
+    secrets.save(&slot, &encoded)?;
+    store_device_identity(secrets, &next.device_id, key)?;
+    Ok(DeviceIdentity {
+        device_id: next.device_id,
+        key: StaticIdentity::from_private_key(key.private_key())?,
+    })
+}
+
 pub fn forget(secrets: &Arc<dyn SecretStore>, profile: &Path) -> Result<(), SecurityError> {
     let slot = storage_key(profile)?;
     if let Some(bytes) = secrets.load(&slot)? {
@@ -342,6 +369,21 @@ mod tests {
                 .device_id,
             "existing"
         );
+    }
+
+    #[test]
+    fn rotation_preserves_the_client_id_and_replaces_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let original = load_or_create(&secrets, dir.path(), None).unwrap();
+        let next = StaticIdentity::generate();
+        let rotated = replace_key(&secrets, dir.path(), &next).unwrap();
+        assert_eq!(rotated.device_id, original.device_id);
+        assert_eq!(rotated.key.public_key(), next.public_key());
+        assert_ne!(rotated.key.public_key(), original.key.public_key());
+        let reopened = load_or_create(&secrets, dir.path(), None).unwrap();
+        assert_eq!(reopened.device_id, original.device_id);
+        assert_eq!(reopened.key.public_key(), next.public_key());
     }
 
     #[test]

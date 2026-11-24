@@ -277,10 +277,12 @@ A client installation identity is the per-instance id plus its Noise static
 keypair. It is created lazily on first pairing and persisted before any network
 request; grants, transport tokens and reconnects do not change it. Revocation
 clears authorization while preserving the identity; explicit forget removes it.
-There is no silent key rotation: resetting a client creates a new client id and
-keypair, and the old installation is revoked. The account service registers the
-installation on first pairing and can revoke every Host grant it owns without
-changing any Host identity.
+There is no silent key rotation. An explicit client rotation first revokes
+every Host grant, then asks the account service to replace the key while
+preserving the client id, and finally stores the new key locally. The client
+must re-pair every Host. Resetting without rotation creates a new client id and
+keypair. The account service registers the installation on first pairing and
+can revoke every Host grant it owns without changing any Host identity.
 
 Queries may retry after channel loss. Controls keep their original command IDs
 and use result recovery instead of blind execution retries. Confirmed revocation

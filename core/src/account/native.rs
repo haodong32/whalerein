@@ -1162,6 +1162,54 @@ impl AccountClient {
         Ok(result.state)
     }
 
+    /// Revoke one client installation and every Host grant it owns.
+    pub(crate) async fn revoke_client_installation(
+        &self,
+        client_id: &str,
+        operation_id: &str,
+    ) -> CoreResult<String> {
+        #[derive(Deserialize)]
+        struct Status {
+            state: String,
+        }
+        let response = self
+            .http
+            .post(self.endpoint(&format!("clients/{client_id}/revoke"))?)
+            .bearer_auth(self.access().await?)
+            .json(&serde_json::json!({ "operationId": operation_id }))
+            .send()
+            .await
+            .map_err(request_error)?;
+        let status: Status = decode_scoped(response).await?;
+        Ok(status.state)
+    }
+
+    /// Replace the Noise key of an explicitly revoked client installation.
+    pub(crate) async fn rotate_client_installation(
+        &self,
+        client_id: &str,
+        operation_id: &str,
+        public_key: &[u8; 32],
+    ) -> CoreResult<String> {
+        #[derive(Deserialize)]
+        struct Status {
+            state: String,
+        }
+        let response = self
+            .http
+            .post(self.endpoint(&format!("clients/{client_id}/keys"))?)
+            .bearer_auth(self.access().await?)
+            .json(&serde_json::json!({
+                "operationId": operation_id,
+                "deviceNoiseKey": URL_SAFE_NO_PAD.encode(public_key),
+            }))
+            .send()
+            .await
+            .map_err(request_error)?;
+        let status: Status = decode_scoped(response).await?;
+        Ok(status.state)
+    }
+
     pub(crate) async fn revoke_all_sessions(&self) -> CoreResult<AccountSessionState> {
         let credential = self.access().await?;
         let response = self

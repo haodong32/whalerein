@@ -1120,6 +1120,41 @@ impl Core {
         Ok(())
     }
 
+    /// Rotate the client installation key while preserving its client id.
+    /// Every Host grant is revoked first, then the Cloud registry is updated.
+    pub async fn rotate_device(&self) -> CoreResult<()> {
+        if self.instance.is_some() && !self.options.data_dir.is_dir() {
+            return Ok(());
+        }
+        let _guard = self.identity_lock()?;
+        self.refresh_regional_state()?;
+        let identity = self.device_identity_locked(&_guard)?;
+        let account = self.account_client(false).await?;
+        let revoke_id = crate::util::random_id(16);
+        let state = account
+            .revoke_client_installation(&identity.device_id, &revoke_id)
+            .await?;
+        if state != "revoked" {
+            return Err(CoreError::Conflict(
+                "client revocation is still pending; retry rotation later".into(),
+            ));
+        }
+        let key = crate::security::identity::StaticIdentity::generate();
+        let rotate_id = crate::util::random_id(16);
+        let state = account
+            .rotate_client_installation(&identity.device_id, &rotate_id, key.public_key())
+            .await?;
+        if state != "active" {
+            return Err(CoreError::ProtocolIncompatible);
+        }
+        crate::security::device::replace_key(&self.options.secrets, &self.options.data_dir, &key)?;
+        self.runtime.revoke();
+        self.clear_local_pairing_secrets(&identity.device_id)?;
+        self.clear_cloud_pairing_material()?;
+        *self.identity.lock().expect("identity mutex") = None;
+        Ok(())
+    }
+
     #[cfg(any(unix, windows))]
     fn admission_revocation_error(state: Option<&str>, warning: bool) -> Option<CoreError> {
         match state.and_then(revoked_commands::confirmed_phase) {
