@@ -146,6 +146,12 @@ new fixtures. Debug builds defer the production graph to the first production
 caller (`MainActivity`), while Release builds open it in
 `WhaleReinApplication.onCreate()` as before.
 
+The repository includes a shared Android Studio run configuration named
+**State Gallery** (`apps/android/.run/State Gallery.run.xml`). Open
+`apps/android` as the project, pick the Debug variant, and run or debug that
+configuration; it deploys the selected Debug APK and launches the Gallery
+directly. No per-developer run configuration is required.
+
 Targeted instrumentation (a device is required):
 
 ```bash
