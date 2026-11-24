@@ -407,13 +407,13 @@ func TestRelayErrorMappingAndDisabledCapability(t *testing.T) {
 
 func TestRelayErrorsDoNotEchoSecrets(t *testing.T) {
 	f, fake := newRelayFixture(t)
-	fake.fetchErr = errors.New("ciphertext=topsecret token=abc")
+	fake.fetchErr = errors.New("ciphertext=TOPSECRET token=SECRET_ABC_123")
 	recorder := doRequest(t, f.server.PublicHandler(), http.MethodGet,
 		"/v1/relay/objects/"+relayTestObjectID, nil, map[string]string{RelayEpochHeader: "4"})
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d", recorder.Code)
 	}
-	if strings.Contains(recorder.Body.String(), "topsecret") || strings.Contains(recorder.Body.String(), "abc") {
+	if strings.Contains(recorder.Body.String(), "TOPSECRET") || strings.Contains(recorder.Body.String(), "SECRET_ABC_123") {
 		t.Fatalf("error body leaked internal text: %s", recorder.Body.String())
 	}
 	var response whalereinv1.ErrorResponse
