@@ -12,8 +12,8 @@ import time
 import uuid
 
 import pytest
-from environment import relay_http
-from journey_helpers import sql
+from environment import relay_http, wait
+from journey_helpers import host_online, sql, wait_online
 
 pytestmark = pytest.mark.transport
 
@@ -206,3 +206,52 @@ def test_mixed_representation_is_rejected(scenario, paired_device):
         )
         status, _, body = post_request(scenario, paired_device, bearer, bootstrap)
         assert status == 400 and json.loads(body)["code"] == "protocol_version_incompatible"
+
+
+@pytest.mark.description(
+    "During a coordinated cohort quiesce no dual path admits queries, and matching artifacts resume the retained grant, pinned identity and session history without re-pairing while a retired enrollment stays retired."
+)
+def test_ac08_cohort_quiesce_and_release(scenario, paired_device):
+    session = scenario.dsh.create_session()
+    paired_device.sessions(scenario.host)
+    assert paired_device.hosts()[0]["online"] is True
+
+    # Quiesce: the matching Host stops admitting work before the cutover.
+    scenario.plugin.close()
+    wait(lambda: not host_online(paired_device, scenario.host), timeout=40)
+    code, values = paired_device.invoke(
+        "session", "queue", "list", "--session", session, success=False
+    )
+    assert code != 0, "a query during quiesce must fail closed"
+    assert values[-1]["error"]["code"] in {
+        "host_offline", "unavailable", "not_found", "timeout", "forbidden",
+    }
+
+    # The retired HTTP admission route is still closed while admissions are
+    # quiesced: no dual path can carry the query.
+    with scenario.fixture_bearer(paired_device) as bearer:
+        status, _, body = post_request(
+            scenario,
+            paired_device,
+            bearer,
+            query_body(scenario, paired_device, requestId="quiesced-" + uuid.uuid4().hex),
+        )
+    assert status != 200, body
+    assert b"protocol_version_incompatible" in body
+
+    # Matching artifacts restart: the retained grant, pinned identity and
+    # source history resume without another pairing.
+    scenario.start_plugin()
+    wait_online(paired_device, scenario.host)
+    assert paired_device.hosts()[0]["online"] is True
+    assert [entry["session_id"] for entry in paired_device.sessions(scenario.host)] == [session]
+    paired_device.history(session)
+    paired_device.call("session", "queue", "list", "--session", session)
+
+    # A retired enrollment stays retired after the cutover.
+    paired_device.revoke()
+    code, values = paired_device.invoke(
+        "session", "queue", "list", "--session", session, success=False
+    )
+    assert code == 4, values[-1]
+    assert values[-1]["error"]["code"] in {"revoked", "unauthorized", "not_paired"}
