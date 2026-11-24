@@ -222,6 +222,21 @@ def test_certificate_rotation_fails_closed_then_recovers_without_repairing(
             lambda: paired_device.call('host', 'list')["hosts"][0]["online"] is True,
             timeout=30,
         )
+        # Replacing the Broker process drops Access's own MQTT session, so its
+        # admission policy and the Host's readiness must be re-established
+        # before a fresh Device CONNECT is accepted. This is recovery timing,
+        # not a trust decision: the same CA signs both leaves. Poll the device
+        # lane until it serves a query, then run the confirmed send.
+        import time as _time
+        deadline = _time.monotonic() + 150
+        while True:
+            try:
+                paired_device.call("session", "queue", "list", "--session", identity)
+                break
+            except AssertionError:
+                if _time.monotonic() >= deadline:
+                    raise
+                _time.sleep(2)
         paired_device.send_confirmed(identity, "after leaf rotation")
 
         # 2. New authority that Access does not trust: fail closed, not offline.

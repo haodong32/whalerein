@@ -93,6 +93,20 @@ adapter.waitSession = (...args) => {
 const keepAlive = setInterval(() => {}, 1 << 30)
 try {
   await host.start()
+  // Test-only transport trace: the harness reads this file to distinguish a
+  // stopped lane from a connected lane that is still replaying revocations.
+  if (process.env.WHALEREIN_TRANSPORT_TRACE === '1') {
+    const tracePath = path.join(process.env.WHALEREIN_STATE_DIR, 'transport-trace.json')
+    setInterval(() => {
+      try {
+        fs.writeFileSync(tracePath, JSON.stringify({
+          at: Date.now(),
+          ...host.access.describe(),
+          revocationsPending: host.security.revocationsPending,
+        }))
+      } catch { /* diagnostics only */ }
+    }, 500).unref?.()
+  }
   // Isolated fixture fault: fail exactly one terminal success journal write.
   const updateCommand = host.store.setCommandStatus.bind(host.store)
   host.store.setCommandStatus = fields => {
