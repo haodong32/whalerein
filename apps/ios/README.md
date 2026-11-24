@@ -42,7 +42,19 @@ keeps the fixture path.
 
 ## Build and test
 
-The generated XCFramework and Swift binding are prerequisites:
+Generate the Xcode project before opening it:
+
+```sh
+bash apps/ios/scripts/generate-project.sh
+open apps/ios/WhaleRein.xcodeproj
+```
+
+Edit `project.yml` for target, scheme, and build setting changes, then rerun the
+generator. It downloads and verifies the pinned XcodeGen release on first use
+and builds the Rust bindings if they are missing. The build scripts and native
+`./repo test` targets generate the project automatically.
+
+After changing Rust or UniFFI, rebuild the bindings:
 
 ```sh
 bash apps/mobile-bindings/scripts/build-xcframework.sh
@@ -61,9 +73,8 @@ The project has a `WhaleReinMobile` framework target that compiles the generated
 `Vendor/WhaleReinMobile.xcframework`. The app and integration test targets link
 that framework and `import WhaleReinMobile`. A dedicated module is required
 because the generated binding also defines `HostSummary` and `DeliveryChoice`,
-which would collide with the app's domain models in the same module. A
-"Check Vendor" build phase fails with a clear message when `apps/ios/Vendor/` is
-missing; generated artifacts remain gitignored.
+which would collide with the app's domain models in the same module. The generated
+project and `apps/ios/Vendor/` are Git-ignored.
 
 ```sh
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer

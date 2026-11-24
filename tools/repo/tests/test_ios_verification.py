@@ -64,7 +64,7 @@ class Xcode:
             return self.result(raw="sha256:fixture-image")
         if args[0] == "pnpm":
             return self.result()
-        if args[0] == "bash":
+        if args == ("bash", "apps/mobile-bindings/scripts/build-xcframework.sh"):
             assert env["WHALEREIN_MOBILE_SIMULATOR_ONLY"] == "1"
             if self.fault == "compile":
                 return self.result(code=1)
@@ -74,7 +74,11 @@ class Xcode:
                 f"source:{env['WHALEREIN_MOBILE_SOURCE']} core:0.1.0"
             )
             return self.result()
+        if args == ("bash", "apps/ios/scripts/generate-project.sh"):
+            assert (cwd / "apps/ios/Vendor/revision.txt").is_file()
+            return self.result(code=int(self.fault == "generate"))
         if args[:2] == ("xcodebuild", "build-for-testing"):
+            assert ("bash", "apps/ios/scripts/generate-project.sh") in self.commands
             products = Path(args[args.index("-derivedDataPath") + 1]) / "Build/Products"
             app = products / "WhaleRein.app"
             app.mkdir(parents=True, exist_ok=True)
@@ -208,6 +212,7 @@ def checkout(tmp_path, monkeypatch):
     [
         (None, 0, None),
         ("compile", 1, "mobile-bindings-build-failed"),
+        ("generate", 1, "xcode-project-generation-failed"),
         ("unmatched", 2, "unmatched-case-filter"),
         ("stale", 1, "runtime-identity-mismatch"),
         ("device", 1, "runtime-identity-mismatch"),
@@ -232,7 +237,7 @@ def test_ios_adapter_contract(checkout, tmp_path, fault, exit_code, error):
     assert result.exit_code == exit_code
     assert verification["error_code"] == error
     assert verification["cleanup"]["status"] == "complete"
-    if fault in {"compile", "unmatched", "stale"}:
+    if fault in {"compile", "generate", "unmatched", "stale"}:
         assert xcode.seen_contract is None
         assert not any("-resultBundlePath" in args for args in xcode.commands)
     else:

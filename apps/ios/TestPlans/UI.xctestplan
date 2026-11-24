@@ -11,7 +11,7 @@
   "defaultOptions" : {
     "targetForVariableExpansion" : {
       "containerPath" : "container:WhaleRein.xcodeproj",
-      "identifier" : "A10000000000000000000030",
+      "identifier" : "4FF69D3BE0B801079DB544C1",
       "name" : "WhaleRein"
     }
   },
@@ -20,7 +20,7 @@
       "parallelizable" : false,
       "target" : {
         "containerPath" : "container:WhaleRein.xcodeproj",
-        "identifier" : "A10000000000000000000032",
+        "identifier" : "304F66B0D336CB73B506F69C",
         "name" : "WhaleReinUITests"
       }
     }

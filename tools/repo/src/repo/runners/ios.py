@@ -298,6 +298,9 @@ def _build(ctx, runner, root, captured, plan, destination):
             ctx.record_artifact("mobile-bindings", revision)
             if not revision.startswith(f"source:{captured.fingerprint} "):
                 raise VerificationError("mobile-bindings-identity-mismatch")
+            generation = ctx.run(runner, ["bash", "apps/ios/scripts/generate-project.sh"], source)
+            if not generation.ok:
+                raise VerificationError("xcode-project-generation-failed")
             result = ctx.run(
                 runner,
                 [

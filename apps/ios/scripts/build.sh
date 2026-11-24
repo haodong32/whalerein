@@ -17,6 +17,8 @@ fi
 DESTINATION="${DESTINATION:-platform=iOS Simulator,name=iPhone 17,OS=26.4.1}"
 CONFIGURATION="${CONFIGURATION:-Debug}"
 
+bash "$IOS_DIR/scripts/generate-project.sh"
+
 echo "Building WhaleRein (${CONFIGURATION}) for ${DESTINATION}"
 xcodebuild \
   -project "${IOS_DIR}/WhaleRein.xcodeproj" \

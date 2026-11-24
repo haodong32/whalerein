@@ -33,10 +33,16 @@ Requirements: macOS with Xcode 16.4 or later, Rust with the
 (`rustup target add aarch64-apple-ios-macabi`).
 
 ```bash
-bash apps/mobile-bindings/scripts/build-xcframework.sh
+bash apps/ios/scripts/generate-project.sh
+open apps/ios/WhaleRein.xcodeproj
 ```
 
-The script builds the Rust library for device and Simulator with
+XcodeGen reads [project.yml](../apps/ios/project.yml) to generate the Xcode
+project. The generator installs the pinned XcodeGen release on first use and
+runs `apps/mobile-bindings/scripts/build-xcframework.sh` if the binding is missing.
+After changing Rust or UniFFI, run the binding script explicitly to refresh it.
+
+The binding script builds the Rust library for device and Simulator with
 `--no-default-features` (the app injects the Keychain `SecretStore`), generates
 Swift bindings from the same crate revision, and writes
 `apps/ios/Vendor/WhaleReinMobile.xcframework` together with a recorded revision.
@@ -47,8 +53,7 @@ The project compiles the generated `WhaleReinMobile.swift` and
 and links the XCFramework there; the app and test targets import the resulting
 `WhaleReinMobile` module. The generated binding defines `HostSummary` and
 `DeliveryChoice`, so a separate module keeps them from colliding with the app's
-domain models. A "Check Vendor" build phase fails with an explicit message when
-`apps/ios/Vendor/` is missing; generated files are never vendored into git.
+domain models. The generated project and bindings stay untracked.
 
 The deployment target is iOS 18.0. The project targets both iPhone and iPad
 (`TARGETED_DEVICE_FAMILY = "1,2"`) and enables Mac Catalyst for the app and test
