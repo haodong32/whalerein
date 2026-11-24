@@ -356,7 +356,21 @@ func e02SeedOlderBusinessState(t *testing.T, ctx context.Context, s *store.Store
 	if err := s.UpdateHostMetadata(ctx, e02HostID, "e02-host-fingerprint", 2, now); err != nil {
 		t.Fatalf("seed host metadata: %v", err)
 	}
-	if err := s.CreatePairedDevice(ctx, e02HostID, e02DeviceID, "e02-device-fingerprint", []byte(e02AuthHash), now); err != nil {
+	// Seed with the historical grant column set: the older schema predates
+	// enrollment_generation, so today's CreatePairedDevice cannot write it.
+	if _, err := s.Pool().Exec(ctx, `
+		INSERT INTO devices(device_id, public_key_fingerprint, created_at, updated_at)
+		VALUES($1,'e02-device-fingerprint',$2,$2)`, e02DeviceID, now); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	if _, err := s.Pool().Exec(ctx, `
+		INSERT INTO device_credentials(auth_hash, device_id, created_at)
+		VALUES($1,$2,$3)`, []byte(e02AuthHash), e02DeviceID, now); err != nil {
+		t.Fatalf("seed device credential: %v", err)
+	}
+	if _, err := s.Pool().Exec(ctx, `
+		INSERT INTO grants(host_id, device_id, created_at, updated_at, grant_generation)
+		VALUES($1,$2,$3,$3,1)`, e02HostID, e02DeviceID, now); err != nil {
 		t.Fatalf("seed paired device: %v", err)
 	}
 	// Seed with the historical column set: this schema predates the request
