@@ -29,19 +29,19 @@ type blockingPublisher struct {
 	started   chan string
 }
 
-func (b *blockingPublisher) publish(_ context.Context, topic string, payload []byte) error {
+func (b *blockingPublisher) publish(_ context.Context, message Message) error {
 	if b.started != nil {
 		select {
-		case b.started <- topic:
+		case b.started <- message.Topic:
 		default:
 		}
 	}
-	if gate, ok := b.blocked[topic]; ok {
+	if gate, ok := b.blocked[message.Topic]; ok {
 		<-gate
 	}
 	b.mu.Lock()
-	b.published = append(b.published, topic)
-	b.payloads = append(b.payloads, payload[0])
+	b.published = append(b.published, message.Topic)
+	b.payloads = append(b.payloads, message.Payload[0])
 	b.mu.Unlock()
 	return nil
 }
@@ -148,7 +148,7 @@ func TestOrderedPublisherBoundsDepthAndWaitingBytes(t *testing.T) {
 }
 
 func makePublisherWithBytes(max uint64, depth uint32) *publisher {
-	return newPublisher(func(context.Context, string, []byte) error { return nil }, queueTransport(1, depth, max), nil)
+	return newPublisher(func(context.Context, Message) error { return nil }, queueTransport(1, depth, max), nil)
 }
 
 func TestBlockedFlowDoesNotStarveAnotherFlow(t *testing.T) {

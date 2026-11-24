@@ -34,7 +34,7 @@ import (
 
 // Epoch is the only relay contract this build serves. Every request must carry
 // it or fails with ErrEpoch (protocol_version_incompatible).
-const Epoch uint32 = 4
+const Epoch uint32 = 5
 
 // Terminal relay errors. The HTTP layer maps each to the stable wire status and
 // error code from proto/v1/WIRE.md.
@@ -127,22 +127,31 @@ type Payloads interface {
 	Cancel(ctx context.Context, ref payload.Ref) error
 }
 
+// QueryScopes authorizes a ciphertext reservation against one live transient
+// query waiter. It is optional: a disabled or command-only directory never
+// consults it.
+type QueryScopes interface {
+	AuthorizeObjectReserve(ctx context.Context, hostID, deviceID, sessionID, channelID, requestID, connectionRef string, enrollment uint64, expiresAtUnixMs int64) error
+}
+
 // Dependencies wires the relay service.
 type Dependencies struct {
-	Auth     AuthService
-	Store    Store
-	Payloads Payloads
-	Config   Config
-	Now      func() time.Time
+	Auth        AuthService
+	Store       Store
+	Payloads    Payloads
+	QueryScopes QueryScopes
+	Config      Config
+	Now         func() time.Time
 }
 
 // Service implements the scoped ciphertext directory policy.
 type Service struct {
-	auth     AuthService
-	store    Store
-	payloads Payloads
-	config   Config
-	now      func() time.Time
+	auth        AuthService
+	store       Store
+	payloads    Payloads
+	queryScopes QueryScopes
+	config      Config
+	now         func() time.Time
 }
 
 // New validates the seams. A disabled directory still returns a service so the
@@ -163,16 +172,25 @@ func New(deps Dependencies) (*Service, error) {
 		}
 	}
 	return &Service{
-		auth:     deps.Auth,
-		store:    deps.Store,
-		payloads: deps.Payloads,
-		config:   deps.Config,
-		now:      deps.Now,
+		auth:        deps.Auth,
+		store:       deps.Store,
+		payloads:    deps.Payloads,
+		queryScopes: deps.QueryScopes,
+		config:      deps.Config,
+		now:         deps.Now,
 	}, nil
 }
 
 // Enabled reports whether the directory may reserve or release objects.
 func (s *Service) Enabled() bool { return s != nil && s.config.Enabled }
+
+// SetQueryScopes installs the transient query waiter authority. It is called
+// once during wiring, after the query service exists.
+func (s *Service) SetQueryScopes(scopes QueryScopes) {
+	if s != nil {
+		s.queryScopes = scopes
+	}
+}
 
 // ReserveRequest is one decoded reservation body plus the transport
 // credentials. Host callers sign the body; Device callers send a bearer token.
@@ -191,6 +209,12 @@ type ReserveRequest struct {
 	Signature       []byte
 	BearerToken     string
 	OwnerNode       string
+	// Query-lane binding. RequestID, ConnectionRef and EnrollmentGeneration
+	// are set only for a result reserved under a live transient query waiter.
+	// Durable command objects and attachment parts keep them empty/zero.
+	RequestID            string
+	ConnectionRef        string
+	EnrollmentGeneration uint64
 }
 
 // Reservation is the accepted reservation returned to the caller.
@@ -277,20 +301,34 @@ func (s *Service) Reserve(ctx context.Context, req ReserveRequest) (Reservation,
 	if err != nil {
 		return Reservation{}, err
 	}
+	if err := s.authorizeQueryScope(ctx, req, grant); err != nil {
+		return Reservation{}, err
+	}
 	objectID, err := newObjectID()
 	if err != nil {
 		return Reservation{}, err
 	}
+	// A query-scoped object records the admitted request and Broker connection
+	// as its parent identity. A durable command object keeps the opaque object
+	// id as its parent identity because the wire request carries no request
+	// identity for it.
+	messageID, requestID := objectID, ""
+	enrollment := int64Ptr(grant.EnrollmentGeneration)
+	connectionRef := ""
+	if req.RequestID != "" {
+		messageID, requestID = "", req.RequestID
+		connectionRef = req.ConnectionRef
+	} else {
+		enrollment = nil
+	}
 	object, err := s.payloads.Reserve(ctx, payload.ReserveInput{
-		ObjectID:   objectID,
-		HostID:     req.HostID,
-		DeviceID:   req.DeviceID,
-		AppSession: req.SessionID,
-		ChannelID:  req.ChannelID,
-		// The relay wire request carries no request/message/event identity.
-		// The opaque object id is the only correlation available, so it is
-		// recorded as the parent identity; it confers no authority.
-		MessageID:                  objectID,
+		ObjectID:                   objectID,
+		HostID:                     req.HostID,
+		DeviceID:                   req.DeviceID,
+		AppSession:                 req.SessionID,
+		ChannelID:                  req.ChannelID,
+		RequestID:                  requestID,
+		MessageID:                  messageID,
 		Purpose:                    purposeName(req.Purpose),
 		PartID:                     req.PartID,
 		Length:                     int64(req.CiphertextBytes),
@@ -299,6 +337,8 @@ func (s *Service) Reserve(ctx context.Context, req ReserveRequest) (Reservation,
 		GrantGeneration:            int64Ptr(grant.GrantGeneration),
 		RevocationGeneration:       int64Ptr(grant.RevocationGeneration),
 		DeviceRevocationGeneration: int64Ptr(grant.DeviceRevocationGeneration),
+		EnrollmentGeneration:       enrollment,
+		ConnectionRef:              connectionRef,
 	})
 	if err != nil {
 		return Reservation{}, translate(err)
@@ -398,6 +438,81 @@ func (s *Service) authorizeReserve(ctx context.Context, req ReserveRequest) (sto
 	return s.activeGrant(ctx, req.HostID, req.DeviceID)
 }
 
+// authorizeQueryScope binds a query-scoped reservation to one live transient
+// waiter and the current enrollment. Command and attachment reservations carry
+// no request id and keep their existing behavior.
+func (s *Service) authorizeQueryScope(ctx context.Context, req ReserveRequest, grant store.AdmissionGrant) error {
+	if req.RequestID == "" {
+		if req.ConnectionRef != "" || req.EnrollmentGeneration != 0 {
+			return fmt.Errorf("%w: connection scope requires a request id", ErrInvalid)
+		}
+		return nil
+	}
+	if req.Purpose != whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT &&
+		req.Purpose != whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_HISTORY_PAGE {
+		return fmt.Errorf("%w: query scope is only valid for result ciphertext", ErrInvalid)
+	}
+	if err := validUTF8Component("request id", req.RequestID, 512); err != nil {
+		return err
+	}
+	if err := validUTF8Component("connection ref", req.ConnectionRef, 128); err != nil {
+		return err
+	}
+	if req.ConnectionRef == "" || !validConnectionRef(req.ConnectionRef) {
+		return fmt.Errorf("%w: connection ref is invalid", ErrInvalid)
+	}
+	if req.EnrollmentGeneration != grant.EnrollmentGeneration {
+		return ErrForbidden
+	}
+	if s.queryScopes == nil {
+		return ErrForbidden
+	}
+	if err := s.queryScopes.AuthorizeObjectReserve(ctx, req.HostID, req.DeviceID, req.SessionID,
+		req.ChannelID, req.RequestID, req.ConnectionRef, req.EnrollmentGeneration, req.ExpiresAtUnixMs); err != nil {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// validConnectionRef checks the Broker-issued <epoch>:<connection> shape.
+func validConnectionRef(value string) bool {
+	epoch, instance, ok := strings.Cut(value, ":")
+	if !ok || epoch == "" || instance == "" {
+		return false
+	}
+	for _, r := range epoch {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	for _, r := range instance {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// checkQueryScope reauthorizes one already-reserved query object against its
+// original live waiter before finish or issue.
+func (s *Service) checkQueryScope(ctx context.Context, object store.PayloadObject) error {
+	if object.RequestID == "" {
+		return nil
+	}
+	if object.EnrollmentGeneration == nil || object.ConnectionRef == "" || s.queryScopes == nil {
+		return ErrForbidden
+	}
+	if *object.EnrollmentGeneration < 0 {
+		return ErrForbidden
+	}
+	if err := s.queryScopes.AuthorizeObjectReserve(ctx, object.HostID, object.DeviceID,
+		object.AppSession, object.ChannelID, object.RequestID, object.ConnectionRef,
+		uint64(*object.EnrollmentGeneration), object.ExpiresAt.UnixMilli()); err != nil {
+		return ErrForbidden
+	}
+	return nil
+}
+
 // PrepareUpload authorizes one exact-length upload before the HTTP layer reads
 // a single body byte. The returned target carries the reserved scope.
 func (s *Service) PrepareUpload(ctx context.Context, req UploadRequest) (UploadTarget, error) {
@@ -451,6 +566,9 @@ func (s *Service) Finish(ctx context.Context, req FinishRequest) (Object, error)
 	if err != nil {
 		return Object{}, err
 	}
+	if err := s.checkQueryScope(ctx, object); err != nil {
+		return Object{}, err
+	}
 	if req.CiphertextBytes != uint64(object.Length) {
 		return Object{}, fmt.Errorf("%w: finish length does not match the reservation", ErrConflict)
 	}
@@ -477,6 +595,10 @@ func (s *Service) Fetch(ctx context.Context, req ObjectRequest) (FetchResult, er
 	}, true)
 	if err != nil {
 		return FetchResult{}, err
+	}
+	// A query-scoped object is releasable only after its reply was issued.
+	if object.RequestID != "" && object.ConnectionRef != "" && object.IssuedAt == nil {
+		return FetchResult{}, ErrForbidden
 	}
 	reader, opened, err := s.payloads.Open(ctx, refFor(object))
 	if err != nil {
@@ -653,6 +775,10 @@ func (s *Service) checkGrant(ctx context.Context, object store.PayloadObject) er
 		grant.GrantGeneration != uint64(*object.GrantGeneration) ||
 		grant.RevocationGeneration != uint64(*object.RevocationGeneration) ||
 		grant.DeviceRevocationGeneration != uint64(*object.DeviceRevocationGeneration) {
+		return ErrForbidden
+	}
+	if object.EnrollmentGeneration != nil &&
+		(*object.EnrollmentGeneration < 0 || uint64(*object.EnrollmentGeneration) != grant.EnrollmentGeneration) {
 		return ErrForbidden
 	}
 	return nil

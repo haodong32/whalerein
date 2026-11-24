@@ -14,8 +14,9 @@ const (
 	ResultFilter = "whalerein/v1/h/+/result"
 	// EventFilter receives event envelopes from every host.
 	EventFilter = "whalerein/v1/h/+/event"
-	// LiveFilter receives the lossy, QoS 0 live previews from every host.
-	LiveFilter = "whalerein/v1/h/+/live"
+	// DeviceQueryFilter receives deadline-bound query and handshake requests
+	// from devices.
+	DeviceQueryFilter = "whalerein/v1/h/+/d/+/query"
 	// DeviceReadyFilter receives Device receive advertisements. Access is the
 	// only subscriber; a Device may publish only its own ready topic.
 	DeviceReadyFilter = "whalerein/v1/h/+/d/+/ready"
@@ -33,10 +34,11 @@ const (
 	KindRequest      TopicKind = "request"
 	KindResult       TopicKind = "result"
 	KindEvent        TopicKind = "event"
-	KindLive         TopicKind = "live"
 	KindDeviceEvent  TopicKind = "device_event"
 	KindDeviceNotice TopicKind = "device_notice"
 	KindDeviceReady  TopicKind = "device_ready"
+	KindDeviceQuery  TopicKind = "device_query"
+	KindDeviceReply  TopicKind = "device_reply"
 	KindDeviceLive   TopicKind = "device_live"
 	KindPresence     TopicKind = "presence"
 )
@@ -64,10 +66,6 @@ func ResultTopic(hostID string) string { return topicRoot + hostID + "/result" }
 // EventTopic is the host -> Access control event topic.
 func EventTopic(hostID string) string { return topicRoot + hostID + "/event" }
 
-// LiveTopic is the host -> Access lossy preview topic. It is published at QoS 0
-// and never carries a durable control envelope.
-func LiveTopic(hostID string) string { return topicRoot + hostID + "/live" }
-
 // DeviceEventTopic is the Access -> device event topic.
 func DeviceEventTopic(hostID, deviceID string) string {
 	return topicRoot + hostID + "/d/" + deviceID + "/event"
@@ -84,10 +82,21 @@ func DeviceReadyTopic(hostID, deviceID string) string {
 	return topicRoot + hostID + "/d/" + deviceID + "/ready"
 }
 
-// DeviceLiveTopic is the Access -> device lossy preview topic. It is published
-// at QoS 0 using only the authenticated outer device id.
+// DeviceLiveTopic is the Host -> device lossy preview topic. Access no longer
+// republishes previews, but the topic remains part of the wire contract.
 func DeviceLiveTopic(hostID, deviceID string) string {
 	return topicRoot + hostID + "/d/" + deviceID + "/live"
+}
+
+// DeviceQueryTopic is the device -> Access query and handshake topic.
+func DeviceQueryTopic(hostID, deviceID string) string {
+	return topicRoot + hostID + "/d/" + deviceID + "/query"
+}
+
+// DeviceReplyTopic is the Access -> device query reply topic. It is the only
+// authorized MQTT Response Topic for a query-lane request.
+func DeviceReplyTopic(hostID, deviceID string) string {
+	return topicRoot + hostID + "/d/" + deviceID + "/reply"
 }
 
 // PresenceTopic is the Access -> host device-presence topic.
@@ -122,7 +131,7 @@ func ParseTopic(topic string) (Topic, error) {
 			return Topic{}, ErrInvalidTopic
 		}
 		switch TopicKind(parts[1]) {
-		case KindRequest, KindResult, KindEvent, KindLive, KindPresence:
+		case KindRequest, KindResult, KindEvent, KindPresence:
 			return Topic{HostID: parts[0], Kind: TopicKind(parts[1])}, nil
 		default:
 			return Topic{}, ErrInvalidTopic
@@ -139,6 +148,10 @@ func ParseTopic(topic string) (Topic, error) {
 			kind = KindDeviceNotice
 		case "ready":
 			kind = KindDeviceReady
+		case "query":
+			kind = KindDeviceQuery
+		case "reply":
+			kind = KindDeviceReply
 		case "live":
 			kind = KindDeviceLive
 		default:

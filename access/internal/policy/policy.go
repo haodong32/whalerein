@@ -70,7 +70,21 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 			{Access: "read", Filter: topicRoot + hostID + "/presence"},
 			{Access: "write", Filter: topicRoot + hostID + "/result"},
 			{Access: "write", Filter: topicRoot + hostID + "/event"},
-			{Access: "write", Filter: topicRoot + hostID + "/live"},
+		}
+		// Direct QoS 0 previews are published by the Host for each Device it
+		// is currently authorized for. The retired h/{host}/live relay entry
+		// is never projected again.
+		for _, grant := range grants {
+			if !grant.Active || grant.HostID != hostID || grant.DeviceID == "" {
+				continue
+			}
+			revision := Revision(grant)
+			connection.Entries = append(connection.Entries,
+				Entry{Access: "write", Revision: revision, HostID: hostID,
+					Filter: topicRoot + hostID + "/d/" + grant.DeviceID + "/live"})
+			if revision > connection.Revision {
+				connection.Revision = revision
+			}
 		}
 	case KindDevice:
 		connection.Will = presenceRoot + deviceID
@@ -87,6 +101,8 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 			eventTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/event"
 			noticeTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/notice"
 			liveTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/live"
+			queryTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/query"
+			replyTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/reply"
 			connection.Entries = append(connection.Entries,
 				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: eventTopic},
 				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: eventTopic},
@@ -94,6 +110,9 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: noticeTopic},
 				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: liveTopic},
 				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: liveTopic},
+				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: replyTopic},
+				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: replyTopic},
+				Entry{Access: "write", Revision: revision, HostID: grant.HostID, Filter: queryTopic},
 				Entry{Access: "write", Revision: revision, HostID: grant.HostID, Filter: topicRoot + grant.HostID + "/d/" + deviceID + "/ready"},
 			)
 			if revision > connection.Revision {

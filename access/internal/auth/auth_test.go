@@ -134,6 +134,24 @@ func (f *fakeStore) HasActiveGrant(_ context.Context, hostID, deviceID string) (
 	return f.grants[grantKey(hostID, deviceID)], nil
 }
 
+func (f *fakeStore) ListHostGrants(_ context.Context, hostID string) ([]store.AdmissionGrant, error) {
+	f.listCalls++
+	if f.listGrantErr != nil {
+		return nil, f.listGrantErr
+	}
+	var grants []store.AdmissionGrant
+	for key, active := range f.grants {
+		parts := strings.Split(key, "|")
+		if len(parts) != 2 || parts[0] != hostID {
+			continue
+		}
+		grants = append(grants, store.AdmissionGrant{
+			HostID: hostID, DeviceID: parts[1], Active: active, GrantGeneration: 1,
+		})
+	}
+	return grants, nil
+}
+
 func (f *fakeStore) ListDeviceGrants(_ context.Context, deviceID string) ([]store.AdmissionGrant, error) {
 	f.listCalls++
 	if f.listGrantErr != nil {
@@ -647,7 +665,8 @@ func TestAuthorizeACLAllowsOnlyPrincipalOwnedTopics(t *testing.T) {
 	}{
 		{"allows Access to subscribe to host results", access, ActionSubscribe, "whalerein/v1/h/+/result", true},
 		{"allows Access to subscribe to host events", access, ActionSubscribe, "whalerein/v1/h/+/event", true},
-		{"allows Access to subscribe to host live previews", access, ActionSubscribe, "whalerein/v1/h/+/live", true},
+		{"denies Access to subscribe to retired host live previews", access, ActionSubscribe, "whalerein/v1/h/+/live", false},
+		{"allows Access to subscribe to device queries", access, ActionSubscribe, "whalerein/v1/h/+/d/+/query", true},
 		{"allows Access to subscribe to broker connect events", access, ActionSubscribe, "$SYS/brokers/+/clients/+/connected", true},
 		{"allows Access to subscribe to broker disconnect events", access, ActionSubscribe, "$SYS/brokers/+/clients/+/disconnected", true},
 		{"allows Access to subscribe to device last wills", access, ActionSubscribe, "whalerein/v1/presence/device/+", true},
@@ -655,7 +674,8 @@ func TestAuthorizeACLAllowsOnlyPrincipalOwnedTopics(t *testing.T) {
 		{"allows Access to publish host requests", access, ActionPublish, "whalerein/v1/h/h1/request", true},
 		{"allows Access to publish device events", access, ActionPublish, "whalerein/v1/h/h1/d/d1/event", true},
 		{"allows Access to publish device notices", access, ActionPublish, "whalerein/v1/h/h1/d/d1/notice", true},
-		{"allows Access to publish device live previews", access, ActionPublish, "whalerein/v1/h/h1/d/d1/live", true},
+		{"denies Access to publish device live previews", access, ActionPublish, "whalerein/v1/h/h1/d/d1/live", false},
+		{"allows Access to publish device query replies", access, ActionPublish, "whalerein/v1/h/h1/d/d1/reply", true},
 		{"denies Access publication to host live previews", access, ActionPublish, "whalerein/v1/h/h1/live", false},
 		{"allows Access to subscribe to device advertisements", access, ActionSubscribe, "whalerein/v1/h/+/d/+/ready", true},
 		{"denies Access device acknowledgement publishes", access, ActionPublish, "whalerein/v1/h/h1/d/d1/ack", false},
@@ -672,13 +692,17 @@ func TestAuthorizeACLAllowsOnlyPrincipalOwnedTopics(t *testing.T) {
 		{"denies host publication to presence", host, ActionPublish, "whalerein/v1/h/h1/presence", false},
 		{"allows host publication to its own results", host, ActionPublish, "whalerein/v1/h/h1/result", true},
 		{"allows host publication to its own events", host, ActionPublish, "whalerein/v1/h/h1/event", true},
-		{"allows host publication to its own live previews", host, ActionPublish, "whalerein/v1/h/h1/live", true},
-		{"denies host publication to another host live previews", host, ActionPublish, "whalerein/v1/h/h2/live", false},
+		{"denies host publication to the retired host live topic", host, ActionPublish, "whalerein/v1/h/h1/live", false},
+		{"allows host publication to a device live preview", host, ActionPublish, "whalerein/v1/h/h1/d/d1/live", true},
+		{"denies host publication to another host device live preview", host, ActionPublish, "whalerein/v1/h/h2/d/d1/live", false},
 		{"denies host subscription to live previews", host, ActionSubscribe, "whalerein/v1/h/h1/live", false},
 		{"denies host publication to request topics", host, ActionPublish, "whalerein/v1/h/h1/request", false},
 		{"denies host publication to device event topics", host, ActionPublish, "whalerein/v1/h/h1/d/d1/event", false},
 		{"allows device subscription to its granted event topic", device, ActionSubscribe, "whalerein/v1/h/h1/d/d1/event", true},
 		{"allows device subscription to its granted live topic", device, ActionSubscribe, "whalerein/v1/h/h1/d/d1/live", true},
+		{"allows device subscription to its query replies", device, ActionSubscribe, "whalerein/v1/h/h1/d/d1/reply", true},
+		{"allows device publication of its own query", device, ActionPublish, "whalerein/v1/h/h1/d/d1/query", true},
+		{"denies device publication of another device query", device, ActionPublish, "whalerein/v1/h/h1/d/d2/query", false},
 		{"denies device subscription to another device live topic", device, ActionSubscribe, "whalerein/v1/h/h1/d/d2/live", false},
 		{"denies device subscription to host live topic", device, ActionSubscribe, "whalerein/v1/h/h1/live", false},
 		{"denies device publication to live previews", device, ActionPublish, "whalerein/v1/h/h1/d/d1/live", false},

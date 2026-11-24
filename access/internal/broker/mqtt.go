@@ -24,7 +24,7 @@ import (
 
 // Session is the small slice of an MQTT 5 session the broker service needs.
 type Session interface {
-	Publish(ctx context.Context, topic string, payload []byte, qos byte) error
+	Publish(ctx context.Context, message Message) error
 	Subscribe(ctx context.Context, topics []string, qos byte) error
 	Done() <-chan struct{}
 	Close() error
@@ -64,7 +64,7 @@ type pahoConnector struct {
 	cfg       config.BrokerConfig
 	transport config.TransportEffective
 	metrics   *diagnostics.Metrics
-	dispatch  func(topic string, payload []byte)
+	dispatch  func(message Message)
 	logger    *slog.Logger
 	tls       *tls.Config
 	address   string
@@ -76,7 +76,7 @@ type pahoConnector struct {
 
 // NewPahoConnector builds a connector with the packaged default transport
 // budget. Production wiring uses NewPahoConnectorWithTransport.
-func NewPahoConnector(cfg config.BrokerConfig, dispatch func(topic string, payload []byte), logger *slog.Logger) (Connector, error) {
+func NewPahoConnector(cfg config.BrokerConfig, dispatch func(message Message), logger *slog.Logger) (Connector, error) {
 	return NewPahoConnectorWithTransport(cfg, config.DefaultTransportEffective(), nil, dispatch, logger)
 }
 
@@ -84,7 +84,7 @@ func NewPahoConnector(cfg config.BrokerConfig, dispatch func(topic string, paylo
 // paho.golang MQTT 5 connector. transportConfig is the validated local
 // transport budget; it takes effect when this process starts. The dispatch
 // callback runs on the read loop and must return quickly.
-func NewPahoConnectorWithTransport(cfg config.BrokerConfig, transportConfig config.TransportEffective, metrics *diagnostics.Metrics, dispatch func(topic string, payload []byte), logger *slog.Logger) (Connector, error) {
+func NewPahoConnectorWithTransport(cfg config.BrokerConfig, transportConfig config.TransportEffective, metrics *diagnostics.Metrics, dispatch func(message Message), logger *slog.Logger) (Connector, error) {
 	if dispatch == nil {
 		return nil, errors.New("broker: dispatch callback is required")
 	}
@@ -180,8 +180,7 @@ func (c *pahoConnector) Connect(ctx context.Context) (Session, error) {
 		OnPublishReceived: []func(paho.PublishReceived) (bool, error){
 			func(received paho.PublishReceived) (bool, error) {
 				if received.Packet != nil {
-					packet := received.Packet
-					c.deliver(packet.Topic, packet.Payload)
+					c.deliver(messageFromPacket(received.Packet))
 				}
 				return true, nil
 			},
@@ -247,8 +246,8 @@ func (c *pahoConnector) Connect(ctx context.Context) (Session, error) {
 		c.logger.Warn("broker packet limit lowers the transport hop",
 			"broker_packet_limit", brokerLimit, "configured_packet_bytes", c.transport.PacketBytes)
 	}
-	publisher := newPublisher(func(ctx context.Context, topic string, payload []byte) error {
-		response, err := client.Publish(ctx, &paho.Publish{Topic: topic, QoS: 1, Payload: payload})
+	publisher := newPublisher(func(ctx context.Context, message Message) error {
+		response, err := client.Publish(ctx, pahoPublish(message))
 		if err != nil {
 			return err
 		}
@@ -264,19 +263,43 @@ func (c *pahoConnector) Connect(ctx context.Context) (Session, error) {
 	}, nil
 }
 
+// messageFromPacket copies the MQTT 5 properties the relay contract consumes.
+// The packet buffer is owned by the read loop, so payload bytes are copied.
+func messageFromPacket(packet *paho.Publish) Message {
+	message := Message{
+		Topic:   packet.Topic,
+		Payload: append([]byte(nil), packet.Payload...),
+		QoS:     packet.QoS,
+		Retain:  packet.Retain,
+	}
+	if packet.Properties == nil {
+		return message
+	}
+	message.Properties.CorrelationData = append([]byte(nil), packet.Properties.CorrelationData...)
+	message.Properties.ResponseTopic = packet.Properties.ResponseTopic
+	message.Properties.MessageExpiry = packet.Properties.MessageExpiry
+	for _, property := range packet.Properties.User {
+		message.Properties.UserProperties = append(message.Properties.UserProperties, UserProperty{
+			Key: property.Key, Value: property.Value,
+		})
+	}
+	return message
+}
+
 // A completed, valid HostResult envelope is fresh capability evidence after
 // Access restarts while the Host's broker connection stays alive. HostReady
 // carries the relay epoch; other result kinds do not establish capability.
-func (c *pahoConnector) deliver(topic string, payload []byte) {
-	if parsed, err := ParseTopic(topic); err == nil && parsed.Kind == KindResult {
+func (c *pahoConnector) deliver(message Message) {
+	parsed, err := ParseTopic(message.Topic)
+	if err == nil && parsed.Kind == KindResult {
 		var result whalereinv1.HostResult
-		if proto.Unmarshal(payload, &result) == nil && result.ProtocolVersion == 1 &&
+		if proto.Unmarshal(message.Payload, &result) == nil && result.ProtocolVersion == 1 &&
 			result.RelayVersion == RelayEpoch &&
 			result.RequestId != "" && (result.HostId == "" || result.HostId == parsed.HostID) {
 			c.peers.Store(RequestTopic(parsed.HostID), true)
 		}
 	}
-	c.dispatch(topic, payload)
+	c.dispatch(message)
 }
 
 type mqttClient interface {
@@ -297,17 +320,64 @@ type pahoSession struct {
 	stager      *stagerRef
 }
 
-func (s *pahoSession) Publish(ctx context.Context, topic string, payload []byte, qos byte) error {
-	if qos == 0 {
-		return s.publishLive(ctx, topic, payload)
+func (s *pahoSession) Publish(ctx context.Context, message Message) error {
+	if message.QoS == 0 {
+		return s.publishLive(ctx, message)
 	}
-	return s.publishComplete(ctx, topic, payload)
+	return s.publishComplete(ctx, message)
+}
+
+// pahoPublish converts one relay message into the paho publication shape,
+// including the MQTT 5 properties the query lane requires.
+func pahoPublish(message Message) *paho.Publish {
+	publish := &paho.Publish{
+		Topic:   message.Topic,
+		QoS:     message.QoS,
+		Retain:  message.Retain,
+		Payload: message.Payload,
+	}
+	properties := message.Properties
+	if len(properties.CorrelationData) == 0 && properties.ResponseTopic == "" &&
+		properties.MessageExpiry == nil && len(properties.UserProperties) == 0 {
+		return publish
+	}
+	publish.Properties = &paho.PublishProperties{
+		CorrelationData: properties.CorrelationData,
+		ResponseTopic:   properties.ResponseTopic,
+		MessageExpiry:   properties.MessageExpiry,
+	}
+	for _, property := range properties.UserProperties {
+		publish.Properties.User = append(publish.Properties.User, paho.UserProperty{
+			Key: property.Key, Value: property.Value,
+		})
+	}
+	return publish
+}
+
+// propertiesBytes is the exact encoded MQTT 5 property length of the
+// properties this access layer writes. It mirrors paho.golang's encoding.
+func propertiesBytes(properties MessageProperties) int {
+	size := 0
+	if len(properties.CorrelationData) > 0 {
+		size += 1 + 2 + len(properties.CorrelationData)
+	}
+	if properties.ResponseTopic != "" {
+		size += 1 + 2 + len(properties.ResponseTopic)
+	}
+	if properties.MessageExpiry != nil {
+		size += 1 + 4
+	}
+	for _, property := range properties.UserProperties {
+		size += 1 + 2 + len(property.Key) + 2 + len(property.Value)
+	}
+	return size
 }
 
 // publishLive sends one complete QoS 0 preview directly. It never enters the
 // ordered control queue, never rewrites to a reference and never retries. A
 // packet that does not fit the live hop is a drop, not a fallback.
-func (s *pahoSession) publishLive(ctx context.Context, topic string, payload []byte) error {
+func (s *pahoSession) publishLive(ctx context.Context, message Message) error {
+	topic, payload := message.Topic, message.Payload
 	if len(payload) == 0 {
 		return transportReject(transportCodeHeader, ErrMessageBudget)
 	}
@@ -331,13 +401,13 @@ func (s *pahoSession) publishLive(ctx context.Context, topic string, payload []b
 		}
 	}
 	limit := selectPacketLimit(s.budget.PacketBytes, s.brokerLimit, peer)
-	if uint64(encodedLivePublishBytes(topic, len(payload), 0)) > limit {
+	if uint64(encodedLivePublishBytes(topic, len(payload), propertiesBytes(message.Properties))) > limit {
 		if s.metrics != nil {
 			s.metrics.TransportRejected(transportCodePacket, int64(len(payload)), int64(limit))
 		}
 		return transportReject(transportCodePacket, ErrMessageBudget)
 	}
-	response, err := s.client.Publish(ctx, &paho.Publish{Topic: topic, QoS: 0, Payload: payload})
+	response, err := s.client.Publish(ctx, pahoPublish(message))
 	if err != nil {
 		return err
 	}
@@ -349,7 +419,8 @@ func (s *pahoSession) publishLive(ctx context.Context, topic string, payload []b
 
 // publishComplete selects inline or reference for one outgoing hop. It never
 // splits a packet and never retries at the packet layer.
-func (s *pahoSession) publishComplete(ctx context.Context, topic string, payload []byte) error {
+func (s *pahoSession) publishComplete(ctx context.Context, message Message) error {
+	topic, payload := message.Topic, message.Payload
 	if len(payload) == 0 {
 		return transportReject(transportCodeHeader, ErrMessageBudget)
 	}
@@ -368,11 +439,11 @@ func (s *pahoSession) publishComplete(ctx context.Context, topic string, payload
 			return transportReject(transportCodeTopic, ErrInvalidTopic)
 		}
 		limit := selectPacketLimit(s.budget.PacketBytes, s.brokerLimit, nil)
-		if uint64(encodedPublishBytes(topic, len(payload), 0)) > limit {
+		if uint64(encodedPublishBytes(topic, len(payload), propertiesBytes(message.Properties))) > limit {
 			return transportReject(transportCodePacket, ErrMessageBudget)
 		}
 		s.recordPacket("inline", len(payload))
-		return s.publisher.Submit(ctx, topic, payload)
+		return s.publisher.SubmitMessage(ctx, message)
 	}
 	var peer *config.TransportEffective
 	if s.receivers != nil {
@@ -387,10 +458,10 @@ func (s *pahoSession) publishComplete(ctx context.Context, topic string, payload
 		s.metrics.TransportBudgetFallback("device")
 	}
 	limit := selectPacketLimit(s.budget.PacketBytes, s.brokerLimit, peer)
-	encoded := encodedPublishBytes(topic, len(payload), 0)
+	encoded := encodedPublishBytes(topic, len(payload), propertiesBytes(message.Properties))
 	if uint64(encoded) <= limit {
 		s.recordPacket("inline", len(payload))
-		return s.publisher.Submit(ctx, topic, payload)
+		return s.publisher.SubmitMessage(ctx, message)
 	}
 	prepared, referenced, err := rewriteToReference(ctx, topic, payload, s.stager.get())
 	if err != nil {
@@ -402,7 +473,7 @@ func (s *pahoSession) publishComplete(ctx context.Context, topic string, payload
 	if !referenced {
 		return transportReject(transportCodeReference, ErrReferenceTooLarge)
 	}
-	referenceBytes := encodedPublishBytes(topic, len(prepared), 0)
+	referenceBytes := encodedPublishBytes(topic, len(prepared), propertiesBytes(message.Properties))
 	if uint64(referenceBytes) > limit {
 		if s.metrics != nil {
 			s.metrics.TransportRejected(transportCodeReference, int64(referenceBytes), int64(limit))
@@ -413,7 +484,8 @@ func (s *pahoSession) publishComplete(ctx context.Context, topic string, payload
 		return transportReject(transportCodeEnvelope, ErrMessageBudget)
 	}
 	s.recordPacket("reference", len(prepared))
-	return s.publisher.Submit(ctx, topic, prepared)
+	message.Payload = prepared
+	return s.publisher.SubmitMessage(ctx, message)
 }
 
 func (s *pahoSession) recordPacket(representation string, bytes int) {

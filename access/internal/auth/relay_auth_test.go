@@ -33,49 +33,49 @@ func TestRelaySignedTextVectors(t *testing.T) {
 			name:    "reserve with every scope field",
 			purpose: RelayAuthReserve,
 			fields: RelayFields{
-				RelayVersion: 4, HostID: "host-1", DeviceID: "device-1",
+				RelayVersion: 5, HostID: "host-1", DeviceID: "device-1",
 				SessionID: "session-1", ChannelID: "channel-1",
 				Purpose:         whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_ATTACHMENT_PART,
 				PartID:          "part-1",
 				CiphertextBytes: 12, SHA256: digest,
 				ExpiresAtUnixMs: 1_700_000_060_000, SignedAtUnixMs: 1_700_000_000_000,
 			},
-			want: "whalerein/v1/relay|reserve|4|host-1|device-1|session-1|channel-1|PAYLOAD_PURPOSE_ATTACHMENT_PART|part-1|12|" + digestHex + "|1700000060000|1700000000000",
+			want: "whalerein/v1/relay|reserve|5|host-1|device-1|session-1|channel-1|PAYLOAD_PURPOSE_ATTACHMENT_PART|part-1|12|" + digestHex + "|1700000060000|1700000000000",
 		},
 		{
 			name:    "reserve with empty session channel and part",
 			purpose: RelayAuthReserve,
 			fields: RelayFields{
-				RelayVersion: 4, HostID: "h", DeviceID: "d",
+				RelayVersion: 5, HostID: "h", DeviceID: "d",
 				Purpose:         whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT,
 				CiphertextBytes: 7, SHA256: digest,
 				ExpiresAtUnixMs: 2, SignedAtUnixMs: 1,
 			},
-			want: "whalerein/v1/relay|reserve|4|h|d|||PAYLOAD_PURPOSE_RESULT||7|" + digestHex + "|2|1",
+			want: "whalerein/v1/relay|reserve|5|h|d|||PAYLOAD_PURPOSE_RESULT||7|" + digestHex + "|2|1",
 		},
 		{
 			name:    "upload",
 			purpose: RelayAuthUpload,
 			fields: RelayFields{
-				RelayVersion: 4, HostID: "h", ObjectID: objectID,
+				RelayVersion: 5, HostID: "h", ObjectID: objectID,
 				CiphertextBytes: 42, SHA256: digest, SignedAtUnixMs: 9,
 			},
-			want: "whalerein/v1/relay|upload|4|" + objectID + "|42|" + digestHex + "|9",
+			want: "whalerein/v1/relay|upload|5|" + objectID + "|42|" + digestHex + "|9",
 		},
 		{
 			name:    "finish",
 			purpose: RelayAuthFinish,
 			fields: RelayFields{
-				RelayVersion: 4, HostID: "h", ObjectID: objectID,
+				RelayVersion: 5, HostID: "h", ObjectID: objectID,
 				CiphertextBytes: 42, SHA256: digest, SignedAtUnixMs: 9,
 			},
-			want: "whalerein/v1/relay|finish|4|" + objectID + "|42|" + digestHex + "|9",
+			want: "whalerein/v1/relay|finish|5|" + objectID + "|42|" + digestHex + "|9",
 		},
 		{
 			name:    "object",
 			purpose: RelayAuthObject,
-			fields:  RelayFields{RelayVersion: 4, HostID: "h", ObjectID: objectID, SignedAtUnixMs: 5},
-			want:    "whalerein/v1/relay|object|4|" + objectID + "|5",
+			fields:  RelayFields{RelayVersion: 5, HostID: "h", ObjectID: objectID, SignedAtUnixMs: 5},
+			want:    "whalerein/v1/relay|object|5|" + objectID + "|5",
 		},
 	}
 	for _, test := range tests {
@@ -95,7 +95,7 @@ func TestRelaySignedTextRejectsAmbiguousFields(t *testing.T) {
 	digest := make([]byte, 32)
 	objectID := strings.Repeat("ab", 16)
 	base := RelayFields{
-		RelayVersion: 4, HostID: "h", DeviceID: "d",
+		RelayVersion: 5, HostID: "h", DeviceID: "d",
 		Purpose:         whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_REQUEST,
 		CiphertextBytes: 1, SHA256: digest, ExpiresAtUnixMs: 2, SignedAtUnixMs: 1,
 	}
@@ -116,9 +116,9 @@ func TestRelaySignedTextRejectsAmbiguousFields(t *testing.T) {
 		{name: "unspecified purpose", purpose: RelayAuthReserve, fields: with(func(f *RelayFields) { f.Purpose = 0 })},
 		{name: "short digest", purpose: RelayAuthReserve, fields: with(func(f *RelayFields) { f.SHA256 = digest[:31] })},
 		{name: "oversize host", purpose: RelayAuthReserve, fields: with(func(f *RelayFields) { f.HostID = strings.Repeat("h", 201) })},
-		{name: "bad object id", purpose: RelayAuthUpload, fields: RelayFields{RelayVersion: 4, HostID: "h", ObjectID: strings.Repeat("AB", 16), SHA256: digest}},
-		{name: "short object id", purpose: RelayAuthObject, fields: RelayFields{RelayVersion: 4, HostID: "h", ObjectID: "abc"}},
-		{name: "unknown purpose", purpose: "delete", fields: RelayFields{RelayVersion: 4, HostID: "h", ObjectID: objectID}},
+		{name: "bad object id", purpose: RelayAuthUpload, fields: RelayFields{RelayVersion: 5, HostID: "h", ObjectID: strings.Repeat("AB", 16), SHA256: digest}},
+		{name: "short object id", purpose: RelayAuthObject, fields: RelayFields{RelayVersion: 5, HostID: "h", ObjectID: "abc"}},
+		{name: "unknown purpose", purpose: "delete", fields: RelayFields{RelayVersion: 5, HostID: "h", ObjectID: objectID}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -146,7 +146,7 @@ func TestAuthenticateRelayRequestVerifiesWindowAndReplay(t *testing.T) {
 	digest := make([]byte, 32)
 	objectID := strings.Repeat("cd", 16)
 	fields := RelayFields{
-		RelayVersion: 4, HostID: "h1", ObjectID: objectID,
+		RelayVersion: 5, HostID: "h1", ObjectID: objectID,
 		CiphertextBytes: 4, SHA256: digest, SignedAtUnixMs: now.UnixMilli(),
 	}
 	message, err := RelaySignedText(RelayAuthObject, fields)
@@ -201,7 +201,7 @@ func TestAuthenticateRelayRequestRejectsBadKeysAndShapes(t *testing.T) {
 		t.Fatal(err)
 	}
 	fields := RelayFields{
-		RelayVersion: 4, HostID: "h1", ObjectID: strings.Repeat("cd", 16),
+		RelayVersion: 5, HostID: "h1", ObjectID: strings.Repeat("cd", 16),
 		SignedAtUnixMs: now.UnixMilli(),
 	}
 	message, _ := RelaySignedText(RelayAuthObject, fields)

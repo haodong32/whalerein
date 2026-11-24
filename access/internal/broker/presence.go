@@ -66,6 +66,7 @@ type Presence struct {
 	mu                   sync.RWMutex
 	hosts                map[string]presenceEntry
 	devices              map[string]presenceEntry
+	connections          map[string]map[ConnectionRef]struct{}
 	cacheTTL             time.Duration
 	available            bool
 	lastSeq              uint64
@@ -85,12 +86,13 @@ func NewPresence(cacheTTL time.Duration, metrics *diagnostics.Metrics, logger *s
 		logger = slog.Default()
 	}
 	p := &Presence{
-		hosts:    make(map[string]presenceEntry),
-		devices:  make(map[string]presenceEntry),
-		cacheTTL: cacheTTL,
-		metrics:  metrics,
-		logger:   logger,
-		now:      func() time.Time { return time.Now().UTC() },
+		hosts:       make(map[string]presenceEntry),
+		devices:     make(map[string]presenceEntry),
+		connections: make(map[string]map[ConnectionRef]struct{}),
+		cacheTTL:    cacheTTL,
+		metrics:     metrics,
+		logger:      logger,
+		now:         func() time.Time { return time.Now().UTC() },
 	}
 	p.publishCounts()
 	return p
@@ -408,6 +410,51 @@ func (p *Presence) DeviceConnection(deviceID string) (connID uint64, known bool)
 	return entry.connID, true
 }
 
+// DeviceConnectionActive reports whether ref is one of the current broker
+// connections for the device. A replacement or broker-epoch change invalidates
+// every older reference, so a stale query stamp is rejected.
+func (p *Presence) DeviceConnectionActive(deviceID string, ref ConnectionRef) bool {
+	if deviceID == "" || !ref.Valid() {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	_, ok := p.connections[deviceID][ref]
+	return ok
+}
+
+// DeviceConnectionRefs returns the current broker connection references for a
+// device, for diagnostics and tests.
+func (p *Presence) DeviceConnectionRefs(deviceID string) []ConnectionRef {
+	if deviceID == "" {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	refs := make([]ConnectionRef, 0, len(p.connections[deviceID]))
+	for ref := range p.connections[deviceID] {
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+func (p *Presence) noteConnectionLocked(deviceID string, ref ConnectionRef, online bool) {
+	if deviceID == "" || !ref.Valid() {
+		return
+	}
+	if online {
+		if p.connections[deviceID] == nil {
+			p.connections[deviceID] = map[ConnectionRef]struct{}{}
+		}
+		p.connections[deviceID][ref] = struct{}{}
+		return
+	}
+	delete(p.connections[deviceID], ref)
+	if len(p.connections[deviceID]) == 0 {
+		delete(p.connections, deviceID)
+	}
+}
+
 // HandleNotification applies one ordered broker connection notification.
 func (p *Presence) HandleNotification(notification *Notification) {
 	if notification == nil || notification.Sequence == 0 {
@@ -449,9 +496,17 @@ func (p *Presence) HandleNotification(notification *Notification) {
 	case "device":
 		if notification.DeviceID != "" {
 			connID := notification.ConnID
+			p.noteConnectionLocked(notification.DeviceID, ConnectionRef{Epoch: notification.Epoch, ID: notification.ConnID}, online)
 			p.mu.Unlock()
 			p.applyDevice(notification.DeviceID, online, at, PresenceSourceBroker, connID, true, notification.Sequence)
 			return
+		}
+	case "session":
+		// Managed sessions are device connections for query admission and
+		// reply affinity, but their lifecycle does not create directory
+		// presence edges.
+		if notification.DeviceID != "" {
+			p.noteConnectionLocked(notification.DeviceID, ConnectionRef{Epoch: notification.Epoch, ID: notification.ConnID}, online)
 		}
 	}
 	p.mu.Unlock()
@@ -559,8 +614,38 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 		}
 		recovered = append(recovered, deviceID)
 	}
+	// The snapshot is the authoritative current connection set; every stale
+	// reference from an older broker epoch or replaced connection disappears.
+	connections := make(map[string]map[ConnectionRef]struct{}, len(devices))
+	for _, client := range clients {
+		if client.Kind != "device" || client.State != "connected" || client.DeviceID == "" {
+			continue
+		}
+		ref := ConnectionRef{Epoch: client.Epoch, ID: client.ConnID}
+		if !ref.Valid() {
+			continue
+		}
+		if connections[client.DeviceID] == nil {
+			connections[client.DeviceID] = map[ConnectionRef]struct{}{}
+		}
+		connections[client.DeviceID][ref] = struct{}{}
+	}
+	// A CONNECT notification applied after the snapshot boundary describes
+	// newer broker state; keep its reference instead of rolling it back.
+	for deviceID := range p.devices {
+		if p.devices[deviceID].seq <= boundary {
+			continue
+		}
+		for ref := range p.connections[deviceID] {
+			if connections[deviceID] == nil {
+				connections[deviceID] = map[ConnectionRef]struct{}{}
+			}
+			connections[deviceID][ref] = struct{}{}
+		}
+	}
 	p.hosts = hosts
 	p.devices = devices
+	p.connections = connections
 	if boundary > p.lastSeq {
 		p.lastSeq = boundary
 	}

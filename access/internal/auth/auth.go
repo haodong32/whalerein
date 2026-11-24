@@ -80,6 +80,7 @@ type Store interface {
 	DeviceByID(ctx context.Context, deviceID string) (store.Device, error)
 	HasActiveGrant(ctx context.Context, hostID, deviceID string) (bool, error)
 	ListDeviceGrants(ctx context.Context, deviceID string) ([]store.AdmissionGrant, error)
+	ListHostGrants(ctx context.Context, hostID string) ([]store.AdmissionGrant, error)
 	RevokeDeviceGrants(ctx context.Context, deviceID string, at time.Time) ([]string, bool, error)
 	RevokeGrant(ctx context.Context, hostID, deviceID string, at time.Time) error
 	SetHostAuthorizationKey(ctx context.Context, hostID string, publicKey []byte) error
@@ -485,6 +486,15 @@ func (s *Service) AuthenticateBroker(ctx context.Context, clientID, username, pa
 // principal. Device policies read the durable grant list; the result is
 // installed by the broker plugin for the life of that connection.
 func (s *Service) BrokerPolicy(ctx context.Context, identity BrokerIdentity) (policy.Connection, error) {
+	if identity.Kind == KindHost {
+		// Host policy carries one direct-preview write per currently authorized
+		// Device. A revoked grant disappears with the next projection.
+		grants, err := s.store.ListHostGrants(ctx, identity.HostID)
+		if err != nil {
+			return policy.Connection{}, fmt.Errorf("broker policy: %w", err)
+		}
+		return policy.Build(string(identity.Kind), identity.HostID, identity.DeviceID, grants), nil
+	}
 	if identity.Kind != KindDevice {
 		return policy.Build(string(identity.Kind), identity.HostID, identity.DeviceID, nil), nil
 	}

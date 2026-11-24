@@ -429,7 +429,7 @@ func (s *Service) resultLimitFor(request *whalereinv1.HostRequest) int64 {
 }
 
 // RelayEpoch is the only relay contract this build admits.
-const RelayEpoch uint32 = 4
+const RelayEpoch uint32 = 5
 
 func (s *Service) validate(input SubmitInput) (store.Request, error) {
 	req := input.Request

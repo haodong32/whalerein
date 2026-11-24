@@ -19,7 +19,7 @@ const (
 	topicPrefix       = "whalerein/v1/h/"
 	accessResult      = "whalerein/v1/h/+/result"
 	accessEvent       = "whalerein/v1/h/+/event"
-	accessLive        = "whalerein/v1/h/+/live"
+	accessDeviceQuery = "whalerein/v1/h/+/d/+/query"
 	accessDeviceReady = "whalerein/v1/h/+/d/+/ready"
 	accessDeviceWill  = "whalerein/v1/presence/device/+"
 	deviceWillPrefix  = "whalerein/v1/presence/device/"
@@ -50,11 +50,12 @@ func (s *Service) AuthorizeACL(ctx context.Context, identity BrokerIdentity, act
 func (s *Service) authorizeAccessACL(action ACLAction, topic string) bool {
 	switch action {
 	case ActionSubscribe:
-		// Access needs results, control events, live previews, device
+		// Access needs results, control events, device queries, device
 		// advertisements, device last wills and broker presence system topics.
-		// There is no device ACK subscription in the relay epoch.
+		// Previews now travel directly from the Host, so Access no longer reads
+		// h/{host}/live. There is no device ACK subscription.
 		return topic == accessResult || topic == accessEvent ||
-			topic == accessLive ||
+			topic == accessDeviceQuery ||
 			topic == sysConnected || topic == sysDisconnected ||
 			topic == accessDeviceWill || topic == accessDeviceReady
 	case ActionPublish:
@@ -65,7 +66,7 @@ func (s *Service) authorizeAccessACL(action ACLAction, topic string) bool {
 		return parsed.kind == "request" ||
 			(parsed.kind == "device_event" && parsed.hostID != "") ||
 			(parsed.kind == "device_notice" && parsed.hostID != "") ||
-			(parsed.kind == "device_live" && parsed.hostID != "") ||
+			(parsed.kind == "device_reply" && parsed.hostID != "") ||
 			parsed.kind == "presence"
 	}
 	return false
@@ -83,7 +84,10 @@ func (s *Service) authorizeHostACL(identity BrokerIdentity, action ACLAction, to
 	case ActionSubscribe:
 		return parsed.kind == "request" || parsed.kind == "presence"
 	case ActionPublish:
-		return parsed.kind == "result" || parsed.kind == "event" || parsed.kind == "live"
+		// A Host publishes results, control events and its authorized direct
+		// device previews. The retired h/{host}/live relay is never allowed.
+		return parsed.kind == "result" || parsed.kind == "event" ||
+			(parsed.kind == "device_live" && parsed.hostID == identity.HostID)
 	}
 	return false
 }
@@ -103,8 +107,10 @@ func (s *Service) authorizeDeviceACL(ctx context.Context, identity BrokerIdentit
 	if !ok {
 		return false, nil
 	}
-	allowed := (action == ActionSubscribe && (parsed.kind == "device_event" || parsed.kind == "device_notice" || parsed.kind == "device_live")) ||
-		(action == ActionPublish && parsed.kind == "device_ready")
+	allowed := (action == ActionSubscribe && (parsed.kind == "device_event" ||
+		parsed.kind == "device_notice" || parsed.kind == "device_live" ||
+		parsed.kind == "device_reply")) ||
+		(action == ActionPublish && (parsed.kind == "device_ready" || parsed.kind == "device_query"))
 	if !allowed {
 		return false, nil
 	}
@@ -129,10 +135,11 @@ type parsedTopic struct {
 //	whalerein/v1/h/{host_id}/request
 //	whalerein/v1/h/{host_id}/result
 //	whalerein/v1/h/{host_id}/event
-//	whalerein/v1/h/{host_id}/live
 //	whalerein/v1/h/{host_id}/d/{device_id}/event
 //	whalerein/v1/h/{host_id}/d/{device_id}/notice
 //	whalerein/v1/h/{host_id}/d/{device_id}/ready
+//	whalerein/v1/h/{host_id}/d/{device_id}/query
+//	whalerein/v1/h/{host_id}/d/{device_id}/reply
 //	whalerein/v1/h/{host_id}/d/{device_id}/live
 func parseTopic(topic string) (parsedTopic, bool) {
 	if !strings.HasPrefix(topic, topicPrefix) {
@@ -147,7 +154,7 @@ func parseTopic(topic string) (parsedTopic, bool) {
 			return parsedTopic{}, false
 		}
 		switch leaf {
-		case "request", "result", "event", "live", "presence":
+		case "request", "result", "event", "presence":
 			return parsedTopic{hostID: hostID, kind: leaf}, true
 		default:
 			return parsedTopic{}, false
@@ -167,6 +174,10 @@ func parseTopic(topic string) (parsedTopic, bool) {
 			return parsedTopic{hostID: hostID, deviceID: deviceID, kind: "device_notice"}, true
 		case "ready":
 			return parsedTopic{hostID: hostID, deviceID: deviceID, kind: "device_ready"}, true
+		case "query":
+			return parsedTopic{hostID: hostID, deviceID: deviceID, kind: "device_query"}, true
+		case "reply":
+			return parsedTopic{hostID: hostID, deviceID: deviceID, kind: "device_reply"}, true
 		case "live":
 			return parsedTopic{hostID: hostID, deviceID: deviceID, kind: "device_live"}, true
 		default:

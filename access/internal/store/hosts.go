@@ -655,6 +655,9 @@ type AdmissionGrant struct {
 	GrantGeneration            uint64
 	RevocationGeneration       uint64
 	DeviceRevocationGeneration uint64
+	// EnrollmentGeneration is the managed Host enrollment this grant belongs
+	// to. Zero is the Standalone generation.
+	EnrollmentGeneration uint64
 }
 
 // AdmissionGrantFor reads one grant revision, including revoked rows so a
@@ -662,7 +665,7 @@ type AdmissionGrant struct {
 func (s *Store) AdmissionGrantFor(ctx context.Context, hostID, deviceID string) (AdmissionGrant, error) {
 	row := s.db.QueryRow(ctx, `
 		SELECT g.host_id, g.device_id, g.active, g.grant_generation,
-		       g.revocation_generation, d.revocation_generation
+		       g.revocation_generation, d.revocation_generation, g.enrollment_generation
 		FROM grant_authority g JOIN devices d ON d.device_id = g.device_id
 		WHERE g.host_id = $1 AND g.device_id = $2`, hostID, deviceID)
 	grant, err := scanAdmissionGrant(row)
@@ -677,7 +680,7 @@ func (s *Store) AdmissionGrantFor(ctx context.Context, hostID, deviceID string) 
 func (s *Store) ListAdmissionGrants(ctx context.Context) ([]AdmissionGrant, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT g.host_id, g.device_id, g.active, g.grant_generation,
-		       g.revocation_generation, d.revocation_generation
+		       g.revocation_generation, d.revocation_generation, g.enrollment_generation
 		FROM grant_authority g JOIN devices d ON d.device_id = g.device_id
 		ORDER BY g.host_id, g.device_id`)
 	if err != nil {
@@ -701,11 +704,38 @@ func (s *Store) ListAdmissionGrants(ctx context.Context) ([]AdmissionGrant, erro
 func scanAdmissionGrant(row interface{ Scan(...any) error }) (AdmissionGrant, error) {
 	var grant AdmissionGrant
 	err := row.Scan(&grant.HostID, &grant.DeviceID, &grant.Active, &grant.GrantGeneration,
-		&grant.RevocationGeneration, &grant.DeviceRevocationGeneration)
+		&grant.RevocationGeneration, &grant.DeviceRevocationGeneration, &grant.EnrollmentGeneration)
 	if err != nil {
 		return AdmissionGrant{}, wrapRequestScan(err)
 	}
 	return grant, nil
+}
+
+// ListHostGrants reads every grant revision for one Host. Host broker policy
+// projection uses it to authorize direct device-scoped previews.
+func (s *Store) ListHostGrants(ctx context.Context, hostID string) ([]AdmissionGrant, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT g.host_id, g.device_id, g.active, g.grant_generation,
+		       g.revocation_generation, d.revocation_generation, g.enrollment_generation
+		FROM grant_authority g JOIN devices d ON d.device_id = g.device_id
+		WHERE g.host_id = $1
+		ORDER BY g.device_id`, hostID)
+	if err != nil {
+		return nil, fmt.Errorf("list host grants: %w", err)
+	}
+	defer rows.Close()
+	grants := make([]AdmissionGrant, 0)
+	for rows.Next() {
+		grant, err := scanAdmissionGrant(rows)
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, grant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list host grants: %w", err)
+	}
+	return grants, nil
 }
 
 // ListDeviceGrants reads every grant revision for one device. Broker policy
@@ -713,7 +743,7 @@ func scanAdmissionGrant(row interface{ Scan(...any) error }) (AdmissionGrant, er
 func (s *Store) ListDeviceGrants(ctx context.Context, deviceID string) ([]AdmissionGrant, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT g.host_id, g.device_id, g.active, g.grant_generation,
-		       g.revocation_generation, d.revocation_generation
+		       g.revocation_generation, d.revocation_generation, g.enrollment_generation
 		FROM grant_authority g JOIN devices d ON d.device_id = g.device_id
 		WHERE g.device_id = $1
 		ORDER BY g.host_id`, deviceID)

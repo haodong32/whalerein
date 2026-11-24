@@ -53,8 +53,8 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 		KeepAlive:      config.Duration(10 * time.Second),
 		ReconnectMin:   config.Duration(100 * time.Millisecond),
 		ReconnectMax:   config.Duration(time.Second),
-	}, func(topic string, payload []byte) {
-		service.HandleMessage(topic, payload)
+	}, func(message Message) {
+		service.HandleMessage(message)
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -95,15 +95,6 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 		}
 		events <- envelope.GetDeviceId()
 		return nil
-	})
-	liveEvents := make(chan string, 4)
-	service.SetLiveEventHandler(func(ctx context.Context, hostID string, payload []byte) error {
-		var envelope whalereinv1.EventEnvelope
-		if err := proto.Unmarshal(payload, &envelope); err != nil {
-			return err
-		}
-		liveEvents <- envelope.GetDeviceId()
-		return service.PublishDeviceLive(ctx, hostID, envelope.GetDeviceId(), payload)
 	})
 	ready := make(chan string, 4)
 	service.SetReadyHandler(func(_ context.Context, hostID string) error {
@@ -197,18 +188,8 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 		t.Fatal("event not delivered")
 	}
 
-	// Host -> Access live preview is republished on the device live topic at
-	// QoS 0 and never enters control event routing.
-	livePayload, _ := proto.Marshal(&whalereinv1.EventEnvelope{HostId: "h-e2e", DeviceId: "d-e2e", Ciphertext: []byte("preview"), RelayVersion: RelayEpoch})
-	publishRawQoS(t, host, LiveTopic("h-e2e"), livePayload, 0)
-	select {
-	case deviceID := <-liveEvents:
-		if deviceID != "d-e2e" {
-			t.Fatalf("live device = %q", deviceID)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("live preview not delivered")
-	}
+	// Previews now travel directly from the Host; Access never republishes
+	// them, so the retired host live topic has no local subscription.
 
 	// Transient pairing-style request/result correlation.
 	go func() {
@@ -342,7 +323,6 @@ func integrationHostPolicy(hostID string) string {
 		{"read", PresenceTopic(hostID)},
 		{"write", ResultTopic(hostID)},
 		{"write", EventTopic(hostID)},
-		{"write", LiveTopic(hostID)},
 	}
 	for _, entry := range entries {
 		fmt.Fprintf(&builder, "acl %s 1 %s %s\n", entry.access, hostID, entry.filter)
@@ -361,6 +341,9 @@ func integrationDevicePolicy(hostID, deviceID string) string {
 	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceNoticeTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl subscribe 1 %s %s\n", hostID, DeviceLiveTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceLiveTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl subscribe 1 %s %s\n", hostID, DeviceReplyTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceReplyTopic(hostID, deviceID))
+	fmt.Fprintf(&builder, "acl write 1 %s %s\n", hostID, DeviceQueryTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl write 1 %s %s\n", hostID, DeviceReadyTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl write 1 - %s\n", DeviceWillTopic(deviceID))
 	return builder.String()

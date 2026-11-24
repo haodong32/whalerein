@@ -130,7 +130,7 @@ func TestHandleMessageRoutesDeviceWillAndIgnoresHostPresence(t *testing.T) {
 		return nil
 	})
 
-	service.HandleMessage(DeviceWillTopic("d1"), []byte(`{"event":"device_offline","device_id":"d1"}`))
+	service.HandleMessage(Message{Topic: DeviceWillTopic("d1"), Payload: []byte(`{"event":"device_offline","device_id":"d1"}`)})
 	session.mu.Lock()
 	published := append([]string(nil), session.published...)
 	session.mu.Unlock()
@@ -142,7 +142,7 @@ func TestHandleMessageRoutesDeviceWillAndIgnoresHostPresence(t *testing.T) {
 	}
 	// A host-scoped presence message is not a wire result/event and must be
 	// ignored even if an ACL change echoed it to Access.
-	service.HandleMessage(PresenceTopic("h1"), []byte(`{"event":"device_offline"}`))
+	service.HandleMessage(Message{Topic: PresenceTopic("h1"), Payload: []byte(`{"event":"device_offline"}`)})
 	if results != 0 || events != 0 {
 		t.Fatalf("presence topic entered routing: results=%d events=%d", results, events)
 	}
@@ -153,8 +153,8 @@ func TestRepeatedDeviceWillOnlyPublishesOnceUntilDeviceReconnects(t *testing.T) 
 		return []string{"h1"}, nil
 	})
 	payload := []byte(`{"event":"device_offline","device_id":"d1"}`)
-	service.HandleMessage(DeviceWillTopic("d1"), payload)
-	service.HandleMessage(DeviceWillTopic("d1"), payload)
+	service.HandleMessage(Message{Topic: DeviceWillTopic("d1"), Payload: payload})
+	service.HandleMessage(Message{Topic: DeviceWillTopic("d1"), Payload: payload})
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	if len(session.published) != 1 {
@@ -171,14 +171,14 @@ func TestBrokerDisconnectNotificationPublishesHostScopedJsonOnce(t *testing.T) {
 	})
 	connected := []byte("whalerein/1\nseq 10\nevent connected\nclient whalerein-device-d1\nkind device\ndevice d1\nconn 7\nat 1000\n")
 	disconnected := []byte("whalerein/1\nseq 11\nevent disconnected\nclient whalerein-device-d1\nkind device\ndevice d1\nconn 7\nat 2000\n")
-	service.HandleMessage(ControlEventFilter, connected)
+	service.HandleMessage(Message{Topic: ControlEventFilter, Payload: connected})
 	session.mu.Lock()
 	if len(session.published) != 0 {
 		t.Fatalf("connected published = %v", session.published)
 	}
 	session.mu.Unlock()
 
-	service.HandleMessage(ControlEventFilter, disconnected)
+	service.HandleMessage(Message{Topic: ControlEventFilter, Payload: disconnected})
 	session.mu.Lock()
 	if len(session.published) != 1 || session.published[0] != "whalerein/v1/h/h1/presence" {
 		t.Fatalf("published = %v", session.published)
@@ -192,7 +192,7 @@ func TestBrokerDisconnectNotificationPublishesHostScopedJsonOnce(t *testing.T) {
 		t.Fatalf("event = %+v", event)
 	}
 
-	service.HandleMessage(ControlEventFilter, []byte("whalerein/1\nseq 12\nevent disconnected\nclient whalerein-device-d1\nkind device\ndevice d1\nconn 7\nat 3000\n"))
+	service.HandleMessage(Message{Topic: ControlEventFilter, Payload: []byte("whalerein/1\nseq 12\nevent disconnected\nclient whalerein-device-d1\nkind device\ndevice d1\nconn 7\nat 3000\n")})
 	session.mu.Lock()
 	defer session.mu.Unlock()
 	if len(session.published) != 1 {

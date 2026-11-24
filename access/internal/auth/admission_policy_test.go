@@ -99,7 +99,7 @@ func TestRevokeHostGrantPropagatesEnforcerFailureAfterDurableRevocation(t *testi
 	}
 }
 
-func TestBrokerPolicyBuildsDeviceGrantsAndHostPolicyWithoutAStoreRead(t *testing.T) {
+func TestBrokerPolicyBuildsDeviceGrantsAndHostPreviewScope(t *testing.T) {
 	service, fs, _, _, _, _ := newServiceWithFakes(t)
 	ctx := context.Background()
 	fs.grants[grantKey("h1", "d1")] = true
@@ -113,7 +113,7 @@ func TestBrokerPolicyBuildsDeviceGrantsAndHostPolicyWithoutAStoreRead(t *testing
 	if device.Kind != policy.KindDevice || device.DeviceID != "d1" || device.Will != "whalerein/v1/presence/device/d1" {
 		t.Fatalf("device policy = %+v", device)
 	}
-	if len(device.Entries) != 8 { // seven topic entries for h1 plus the will.
+	if len(device.Entries) != 11 { // ten topic entries for h1 plus the will.
 		t.Fatalf("device entries = %+v", device.Entries)
 	}
 	for _, entry := range device.Entries {
@@ -132,8 +132,17 @@ func TestBrokerPolicyBuildsDeviceGrantsAndHostPolicyWithoutAStoreRead(t *testing
 	if host.Kind != policy.KindHost || host.HostID != "h1" || len(host.Entries) != 7 {
 		t.Fatalf("host policy = %+v", host)
 	}
-	if fs.listCalls != 1 {
-		t.Fatalf("host policy performed a store read: %d calls", fs.listCalls)
+	if fs.listCalls != 2 {
+		t.Fatalf("host policy store calls = %d", fs.listCalls)
+	}
+	foundPreview := false
+	for _, entry := range host.Entries {
+		if entry.Filter == "whalerein/v1/h/h1/d/d1/live" {
+			foundPreview = true
+		}
+	}
+	if !foundPreview {
+		t.Fatalf("host policy has no direct preview write: %+v", host.Entries)
 	}
 
 	fs.listGrantErr = errors.New("db down")

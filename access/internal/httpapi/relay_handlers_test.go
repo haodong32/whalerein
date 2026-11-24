@@ -119,7 +119,7 @@ func relayReserveBody(epoch uint32) []byte {
 
 func TestRelayReserveRouteDecodesAndReturnsReservation(t *testing.T) {
 	f, fake := newRelayFixture(t)
-	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/relay/objects", relayReserveBody(4), nil)
+	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/relay/objects", relayReserveBody(5), nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}
@@ -133,7 +133,7 @@ func TestRelayReserveRouteDecodesAndReturnsReservation(t *testing.T) {
 		t.Fatalf("reservation = %+v", &reservation)
 	}
 	got := fake.lastReserve
-	if got.RelayVersion != 4 || got.HostID != "h1" || got.DeviceID != "d1" || got.SessionID != "s1" ||
+	if got.RelayVersion != 5 || got.HostID != "h1" || got.DeviceID != "d1" || got.SessionID != "s1" ||
 		got.ChannelID != "c1" || got.Purpose != whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT ||
 		got.CiphertextBytes != 4 || !bytes.Equal(got.SHA256, []byte("digest")) ||
 		got.ExpiresAtUnixMs != 2 || got.SignedAtUnixMs != 1 || !bytes.Equal(got.Signature, []byte("signature")) {
@@ -143,7 +143,7 @@ func TestRelayReserveRouteDecodesAndReturnsReservation(t *testing.T) {
 
 func TestRelayReserveRoutePassesBearerAndOwnerHeader(t *testing.T) {
 	f, fake := newRelayFixture(t)
-	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/relay/objects", relayReserveBody(4), map[string]string{
+	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost, "/v1/relay/objects", relayReserveBody(5), map[string]string{
 		"Authorization":      "Bearer device-token",
 		RelayOwnerNodeHeader: "node-2",
 	})
@@ -241,7 +241,7 @@ func TestRelayUploadMissingContentLength(t *testing.T) {
 func TestRelayFinishRoute(t *testing.T) {
 	f, fake := newRelayFixture(t)
 	body, _ := protojson.Marshal(&whalereinv1.RelayObjectFinishRequest{
-		RelayVersion: 4, CiphertextBytes: 4, Sha256: []byte("digest"),
+		RelayVersion: 5, CiphertextBytes: 4, Sha256: []byte("digest"),
 		SignedAtUnixMs: 1, Signature: []byte("signature"),
 	})
 	recorder := doRequest(t, f.server.PublicHandler(), http.MethodPost,
@@ -257,7 +257,7 @@ func TestRelayFinishRoute(t *testing.T) {
 		object.GetPurpose() != whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT {
 		t.Fatalf("object = %+v", &object)
 	}
-	if fake.lastFinish.ObjectID != relayTestObjectID || fake.lastFinish.RelayVersion != 4 ||
+	if fake.lastFinish.ObjectID != relayTestObjectID || fake.lastFinish.RelayVersion != 5 ||
 		fake.lastFinish.CiphertextBytes != 4 || !bytes.Equal(fake.lastFinish.SHA256, []byte("digest")) {
 		t.Fatalf("finish request = %+v", fake.lastFinish)
 	}

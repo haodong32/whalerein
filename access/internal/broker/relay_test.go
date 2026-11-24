@@ -107,7 +107,7 @@ func TestSelectPacketLimitTakesTheStrictestPositiveLimit(t *testing.T) {
 }
 
 func TestRelayEpochIsRequired(t *testing.T) {
-	for _, version := range []uint32{0, 1, 2, 3, 5} {
+	for _, version := range []uint32{0, 1, 2, 3, 4} {
 		err := validateRelayEpoch(version)
 		if err == nil || !errors.Is(err, ErrRelayEpoch) {
 			t.Fatalf("epoch %d accepted: %v", version, err)
@@ -117,7 +117,7 @@ func TestRelayEpochIsRequired(t *testing.T) {
 		}
 	}
 	if err := validateRelayEpoch(RelayEpoch); err != nil {
-		t.Fatalf("epoch 4 rejected: %v", err)
+		t.Fatalf("epoch 5 rejected: %v", err)
 	}
 }
 
@@ -146,11 +146,11 @@ type recordingPublish struct {
 	payloads [][]byte
 }
 
-func (r *recordingPublish) publish(_ context.Context, topic string, payload []byte) error {
+func (r *recordingPublish) publish(_ context.Context, message Message) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.topics = append(r.topics, topic)
-	r.payloads = append(r.payloads, append([]byte(nil), payload...))
+	r.topics = append(r.topics, message.Topic)
+	r.payloads = append(r.payloads, append([]byte(nil), message.Payload...))
 	return nil
 }
 
@@ -200,11 +200,11 @@ func TestPublishInlineForBelowAndAtTheLimitAndReferenceAbove(t *testing.T) {
 	}
 
 	session, recorder := relayTestSession(t, limit, nil)
-	if err := session.Publish(context.Background(), topic, makeRequest(belowBody), 1); err != nil {
+	if err := session.Publish(context.Background(), Message{Topic: topic, Payload: makeRequest(belowBody), QoS: 1}); err != nil {
 		t.Fatalf("below boundary: %v", err)
 	}
 	session, atRecorder := relayTestSession(t, limit, nil)
-	if err := session.Publish(context.Background(), topic, makeRequest(atBody), 1); err != nil {
+	if err := session.Publish(context.Background(), Message{Topic: topic, Payload: makeRequest(atBody), QoS: 1}); err != nil {
 		t.Fatalf("at boundary: %v", err)
 	}
 	// Above the boundary without a stager: explicit failure before publish.
@@ -212,7 +212,7 @@ func TestPublishInlineForBelowAndAtTheLimitAndReferenceAbove(t *testing.T) {
 	if encodedPublishBytes(topic, len(above), 0) <= limit {
 		t.Fatal("above-boundary fixture still fits")
 	}
-	if err := session.Publish(context.Background(), topic, above, 1); !errors.Is(err, ErrStagingUnavailable) {
+	if err := session.Publish(context.Background(), Message{Topic: topic, Payload: above, QoS: 1}); !errors.Is(err, ErrStagingUnavailable) {
 		t.Fatalf("above boundary without staging = %v", err)
 	}
 	if topics, _ := recorder.snapshot(); len(topics) != 1 {
@@ -231,7 +231,7 @@ func TestOversizedPayloadIsReplacedByAPacketSizedReference(t *testing.T) {
 		Ciphertext: bytes.Repeat([]byte("ciphertext"), 64), RelayVersion: RelayEpoch,
 	}
 	payload, _ := proto.Marshal(event)
-	if err := session.Publish(context.Background(), topic, payload, 1); err != nil {
+	if err := session.Publish(context.Background(), Message{Topic: topic, Payload: payload, QoS: 1}); err != nil {
 		t.Fatalf("reference publish: %v", err)
 	}
 	topics, payloads := recorder.snapshot()
@@ -262,7 +262,7 @@ func TestReferenceIsPublishedOnlyAfterStagingCompletes(t *testing.T) {
 		Ciphertext: bytes.Repeat([]byte("x"), 2048), RelayVersion: RelayEpoch,
 	})
 	done := make(chan error, 1)
-	go func() { done <- session.Publish(context.Background(), topic, payload, 1) }()
+	go func() { done <- session.Publish(context.Background(), Message{Topic: topic, Payload: payload, QoS: 1}) }()
 	select {
 	case <-stager.started:
 	case <-time.After(time.Second):
@@ -296,7 +296,7 @@ func TestReferenceThatCannotFitFailsBeforePublish(t *testing.T) {
 	payload, _ := proto.Marshal(&whalereinv1.EventEnvelope{
 		HostId: "h1", DeviceId: "d1", ChannelId: "c1", Ciphertext: []byte("x"), RelayVersion: RelayEpoch,
 	})
-	err := session.Publish(context.Background(), topic, payload, 1)
+	err := session.Publish(context.Background(), Message{Topic: topic, Payload: payload, QoS: 1})
 	if !errors.Is(err, ErrMessageBudget) {
 		t.Fatalf("reference limit error = %v", err)
 	}
@@ -310,7 +310,7 @@ func TestEnvelopeBudgetIsEnforcedSeparately(t *testing.T) {
 	session.budget.EnvelopeBytes = 64
 	topic := RequestTopic("h1")
 	payload, _ := proto.Marshal(&whalereinv1.HostRequest{RequestId: "r1", HostId: "h1", Body: bytes.Repeat([]byte("x"), 256)})
-	err := session.Publish(context.Background(), topic, payload, 1)
+	err := session.Publish(context.Background(), Message{Topic: topic, Payload: payload, QoS: 1})
 	if !errors.Is(err, ErrMessageBudget) {
 		t.Fatalf("envelope error = %v", err)
 	}
@@ -343,7 +343,7 @@ func TestStagerFailureAndMismatchNeverPublish(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			session, recorder := relayTestSession(t, 512, stager)
-			if err := session.Publish(context.Background(), topic, payload, 1); err == nil {
+			if err := session.Publish(context.Background(), Message{Topic: topic, Payload: payload, QoS: 1}); err == nil {
 				t.Fatal("invalid reference accepted")
 			}
 			if topics, _ := recorder.snapshot(); len(topics) != 0 {
@@ -366,7 +366,7 @@ func TestAlreadyReferencedEnvelopeIsNotRestamped(t *testing.T) {
 	})
 	stager := &recordingStager{err: errors.New("must not stage a reference")}
 	session, recorder := relayTestSession(t, 512, stager)
-	if err := session.Publish(context.Background(), topic, payload, 1); err != nil {
+	if err := session.Publish(context.Background(), Message{Topic: topic, Payload: payload, QoS: 1}); err != nil {
 		t.Fatal(err)
 	}
 	_, payloads := recorder.snapshot()

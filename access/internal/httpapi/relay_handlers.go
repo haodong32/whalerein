@@ -70,20 +70,23 @@ func (s *Server) handleRelayReserve(w http.ResponseWriter, r *http.Request, _ ma
 	}
 	token, _ := bearerToken(r)
 	reservation, err := s.deps.Relay.Reserve(r.Context(), relay.ReserveRequest{
-		RelayVersion:    message.GetRelayVersion(),
-		HostID:          message.GetHostId(),
-		DeviceID:        message.GetDeviceId(),
-		SessionID:       message.GetSessionId(),
-		ChannelID:       message.GetChannelId(),
-		Purpose:         message.GetPurpose(),
-		PartID:          message.GetPartId(),
-		CiphertextBytes: message.GetCiphertextBytes(),
-		SHA256:          message.GetSha256(),
-		ExpiresAtUnixMs: message.GetExpiresAtUnixMs(),
-		SignedAtUnixMs:  message.GetSignedAtUnixMs(),
-		Signature:       message.GetSignature(),
-		BearerToken:     token,
-		OwnerNode:       r.Header.Get(RelayOwnerNodeHeader),
+		RelayVersion:         message.GetRelayVersion(),
+		HostID:               message.GetHostId(),
+		DeviceID:             message.GetDeviceId(),
+		SessionID:            message.GetSessionId(),
+		ChannelID:            message.GetChannelId(),
+		Purpose:              message.GetPurpose(),
+		PartID:               message.GetPartId(),
+		CiphertextBytes:      message.GetCiphertextBytes(),
+		SHA256:               message.GetSha256(),
+		ExpiresAtUnixMs:      message.GetExpiresAtUnixMs(),
+		SignedAtUnixMs:       message.GetSignedAtUnixMs(),
+		Signature:            message.GetSignature(),
+		BearerToken:          token,
+		OwnerNode:            r.Header.Get(RelayOwnerNodeHeader),
+		RequestID:            message.GetRequestId(),
+		ConnectionRef:        message.GetConnectionRef(),
+		EnrollmentGeneration: message.GetEnrollmentGeneration(),
 	})
 	if err != nil {
 		s.writeRelayError(w, r, err)

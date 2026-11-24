@@ -37,9 +37,14 @@ type ResultHandler func(ctx context.Context, hostID string, result *whalereinv1.
 // EventHandler consumes a control EventEnvelope payload published by a host.
 type EventHandler func(ctx context.Context, hostID string, payload []byte) error
 
-// LiveHandler consumes a lossy EventEnvelope preview published by a host. It
-// must not persist, retry or enqueue work; a drop is a normal outcome.
-type LiveHandler func(ctx context.Context, hostID string, payload []byte) error
+// QueryHandler admits deadline-bound device queries and completes their
+// transient waiters. It is implemented by access/internal/query.
+type QueryHandler interface {
+	Admit(ctx context.Context, message Message) error
+	Complete(ctx context.Context, hostID string, message Message) bool
+	CancelConnection(ref ConnectionRef)
+	CancelAll()
+}
 
 // ReadyHandler runs host readiness work (revocation replay).
 type ReadyHandler func(ctx context.Context, hostID string) error
@@ -85,13 +90,9 @@ type Service struct {
 	handlersMu    sync.RWMutex
 	resultHandler ResultHandler
 	eventHandler  EventHandler
-	liveHandler   LiveHandler
 	readyHandler  ReadyHandler
 	keyHandler    HostKeyHandler
-
-	// liveSlots bounds concurrent QoS 0 live handoffs. A full slot set drops
-	// the preview instead of blocking the broker read loop or control delivery.
-	liveSlots chan struct{}
+	queryHandler  QueryHandler
 
 	sessionMu sync.RWMutex
 	session   Session
@@ -143,7 +144,6 @@ func New(deps Dependencies) (*Service, error) {
 		logger:      deps.Logger,
 		transient:   make(map[string]chan *whalereinv1.HostResult),
 		advertised:  map[string]string{},
-		liveSlots:   make(chan struct{}, max(1, deps.Transport.MaxInFlight())),
 		now:         func() time.Time { return time.Now().UTC() },
 	}
 	if registrar, ok := deps.Connector.(interface{ SetReceiverBudgets(*ReceiverBudgets) }); ok {
@@ -178,11 +178,11 @@ func (s *Service) SetEventHandler(handler EventHandler) {
 	s.eventHandler = handler
 }
 
-// SetLiveEventHandler installs the lossy live preview consumer.
-func (s *Service) SetLiveEventHandler(handler LiveHandler) {
+// SetQueryHandler installs the transient query/handshake service.
+func (s *Service) SetQueryHandler(handler QueryHandler) {
 	s.handlersMu.Lock()
 	defer s.handlersMu.Unlock()
-	s.liveHandler = handler
+	s.queryHandler = handler
 }
 
 // SetReadyHandler installs the host readiness consumer.
@@ -227,9 +227,18 @@ func (s *Service) handleNotification(notification *Notification) {
 		if notification.HostID != "" {
 			s.receivers.NoteConnection(receiverRoute{kind: "host", hostID: notification.HostID}, notification.ConnID, notification.ClientID, online)
 		}
-	case "device":
+	case "device", "session":
 		if notification.DeviceID != "" {
 			s.receivers.NoteConnection(receiverRoute{kind: "device", deviceID: notification.DeviceID}, notification.ConnID, notification.ClientID, online)
+		}
+		if !online {
+			ref := ConnectionRef{Epoch: notification.Epoch, ID: notification.ConnID}
+			s.handlersMu.RLock()
+			query := s.queryHandler
+			s.handlersMu.RUnlock()
+			if query != nil && ref.Valid() {
+				query.CancelConnection(ref)
+			}
 		}
 	}
 }
@@ -253,7 +262,7 @@ func (s *Service) publishControl(ctx context.Context, topic string, payload []by
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
 	defer cancel()
-	if err := session.Publish(publishCtx, topic, payload, 1); err != nil {
+	if err := session.Publish(publishCtx, Message{Topic: topic, Payload: payload, QoS: 1}); err != nil {
 		return fmt.Errorf("publish control: %w", err)
 	}
 	return nil
@@ -303,13 +312,9 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 		subscribeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err = session.Subscribe(subscribeCtx, []string{
-			ResultFilter, EventFilter, DeviceReadyFilter, DeviceWillFilter,
-			ControlReplyFilter, ControlEventFilter,
+			ResultFilter, EventFilter, DeviceQueryFilter, DeviceReadyFilter,
+			DeviceWillFilter, ControlReplyFilter, ControlEventFilter,
 		}, 1)
-		if err == nil {
-			// Live previews are a separate QoS 0 class; control stays QoS 1.
-			err = session.Subscribe(subscribeCtx, []string{LiveFilter}, 0)
-		}
 		cancel()
 		if err != nil {
 			_ = session.Close()
@@ -345,6 +350,14 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-session.Done():
 			s.setSession(nil, false)
 			s.presence.SetAvailable(false)
+			// A lost Access session cannot receive or publish replies for the
+			// waiters it holds; a safe read retries with its remaining deadline.
+			s.handlersMu.RLock()
+			query := s.queryHandler
+			s.handlersMu.RUnlock()
+			if query != nil {
+				query.CancelAll()
+			}
 			s.logger.Warn("mqtt disconnected")
 			if !sleepContext(ctx, reconnectMin) {
 				return nil
@@ -392,15 +405,15 @@ func (s *Service) baseContext() context.Context {
 // HandleMessage routes one MQTT message. It is called by the session read
 // loop, so it performs only validation, a non-blocking transient handoff and
 // bounded handler calls.
-func (s *Service) HandleMessage(topic string, payload []byte) {
-	if s.control != nil && s.control.HandleMessage(topic, payload) {
+func (s *Service) HandleMessage(message Message) {
+	if s.control != nil && s.control.HandleMessage(message.Topic, message.Payload) {
 		return
 	}
-	if _, ok := ParseDeviceWillTopic(topic); ok {
-		s.presence.HandleDeviceWill(topic, payload)
+	if _, ok := ParseDeviceWillTopic(message.Topic); ok {
+		s.presence.HandleDeviceWill(message.Topic, message.Payload)
 		return
 	}
-	parsed, err := ParseTopic(topic)
+	parsed, err := ParseTopic(message.Topic)
 	if err != nil {
 		s.metrics.RouteError()
 		s.logger.Warn("mqtt message on unknown topic")
@@ -408,16 +421,20 @@ func (s *Service) HandleMessage(topic string, payload []byte) {
 	}
 	switch parsed.Kind {
 	case KindResult:
-		s.handleResult(parsed.HostID, payload)
+		s.handleResult(parsed.HostID, message)
 	case KindEvent:
-		s.handleEvent(parsed.HostID, payload)
-	case KindLive:
-		s.handleLive(parsed.HostID, payload)
+		s.handleEvent(parsed.HostID, message.Payload)
+	case KindDeviceQuery:
+		s.handleQuery(message)
+	case KindDeviceReply:
+		// Access publishes device replies; an echoed copy is not input.
+		return
 	case KindDeviceLive:
-		// Access publishes device live; an echoed copy is not control input.
+		// Previews travel directly from the Host; Access never republishes
+		// them and an echoed copy is not control input.
 		return
 	case KindDeviceReady:
-		s.handleDeviceReady(parsed.HostID, parsed.DeviceID, payload)
+		s.handleDeviceReady(parsed.HostID, parsed.DeviceID, message.Payload)
 	case KindPresence:
 		// Access publishes host-scoped presence; Hosts consume it. If a
 		// broker/ACL change ever echoes it back, it must not enter result or
@@ -428,9 +445,27 @@ func (s *Service) HandleMessage(topic string, payload []byte) {
 	}
 }
 
-func (s *Service) handleResult(topicHost string, payload []byte) {
+// handleQuery admits one deadline-bound query on a short bounded context. A
+// rejected query is dropped without a durable row or a Host dispatch.
+func (s *Service) handleQuery(message Message) {
+	s.handlersMu.RLock()
+	handler := s.queryHandler
+	s.handlersMu.RUnlock()
+	if handler == nil {
+		s.metrics.RouteError()
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.baseContext(), 10*time.Second)
+	defer cancel()
+	if err := handler.Admit(ctx, message); err != nil {
+		s.metrics.RouteError()
+		s.logger.Debug("query admission rejected", "error", err.Error())
+	}
+}
+
+func (s *Service) handleResult(topicHost string, message Message) {
 	var result whalereinv1.HostResult
-	if err := proto.Unmarshal(payload, &result); err != nil {
+	if err := proto.Unmarshal(message.Payload, &result); err != nil {
 		s.metrics.RouteError()
 		s.logger.Warn("mqtt result decode failed", "error", err.Error())
 		return
@@ -447,6 +482,15 @@ func (s *Service) handleResult(topicHost string, payload []byte) {
 	}
 	if result.GetRequestId() == "" {
 		s.handleReady(&result)
+		return
+	}
+	// A matching transient query waiter consumes the result before the
+	// durable command path. A result with no waiter falls through so a
+	// command result is still persisted by the requests service.
+	s.handlersMu.RLock()
+	query := s.queryHandler
+	s.handlersMu.RUnlock()
+	if query != nil && query.Complete(s.baseContext(), topicHost, message) {
 		return
 	}
 	if s.deliverTransient(&result) {
@@ -682,53 +726,6 @@ func (s *Service) handleEvent(topicHost string, payload []byte) {
 	}
 }
 
-// handleLive validates one Host live preview and hands it to the lossy live
-// consumer without blocking the broker read loop. A full bounded slot set drops
-// the preview; control delivery never waits behind it.
-func (s *Service) handleLive(topicHost string, payload []byte) {
-	var event whalereinv1.EventEnvelope
-	if err := proto.Unmarshal(payload, &event); err != nil {
-		s.metrics.RouteError()
-		s.logger.Warn("mqtt live decode failed", "error", err.Error())
-		return
-	}
-	if !s.requireRelayEpoch("live", topicHost, event.GetRelayVersion()) {
-		return
-	}
-	if event.GetHostId() != "" && event.GetHostId() != topicHost {
-		s.metrics.RouteError()
-		s.logger.Warn("mqtt live host mismatch")
-		return
-	}
-	if event.GetDeviceId() == "" {
-		s.metrics.RouteError()
-		s.logger.Warn("mqtt live device missing")
-		return
-	}
-	s.handlersMu.RLock()
-	handler := s.liveHandler
-	s.handlersMu.RUnlock()
-	if handler == nil {
-		s.metrics.RouteError()
-		return
-	}
-	select {
-	case s.liveSlots <- struct{}{}:
-	default:
-		s.metrics.LiveDropped("backpressure")
-		return
-	}
-	go func() {
-		defer func() { <-s.liveSlots }()
-		ctx, cancel := context.WithTimeout(s.baseContext(), 15*time.Second)
-		defer cancel()
-		if err := handler(ctx, topicHost, payload); err != nil {
-			s.metrics.RouteError()
-			s.logger.Warn("live route failed", "error", err.Error())
-		}
-	}()
-}
-
 // requireRelayEpoch rejects every foreign or missing relay epoch before
 // business handling. It only logs bounded metadata.
 func (s *Service) requireRelayEpoch(kind, hostID string, version uint32) bool {
@@ -794,6 +791,24 @@ func (s *Service) PublishAndAwait(ctx context.Context, hostID string, request *w
 	}
 }
 
+// PublishMessage publishes one complete MQTT 5 message, preserving the
+// correlation, response-topic, expiry and user properties of the query lane.
+func (s *Service) PublishMessage(ctx context.Context, message Message) error {
+	if message.Topic == "" {
+		return ErrInvalidTopic
+	}
+	session, ok := s.currentSession()
+	if !ok || session == nil {
+		return ErrUnavailable
+	}
+	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
+	defer cancel()
+	if err := session.Publish(publishCtx, message); err != nil {
+		return fmt.Errorf("publish message: %w", err)
+	}
+	return nil
+}
+
 // Publish sends a binary protobuf HostRequest to one host's request topic.
 func (s *Service) Publish(ctx context.Context, hostID string, request *whalereinv1.HostRequest) error {
 	return s.PublishRequest(ctx, hostID, request)
@@ -822,7 +837,9 @@ func (s *Service) PublishRequest(ctx context.Context, hostID string, request *wh
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
 	defer cancel()
-	if err := session.Publish(publishCtx, RequestTopic(hostID), payload, 1); err != nil {
+	if err := session.Publish(publishCtx, Message{
+		Topic: RequestTopic(hostID), Payload: payload, QoS: 1,
+	}); err != nil {
 		return fmt.Errorf("publish host request: %w", err)
 	}
 	return nil
@@ -864,45 +881,8 @@ func (s *Service) PublishDeviceEvent(ctx context.Context, hostID, deviceID strin
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
 	defer cancel()
-	if err := session.Publish(publishCtx, DeviceEventTopic(hostID, deviceID), payload, 1); err != nil {
+	if err := session.Publish(publishCtx, Message{Topic: DeviceEventTopic(hostID, deviceID), Payload: payload, QoS: 1}); err != nil {
 		return fmt.Errorf("publish device event: %w", err)
-	}
-	return nil
-}
-
-// PublishDeviceLive republishes the exact opaque live preview to one Device
-// live topic at QoS 0 using only the authenticated outer device id. It adds no
-// durable row, outbox entry, receipt or retry: a disconnected session or a
-// failed handoff drops the preview and counts one bounded reason.
-func (s *Service) PublishDeviceLive(ctx context.Context, hostID, deviceID string, payload []byte) error {
-	if !validID(hostID) || !validID(deviceID) {
-		return ErrInvalidTopic
-	}
-	var event whalereinv1.EventEnvelope
-	if err := proto.Unmarshal(payload, &event); err != nil {
-		return transportReject(transportCodeHeader, ErrPeerTransportUnsupported)
-	}
-	if err := validateRelayEpoch(event.GetRelayVersion()); err != nil {
-		return err
-	}
-	if event.GetHostId() != "" && event.GetHostId() != hostID {
-		return transportReject(transportCodeTopic, ErrInvalidTopic)
-	}
-	if event.GetDeviceId() != "" && event.GetDeviceId() != deviceID {
-		return transportReject(transportCodeTopic, ErrInvalidTopic)
-	}
-	session, ok := s.currentSession()
-	if !ok || session == nil {
-		s.metrics.LiveDropped("disconnected")
-		return nil
-	}
-	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
-	defer cancel()
-	if err := session.Publish(publishCtx, DeviceLiveTopic(hostID, deviceID), payload, 0); err != nil {
-		s.metrics.LiveDropped("publish")
-		s.logger.Debug("live preview dropped",
-			"host", s.masker.Host(hostID), "device", s.masker.Device(deviceID), "error", err.Error())
-		return nil
 	}
 	return nil
 }
@@ -943,7 +923,7 @@ func (s *Service) PublishDeviceNotice(ctx context.Context, hostID, deviceID stri
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
 	defer cancel()
-	if err := session.Publish(publishCtx, DeviceNoticeTopic(hostID, deviceID), payload, 1); err != nil {
+	if err := session.Publish(publishCtx, Message{Topic: DeviceNoticeTopic(hostID, deviceID), Payload: payload, QoS: 1}); err != nil {
 		return fmt.Errorf("publish device notice: %w", err)
 	}
 	return nil
@@ -1016,7 +996,7 @@ func (s *Service) handleDeviceOffline(deviceID, reason string, observedAt time.T
 			s.metrics.DeviceOfflinePublishFailed()
 			continue
 		}
-		if err := session.Publish(publishCtx, PresenceTopic(hostID), payload, 1); err != nil {
+		if err := session.Publish(publishCtx, Message{Topic: PresenceTopic(hostID), Payload: payload, QoS: 1}); err != nil {
 			s.metrics.DeviceOfflinePublishFailed()
 			s.logger.Warn("device offline publish failed", "host", s.masker.Host(hostID), "device", s.masker.Device(deviceID), "error", err.Error())
 			continue
@@ -1037,7 +1017,7 @@ func (s *Service) PublishPresence(ctx context.Context, hostID string, payload []
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
 	defer cancel()
-	return session.Publish(publishCtx, PresenceTopic(hostID), payload, 1)
+	return session.Publish(publishCtx, Message{Topic: PresenceTopic(hostID), Payload: payload, QoS: 1})
 }
 
 // IsHostOnline implements the broker-derived presence boundary used by auth,

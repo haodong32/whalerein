@@ -167,6 +167,8 @@ type ReserveInput struct {
 	GrantGeneration            *int64
 	RevocationGeneration       *int64
 	DeviceRevocationGeneration *int64
+	EnrollmentGeneration       *int64
+	ConnectionRef              string
 }
 
 // Stats is one operator snapshot.
@@ -345,6 +347,8 @@ func (s *Service) Reserve(ctx context.Context, input ReserveInput) (Object, erro
 		GrantGeneration:            input.GrantGeneration,
 		RevocationGeneration:       input.RevocationGeneration,
 		DeviceRevocationGeneration: input.DeviceRevocationGeneration,
+		EnrollmentGeneration:       input.EnrollmentGeneration,
+		ConnectionRef:              input.ConnectionRef,
 	}, store.PayloadLimits{
 		MaxObjectBytes:   s.config.MaxObjectBytes,
 		MaxHostBytes:     s.config.MaxHostBytes,

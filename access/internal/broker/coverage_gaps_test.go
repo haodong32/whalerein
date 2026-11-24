@@ -269,7 +269,7 @@ func TestHandleNotificationBindsAdvertisements(t *testing.T) {
 	// Device ready advertisements are registered per connection generation.
 	service.handleNotification(&Notification{Sequence: 2, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 21, ClientID: "device-a", AtUnixMilli: time.Now().UnixMilli()})
 	payload, _ := proto.Marshal(defaultAdvertisement(t, 21))
-	service.HandleMessage(DeviceReadyTopic("h1", "d1"), payload)
+	service.HandleMessage(Message{Topic: DeviceReadyTopic("h1", "d1"), Payload: payload})
 	budget, ok := service.Receivers().Lookup(DeviceEventTopic("h1", "d1"))
 	if !ok || budget.PacketBytes != 65536 {
 		t.Fatalf("device ready advertisement = %+v/%v", budget, ok)
@@ -277,11 +277,11 @@ func TestHandleNotificationBindsAdvertisements(t *testing.T) {
 	// A sibling generation is tracked beside the first advertisement instead
 	// of clearing it; an exact replay of a generation is ignored.
 	sibling, _ := proto.Marshal(defaultAdvertisement(t, 22))
-	service.HandleMessage(DeviceReadyTopic("h1", "d1"), sibling)
+	service.HandleMessage(Message{Topic: DeviceReadyTopic("h1", "d1"), Payload: sibling})
 	if service.Receivers().Count() != 2 {
 		t.Fatalf("sibling advertisement count = %d", service.Receivers().Count())
 	}
-	service.HandleMessage(DeviceReadyTopic("h1", "d1"), payload)
+	service.HandleMessage(Message{Topic: DeviceReadyTopic("h1", "d1"), Payload: payload})
 	if service.Receivers().Count() != 2 {
 		t.Fatalf("replayed generation changed the registry count: %d", service.Receivers().Count())
 	}
@@ -289,7 +289,7 @@ func TestHandleNotificationBindsAdvertisements(t *testing.T) {
 	foreign := defaultAdvertisement(t, 22)
 	foreign.RelayVersion = 2
 	foreignPayload, _ := proto.Marshal(foreign)
-	service.HandleMessage(DeviceReadyTopic("h1", "d1"), foreignPayload)
+	service.HandleMessage(Message{Topic: DeviceReadyTopic("h1", "d1"), Payload: foreignPayload})
 	if service.Receivers().Count() != 2 {
 		t.Fatal("foreign epoch device advertisement registered")
 	}
@@ -355,7 +355,7 @@ func TestHostReadyValidatesIdentityAdvertisementAndAuthorizationKey(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	service.HandleMessage(ResultTopic("h1"), payload)
+	service.HandleMessage(Message{Topic: ResultTopic("h1"), Payload: payload})
 
 	// Readiness without a valid advertisement is rejected: a Host that cannot
 	// publish its receive limits cannot be forwarded to.
@@ -386,7 +386,7 @@ func TestPahoConnectorDefaultsAddressAndTransportBudget(t *testing.T) {
 		"tls default port":   {"tls://mqtt.example.com", "mqtt.example.com:8883", true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			connector, err := NewPahoConnectorWithTransport(config.BrokerConfig{URL: tc.url}, config.TransportEffective{}, nil, func(string, []byte) {}, nil)
+			connector, err := NewPahoConnectorWithTransport(config.BrokerConfig{URL: tc.url}, config.TransportEffective{}, nil, func(Message) {}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -434,7 +434,7 @@ func TestPahoSessionReportsPublishRejectionAndSubscribeFailures(t *testing.T) {
 	client := &scriptedMQTTClient{publishResponse: &paho.PublishResponse{ReasonCode: 0x80}}
 	session := newRelayTestSession(&fakeMQTTClient{publishResponse: &paho.PublishResponse{ReasonCode: 0x80}})
 	payload, _ := proto.Marshal(&whalereinv1.HostRequest{RequestId: "r1", HostId: "h1", Body: []byte("x")})
-	if err := session.Publish(context.Background(), RequestTopic("h1"), payload, 1); err == nil {
+	if err := session.Publish(context.Background(), Message{Topic: RequestTopic("h1"), Payload: payload, QoS: 1}); err == nil {
 		t.Fatal("rejected publish acknowledged")
 	}
 	if err := session.Subscribe(context.Background(), []string{"topic"}, 1); err == nil {
@@ -460,7 +460,7 @@ func TestPahoSessionClosePreservesRealDisconnectErrors(t *testing.T) {
 	if err := (&pahoSession{client: client}).Close(); err == nil {
 		t.Fatal("real disconnect error swallowed")
 	}
-	publisher := newPublisher(func(context.Context, string, []byte) error { return nil }, config.DefaultTransportEffective(), nil)
+	publisher := newPublisher(func(context.Context, Message) error { return nil }, config.DefaultTransportEffective(), nil)
 	if err := (&pahoSession{client: client, publisher: publisher}).Close(); err == nil {
 		t.Fatal("close with a publisher hid the disconnect error")
 	}
