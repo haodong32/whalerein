@@ -815,7 +815,31 @@ export class HostRuntime {
     try {
       await this.#access.publishResult(encoded, replyOptions)
     } catch (error) {
-      if (error?.code !== 'payload_too_large') throw error
+      const failureCode = typeof error?.code === 'string' && error.code !== ''
+        ? error.code
+        : 'internal'
+      if (error?.code !== 'payload_too_large') {
+        this.#logger?.warn('host_result_publish_failed', {
+          code: failureCode, kind: request.kind, bytes: encoded.length,
+          reason: typeof error.message === 'string' ? error.message.slice(0, 160) : '',
+          layer: 'host',
+        })
+        result.status = 'failed'
+        result.result_body = EMPTY
+        result.error_code = isErrorCode(failureCode) ? failureCode : 'internal'
+        result.error_message = publicMessage(result.error_code)
+        encoded = this.#codec.encode('whalerein.v1.HostResult', result)
+        try {
+          // The failure envelope is small and inline; it never carries the
+          // query object scope that just failed.
+          await this.#access.publishResult(encoded, { ...replyOptions, requestId: request.request_id })
+        } catch (second) {
+          this.#logger?.warn('host_result_failure_unpublishable', {
+            code: codeOf(second), kind: request.kind, layer: 'host',
+          })
+        }
+        return result
+      }
       this.#logger?.warn('host_result_unrepresentable', {
         code: 'payload_too_large', kind: request.kind, bytes: encoded.length,
         reason: typeof error.message === 'string' ? error.message.slice(0, 160) : '',
