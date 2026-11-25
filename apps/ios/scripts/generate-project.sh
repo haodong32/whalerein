@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ios_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-root="$(cd -- "$ios_dir/../.." && pwd)"
 version=2.48.0
 checksum=620c9f0dc10849f94728ab5df52d225ebab8187439dd6fee1925e59e80dff892
 cache_dir="$HOME/Library/Caches/whalerein/xcodegen"
@@ -28,13 +27,6 @@ except OSError as error:
     if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
         raise
 PY
-fi
-
-vendor="$ios_dir/Vendor"
-if [[ ! -f "$vendor/WhaleReinMobile.xcframework/Info.plist" ||
-      ! -f "$vendor/WhaleReinMobile/WhaleReinMobile.swift" ||
-      ! -f "$vendor/WhaleReinMobile/WhaleReinMobileError.swift" ]]; then
-  bash "$root/apps/mobile-bindings/scripts/build-xcframework.sh"
 fi
 
 "$xcodegen" generate --spec "$ios_dir/project.yml" --use-cache

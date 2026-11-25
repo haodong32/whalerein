@@ -65,8 +65,12 @@ targets:
     templates: [iOS]
     type: framework
     sources:
-      - Vendor/WhaleReinMobile/WhaleReinMobile.swift
-      - Vendor/WhaleReinMobile/WhaleReinMobileError.swift
+      - path: Vendor/WhaleReinMobile/WhaleReinMobile.swift
+        type: file
+        optional: true
+      - path: Vendor/WhaleReinMobile/WhaleReinMobileError.swift
+        type: file
+        optional: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.whalerein.ios.mobile
@@ -122,6 +126,12 @@ targets:
 schemes:
   WhaleRein:
     build:
+      preActions:
+        - &prepareBindings
+          name: Prepare Rust bindings
+          settingsTarget: WhaleRein
+          script: |
+            exec python3 "$SRCROOT/scripts/prepare-bindings.py"
       targets:
         WhaleRein: all
         WhaleReinTests: [test]
@@ -136,6 +146,7 @@ schemes:
 
   WhaleReinTests:
     build:
+      preActions: [*prepareBindings]
       targets:
         WhaleRein: all
         WhaleReinTests: [test]
@@ -145,6 +156,7 @@ schemes:
 
   WhaleReinUITests:
     build:
+      preActions: [*prepareBindings]
       targets:
         WhaleReinUITests: [test]
     test:

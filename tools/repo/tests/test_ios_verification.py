@@ -64,8 +64,10 @@ class Xcode:
             return self.result(raw="sha256:fixture-image")
         if args[0] == "pnpm":
             return self.result()
-        if args == ("bash", "apps/mobile-bindings/scripts/build-xcframework.sh"):
-            assert env["WHALEREIN_MOBILE_SIMULATOR_ONLY"] == "1"
+        if args == ("bash", "apps/ios/scripts/generate-project.sh"):
+            return self.result(code=int(self.fault == "generate"))
+        if args[:2] == ("xcodebuild", "build-for-testing"):
+            assert ("bash", "apps/ios/scripts/generate-project.sh") in self.commands
             if self.fault == "compile":
                 return self.result(code=1)
             vendor = cwd / "apps/ios/Vendor"
@@ -73,12 +75,6 @@ class Xcode:
             (vendor / "revision.txt").write_text(
                 f"source:{env['WHALEREIN_MOBILE_SOURCE']} core:0.1.0"
             )
-            return self.result()
-        if args == ("bash", "apps/ios/scripts/generate-project.sh"):
-            assert (cwd / "apps/ios/Vendor/revision.txt").is_file()
-            return self.result(code=int(self.fault == "generate"))
-        if args[:2] == ("xcodebuild", "build-for-testing"):
-            assert ("bash", "apps/ios/scripts/generate-project.sh") in self.commands
             products = Path(args[args.index("-derivedDataPath") + 1]) / "Build/Products"
             app = products / "WhaleRein.app"
             app.mkdir(parents=True, exist_ok=True)
@@ -211,7 +207,7 @@ def checkout(tmp_path, monkeypatch):
     ("fault", "exit_code", "error"),
     [
         (None, 0, None),
-        ("compile", 1, "mobile-bindings-build-failed"),
+        ("compile", 1, "xcode-build-failed"),
         ("generate", 1, "xcode-project-generation-failed"),
         ("unmatched", 2, "unmatched-case-filter"),
         ("stale", 1, "runtime-identity-mismatch"),

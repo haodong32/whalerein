@@ -49,24 +49,16 @@ Generate the Xcode project before opening it:
 open apps/ios/WhaleRein.xcodeproj
 ```
 
-Edit `project.yml` for target, scheme, and build setting changes, then rerun the
-generator. It downloads and verifies the pinned XcodeGen release on first use
-and builds the Rust bindings if they are missing. The build scripts and native
-`./repo test` targets generate the project automatically.
+Edit `project.yml` for target, scheme, and build setting changes, then rerun
+`./repo generate ios`. The generator downloads and verifies the pinned
+XcodeGen release on first use.
 
-After changing Rust or UniFFI, rebuild the bindings:
-
-```sh
-bash apps/mobile-bindings/scripts/build-xcframework.sh
-# Mac Catalyst needs a fourth Rust slice; run this after the command above:
-bash apps/ios/scripts/build-catalyst-slice.sh
-```
-
-The first command produces the iOS device and Simulator slices. The Catalyst
-script rebuilds the Rust binding for `aarch64-apple-ios-macabi` and adds a
-Mac Catalyst slice to the same generated XCFramework without changing the
-generated Swift binding. Re-run it after any `build-xcframework.sh` run or
-Rust binding change.
+Build or run the `WhaleRein` scheme in Xcode. Its Build pre-action prepares
+the Rust XCFramework and Swift bindings for the selected destination. It
+reuses current bindings and rebuilds them when Rust or UniFFI inputs change.
+Simulator builds need only the Simulator Rust target. Mac Catalyst builds
+also add the Catalyst slice. Build scripts and native `./repo test` targets
+generate the project as needed and use the same Xcode hook.
 
 The project has a `WhaleReinMobile` framework target that compiles the generated
 `WhaleReinMobile.swift`/`WhaleReinMobileError.swift` and links
@@ -438,9 +430,6 @@ point.
   wide window shows the sidebar; a 550 pt window falls back to the compact
   switcher). The Unit and UI plans are executed on the iOS Simulator; no Catalyst
   test plan or signed Mac distribution is part of this milestone.
-- `build-xcframework.sh` does not emit a Catalyst slice by itself. Run
-  `apps/ios/scripts/build-catalyst-slice.sh` after it before building Catalyst;
-  the slice is generated and gitignored like the other binding artifacts.
 - No explicit minimum Catalyst window size is imposed because a hard minimum
   would block resizing below the breakpoint. The default window opens wide
   enough for the sidebar and can be resized narrower to exercise the sheet.
