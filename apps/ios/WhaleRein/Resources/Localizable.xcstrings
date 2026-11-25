@@ -596,6 +596,57 @@
         }
       }
     },
+    "cloud.hostID": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Host ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "主机 ID"
+          }
+        }
+      }
+    },
+    "cloud.hostIDCopy": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy Host ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "复制主机 ID"
+          }
+        }
+      }
+    },
+    "cloud.hostIDDetails": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shows the full Host ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示完整主机 ID"
+          }
+        }
+      }
+    },
     "cloud.hostOffline": {
       "extractionState": "manual",
       "localizations": {
