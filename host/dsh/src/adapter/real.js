@@ -1081,11 +1081,12 @@ export class RealDshAdapter extends DshAdapter {
 
   async nativeHead(sessionId, {signal} = {}) {
     if(signal?.aborted)throw new AdapterError('unavailable')
-    const live=this.#service('sessions')?.get?.(sessionId)
-    if(Number.isSafeInteger(live?.seq))return live.seq-1
-    // Cold/passive: one bounded native page is enough to establish the cut.
-    // Never materialize the whole log just to learn the head position.
+    // History pages pin their cut to the passive snapshot cursor, so the head
+    // must come from that same bounded page API. The live session sequence runs
+    // ahead of the committed cursor while an Attempt streams, and mixing the two
+    // makes a later page look like a rewind.
     const page=await this.nativeEventsPage(sessionId,{maxMessages:1,signal})
+    if(Number.isSafeInteger(page.cursor))return page.cursor
     return page.events.at(-1)?.dshSeq ?? -1
   }
 
