@@ -14,13 +14,14 @@ final class RecoverableSessionService: SessionService {
     private(set) var recoveryAttempts = 0
     private var underlying: (any SessionService)?
 
-    private let factory: () throws -> any SessionService
+    private var opening: Task<any SessionService, Error>?
+    private let factory: @MainActor () async throws -> any SessionService
     private let fallbackInstanceId: String
 
     init(
         failureCode: AppErrorCode = .keychainUnavailable,
         instanceId: String = "unavailable",
-        factory: @escaping () throws -> any SessionService
+        factory: @escaping @MainActor () async throws -> any SessionService
     ) {
         self.lastFailureCode = failureCode
         self.fallbackInstanceId = instanceId
@@ -39,19 +40,25 @@ final class RecoverableSessionService: SessionService {
             ?? "0.1.0"
     }
 
-    private func current() throws -> any SessionService {
+    private func current() async throws -> any SessionService {
         if let underlying { return underlying }
+        if let opening { return try await opening.value }
         recoveryAttempts += 1
-        do {
-            let service = try factory()
-            underlying = service
-            return service
-        } catch let error as SessionServiceError {
-            lastFailureCode = error.code
-            throw error
-        } catch {
-            throw SessionServiceError(lastFailureCode)
+        let attempt = Task {
+            defer { opening = nil }
+            do {
+                let service = try await factory()
+                underlying = service
+                return service
+            } catch let error as SessionServiceError {
+                lastFailureCode = error.code
+                throw error
+            } catch {
+                throw SessionServiceError(lastFailureCode)
+            }
         }
+        opening = attempt
+        return try await attempt.value
     }
 
     func makeEventStream() -> AsyncStream<SessionEventEnvelope> {
@@ -70,7 +77,8 @@ final class RecoverableSessionService: SessionService {
     }
 
     func startHostMonitor(hostIds: [String]) {
-        (try? current())?.startHostMonitor(hostIds: hostIds)
+        // The shell loads hosts before monitoring, which opens the service.
+        underlying?.startHostMonitor(hostIds: hostIds)
     }
 
     func stopHostMonitor() {
@@ -302,8 +310,8 @@ final class RecoverableSessionService: SessionService {
         try await statusService().currentCloudSessionId()
     }
 
-    private func statusService() throws -> any InstanceStatusService {
-        guard let service = try current() as? any InstanceStatusService else {
+    private func statusService() async throws -> any InstanceStatusService {
+        guard let service = try await current() as? any InstanceStatusService else {
             throw SessionServiceError(.unavailable)
         }
         return service
@@ -362,8 +370,8 @@ extension RecoverableSessionService: CloudAccountService {
         try await cloudService().connectCloud(hostId: hostId)
     }
 
-    private func cloudService() throws -> any CloudAccountService {
-        guard let service = try current() as? any CloudAccountService else {
+    private func cloudService() async throws -> any CloudAccountService {
+        guard let service = try await current() as? any CloudAccountService else {
             throw SessionServiceError(.unsupportedCapability)
         }
         return service
@@ -383,8 +391,8 @@ extension RecoverableSessionService: OperationRecoveryService {
         try await recoveryService().readMessage(reference)
     }
 
-    private func recoveryService() throws -> any OperationRecoveryService {
-        guard let service = try current() as? any OperationRecoveryService else {
+    private func recoveryService() async throws -> any OperationRecoveryService {
+        guard let service = try await current() as? any OperationRecoveryService else {
             throw SessionServiceError(.unsupportedCapability)
         }
         return service

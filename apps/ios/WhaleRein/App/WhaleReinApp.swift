@@ -10,21 +10,49 @@ import SwiftUI
 
 @main
 struct WhaleReinApp: App {
-    @State private var runtime: AppRuntime
-
-    init() {
-        _runtime = State(initialValue: AppRuntime.bootstrap())
-    }
+    @State private var runtime: AppRuntime?
+    @State private var bootstrapTask: Task<AppRuntime, Never>?
+    @State private var pendingURLs: [URL] = []
 
     var body: some Scene {
         WindowGroup {
-            RootView(app: runtime.legacy, runtime: runtime)
-                .environment(runtime.legacy)
-                .environment(runtime)
-                .id(runtime.activationGeneration)
-                .modifier(DynamicTypeOverride(
-                    enabled: runtime.legacy.options.largeText
-                ))
+            Group {
+                if let runtime {
+                    RootView(app: runtime.legacy, runtime: runtime)
+                        .environment(runtime.legacy)
+                        .environment(runtime)
+                        .id(runtime.activationGeneration)
+                        .modifier(DynamicTypeOverride(
+                            enabled: runtime.legacy.options.largeText
+                        ))
+                } else {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .task { await bootstrap() }
+                }
+            }
+            .onOpenURL { url in
+                if let runtime {
+                    Task { await runtime.handleOpenURL(url) }
+                } else {
+                    pendingURLs.append(url)
+                }
+            }
+        }
+    }
+
+    private func bootstrap() async {
+        guard runtime == nil else { return }
+        let task = bootstrapTask ?? Task { await AppRuntime.bootstrap() }
+        bootstrapTask = task
+        let startedRuntime = await task.value
+        guard runtime == nil else { return }
+        runtime = startedRuntime
+        bootstrapTask = nil
+        let urls = pendingURLs
+        pendingURLs.removeAll()
+        for url in urls {
+            await startedRuntime.handleOpenURL(url)
         }
     }
 }

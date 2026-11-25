@@ -31,7 +31,7 @@ extension AppShellModel {
         let target = configuration.activeInstance
         let nextService: any SessionService
         do {
-            nextService = try serviceFactory(target)
+            nextService = try await serviceFactory(target)
         } catch {
             // The document committed before the runtime existed; restore the
             // previous selection rather than leaving startup and runtime split.

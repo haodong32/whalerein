@@ -35,6 +35,21 @@ struct KeychainRecoveryTests {
         #expect(KeychainSecretStore.availability(for: errSecIO) == .failed)
     }
 
+    @Test("live Core construction checks credentials off the main thread")
+    func liveCredentialsAreCheckedOffMainThread() async {
+        let configPath = makeTempDirectory().appendingPathComponent("config.toml")
+        await #expect(throws: SessionServiceError(.keychainUnavailable)) {
+            _ = try await LiveSessionService.open(
+                configPath: configPath,
+                appVersion: "test",
+                instanceId: "standalone"
+            ) {
+                #expect(!Thread.isMainThread)
+                throw SessionServiceError(.keychainUnavailable)
+            }
+        }
+    }
+
     @Test("a failing Keychain factory attempts once per call and recovers on a later call")
     func singleAttemptPerCall() async throws {
         let state = FactoryState()
