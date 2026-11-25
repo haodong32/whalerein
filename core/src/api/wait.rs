@@ -182,14 +182,13 @@ impl Core {
                         let checked: CoreResult<()> = timeout_at(deadline, self.settle(Err(error)))
                             .await
                             .unwrap_or(Err(CoreError::Timeout));
-                        if matches!(
-                            checked,
-                            Err(CoreError::Revoked | CoreError::RevokedRetentionUnverified)
-                        ) {
-                            return Err(checked.expect_err("revocation result"));
-                        }
-                        if matches!(checked, Err(CoreError::Timeout)) {
-                            return Err(CoreError::Timeout);
+                        if let Err(
+                            error @ (CoreError::Revoked
+                            | CoreError::RevokedRetentionUnverified
+                            | CoreError::Timeout),
+                        ) = checked
+                        {
+                            return Err(error);
                         }
                     }
                     if stale_channel_id.is_some() {
@@ -228,33 +227,23 @@ impl Core {
                 .state
                 .ok_or_else(|| CoreError::Internal("missing wait state".into()))?;
             let state = wait_state(source)?;
-            match WireReason::try_from(result.reason) {
-                Ok(WireReason::WaitIdle) => {
-                    return Ok(WaitObservation {
-                        session_id: session_id.into(),
-                        reason: WaitReason::Idle,
-                        state,
-                    });
-                }
-                Ok(WireReason::WaitInputRequired) => {
-                    return Ok(WaitObservation {
-                        session_id: session_id.into(),
-                        reason: WaitReason::InputRequired,
-                        state,
-                    });
-                }
+            let reason = match WireReason::try_from(result.reason) {
+                Ok(WireReason::WaitIdle) => WaitReason::Idle,
+                Ok(WireReason::WaitInputRequired) => WaitReason::InputRequired,
                 Ok(WireReason::WaitTimeout) => {
-                    if deadline.saturating_duration_since(Instant::now()) <= return_allowance {
-                        tokio::time::sleep_until(deadline).await;
-                        return Ok(WaitObservation {
-                            session_id: session_id.into(),
-                            reason: WaitReason::Timeout,
-                            state,
-                        });
+                    if deadline.saturating_duration_since(Instant::now()) > return_allowance {
+                        continue;
                     }
+                    tokio::time::sleep_until(deadline).await;
+                    WaitReason::Timeout
                 }
                 _ => return Err(CoreError::Internal("invalid wait reason".into())),
-            }
+            };
+            return Ok(WaitObservation {
+                session_id: result.session_id,
+                reason,
+                state,
+            });
         }
     }
 }

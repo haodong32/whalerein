@@ -4,7 +4,6 @@
 //! only proven-unsent failures remove it. Network retries reuse the same
 //! request identity and encrypted payload. Cancellation keeps recovery metadata.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -52,16 +51,6 @@ struct Admission {
     secrets: std::sync::Arc<dyn crate::security::SecretStore>,
 }
 
-/// Why a heartbeat stopped renewing. A terminal response (404/expired/closed)
-/// is observable so renewal never loops after the exact request ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeartbeatOutcome {
-    /// The exact request is no longer renewable; renewal stopped.
-    Closed,
-    /// Renewal ended with a transient transport failure.
-    TransportFailed,
-}
-
 /// Bounded, non-blocking renewal of one command's original request identity.
 ///
 /// The task renewal is independent of result polling, so a slow heartbeat can
@@ -69,61 +58,28 @@ pub enum HeartbeatOutcome {
 /// renewal; there is no detached heartbeat after completion or cancellation.
 /// A 404/expired/terminal response stops renewal instead of looping.
 struct CommandHeartbeat {
-    stop: Arc<AtomicBool>,
-    /// Latest closure/failure fact. Renewal stops on a terminal response and
-    /// the guard stops on completion, so no detached heartbeat survives.
-    outcome: Arc<std::sync::Mutex<Option<HeartbeatOutcome>>>,
-    task: Option<JoinHandle<()>>,
+    task: JoinHandle<()>,
 }
 
 impl CommandHeartbeat {
     fn start(access: Arc<AccessClient>, request_id: String) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let outcome = Arc::new(std::sync::Mutex::new(None));
-        let task_stop = stop.clone();
-        let task_outcome = outcome.clone();
         let task = tokio::spawn(async move {
             loop {
-                if task_stop.load(Ordering::SeqCst) {
-                    break;
-                }
-                match access.heartbeat_request(&request_id).await {
-                    Ok(()) => {}
-                    Err(error) if error.is_retryable_transport() => {
-                        *task_outcome.lock().expect("heartbeat outcome") =
-                            Some(HeartbeatOutcome::TransportFailed);
-                    }
-                    Err(_) => {
-                        // The exact request is expired, cancelled or terminal.
-                        // Renewing again cannot help and could mask closure.
-                        *task_outcome.lock().expect("heartbeat outcome") =
-                            Some(HeartbeatOutcome::Closed);
+                if let Err(error) = access.heartbeat_request(&request_id).await {
+                    if !error.is_retryable_transport() {
                         break;
                     }
                 }
                 tokio::time::sleep(HEARTBEAT_INTERVAL).await;
             }
         });
-        Self {
-            stop,
-            outcome,
-            task: Some(task),
-        }
-    }
-
-    /// Latest observable heartbeat outcome, if any renewal failed.
-    #[allow(dead_code)]
-    fn outcome(&self) -> Option<HeartbeatOutcome> {
-        *self.outcome.lock().expect("heartbeat outcome")
+        Self { task }
     }
 }
 
 impl Drop for CommandHeartbeat {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+        self.task.abort();
     }
 }
 
@@ -297,7 +253,6 @@ impl CommandService {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn query_inner(
         &self,
         host_id: &str,
@@ -3809,20 +3764,15 @@ mod relay_command_tests {
         }))
         .await;
         let access = Arc::new(AccessClient::new(server.url(), None).unwrap());
-        let heartbeat = CommandHeartbeat::start(access, "r-1".into());
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut heartbeat = CommandHeartbeat::start(access, "r-1".into());
+        tokio::time::timeout(Duration::from_secs(5), &mut heartbeat.task)
+            .await
+            .expect("terminal heartbeat must stop")
+            .expect("heartbeat task completed");
         assert_eq!(
             *calls.lock().unwrap(),
             vec!["POST /v1/requests/r-1/heartbeat".to_owned()],
             "only the exact request is renewed and a terminal response stops it"
-        );
-        assert_eq!(heartbeat.outcome(), Some(HeartbeatOutcome::Closed));
-        drop(heartbeat);
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
-        assert_eq!(
-            calls.lock().unwrap().len(),
-            1,
-            "no detached heartbeat survives termination"
         );
     }
 
