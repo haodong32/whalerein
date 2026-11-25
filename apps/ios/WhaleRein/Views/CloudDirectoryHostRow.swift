@@ -6,7 +6,9 @@ import SwiftUI
 struct CloudDirectoryHostRow: View {
     let cloud: CloudSignInModel
     let host: CloudDirectoryHost
+    let hostIdLabel: String
     let connectivity: HostConnectivityModel
+    @State private var showsHostID = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -14,8 +16,26 @@ struct CloudDirectoryHostRow: View {
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
-                Text(host.displayName)
-                    .font(.body.weight(.medium))
+                Button {
+                    showsHostID = true
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(verbatim: host.displayName.isEmpty ? host.hostId : host.displayName)
+                            .font(.body.weight(.medium))
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text(verbatim: hostIdLabel)
+                                .font(.caption.monospaced())
+                            Image(systemName: "info.circle")
+                                .font(.caption)
+                                .accessibilityHidden(true)
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+                    .multilineTextAlignment(.leading)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(Text(L10n.cloudHostIDDetails.key))
+                .accessibilityIdentifier("cloud.host.details.\(host.hostId)")
                 Text(stateKey.key)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -23,8 +43,16 @@ struct CloudDirectoryHostRow: View {
             Spacer()
             action
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("cloud.host.\(host.hostId)")
+        .alert(L10n.cloudHostID.key, isPresented: $showsHostID) {
+            Button(L10n.cloudHostIDCopy.key) {
+                PlatformPasteboard.setString(host.hostId)
+            }
+            Button(L10n.commonClose.key, role: .cancel) {}
+        } message: {
+            Text(verbatim: host.hostId)
+        }
     }
 
     @ViewBuilder
@@ -50,10 +78,7 @@ struct CloudDirectoryHostRow: View {
             .disabled(cloud.isConnectingHostId != nil)
             .accessibilityIdentifier("cloud.host.connect.\(host.hostId)")
         case .unavailable:
-            Text(L10n.cloudHostUnavailable.key)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("cloud.host.unavailable.\(host.hostId)")
+            EmptyView()
         }
     }
 

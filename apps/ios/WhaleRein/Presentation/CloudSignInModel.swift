@@ -271,7 +271,7 @@ final class CloudSignInModel {
     }
 
     /// Connects an eligible computer through Core and only opens it after the
-    /// directory confirms the grant.
+    /// directory confirms enrollment and the device grant.
     func connect(_ host: CloudDirectoryHost) async {
         guard case .signedIn = phase, host.access == .eligible else { return }
         guard isConnectingHostId == nil else { return }
@@ -284,8 +284,9 @@ final class CloudSignInModel {
             }
             await loadDirectory()
             apply(.connectFinished)
-            guard case .loaded(let hosts) = directory,
-                  hosts.contains(where: { $0.hostId == host.hostId && $0.enrolled }) else {
+            guard let connected = directory.hosts.first(where: { $0.hostId == host.hostId }),
+                  connected.enrolled,
+                  case .authorized = connected.access else {
                 return
             }
             onOpenHost?(host.hostId)

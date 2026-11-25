@@ -162,6 +162,9 @@ enum L10nKey: String, CaseIterable, Sendable {
     case cloudHostOnline = "cloud.hostOnline"
     case cloudHostOffline = "cloud.hostOffline"
     case cloudHostEligible = "cloud.hostEligible"
+    case cloudHostID = "cloud.hostID"
+    case cloudHostIDCopy = "cloud.hostIDCopy"
+    case cloudHostIDDetails = "cloud.hostIDDetails"
     case cloudHostUnavailable = "cloud.hostUnavailable"
     case cloudSignOut = "cloud.signOut"
     case cloudSignOutPending = "cloud.signOutPending"
@@ -632,10 +635,9 @@ enum L10n {
     static let cloudDirectoryUnavailableTitle = L10nKey.cloudDirectoryUnavailableTitle
     static let cloudHostOpen = L10nKey.cloudHostOpen
     static let cloudHostConnect = L10nKey.cloudHostConnect
-    static let cloudHostOnline = L10nKey.cloudHostOnline
-    static let cloudHostOffline = L10nKey.cloudHostOffline
-    static let cloudHostEligible = L10nKey.cloudHostEligible
-    static let cloudHostUnavailable = L10nKey.cloudHostUnavailable
+    static let cloudHostID = L10nKey.cloudHostID
+    static let cloudHostIDCopy = L10nKey.cloudHostIDCopy
+    static let cloudHostIDDetails = L10nKey.cloudHostIDDetails
     static let cloudSignOut = L10nKey.cloudSignOut
     static let cloudSignOutPending = L10nKey.cloudSignOutPending
     static let cloudSignedInAs = L10nKey.cloudSignedInAs

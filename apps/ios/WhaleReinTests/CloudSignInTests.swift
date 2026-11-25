@@ -61,6 +61,7 @@ private final class StubCloudAccountService: CloudAccountService {
     var hostsError: AppErrorCode?
     var signOutResult = true
     var connectError: AppErrorCode?
+    var hostAfterConnect: CloudDirectoryHost?
     private(set) var startCount = 0
     private(set) var cancelCount = 0
     private(set) var completeCount = 0
@@ -118,7 +119,7 @@ private final class StubCloudAccountService: CloudAccountService {
         if let connectError { throw SessionServiceError(connectError) }
         hosts = hosts.map { host in
             guard host.hostId == hostId else { return host }
-            return CloudDirectoryHost(
+            return hostAfterConnect ?? CloudDirectoryHost(
                 hostId: host.hostId,
                 displayName: host.displayName,
                 enrolled: true,
@@ -143,7 +144,9 @@ private func host(
     id: String,
     enrolled: Bool = true,
     online: Bool = true,
-    eligible: Bool = false
+    eligible: Bool = false,
+    enrollmentState: String? = nil,
+    deviceAccess: String? = nil
 ) -> CloudDirectoryHost {
     CloudDirectoryHost(
         hostId: id,
@@ -152,9 +155,9 @@ private func host(
         online: online,
         presence: online ? "online" : "offline",
         observation: "",
-        enrollmentState: enrolled ? "enrolled" : (eligible ? "eligible" : "unavailable"),
+        enrollmentState: enrollmentState ?? (enrolled ? "enrolled" : (eligible ? "eligible" : "unavailable")),
         pairingEligible: eligible,
-        deviceAccess: enrolled ? "granted" : "none"
+        deviceAccess: deviceAccess ?? (enrolled ? "granted" : "none")
     )
 }
 
@@ -174,6 +177,26 @@ struct CloudSignInModelTests {
             authenticator: authenticator ?? FakeAuthenticator(),
             fenceIsCurrent: isCurrent
         )
+    }
+
+    @Test("disabled or ineligible computers cannot connect")
+    func unavailableComputersHaveNoConnectAction() async {
+        let service = StubCloudAccountService()
+        service.status = CloudAccountStatus(account: service.account, logoutPending: false)
+        service.hosts = [
+            host(id: "disabled", enrollmentState: "enrollment_disabled", deviceAccess: "absent"),
+            host(id: "disabled-grant", enrollmentState: "enrollment_disabled", deviceAccess: "ready"),
+            host(id: "paused", enrollmentState: "enrollment_ready", deviceAccess: "pending"),
+        ]
+        let model = makeModel(service: service)
+        await model.restore()
+
+        #expect(model.directory.hosts.count == 3)
+        for host in model.directory.hosts {
+            #expect(host.access == .unavailable)
+            await model.connect(host)
+        }
+        #expect(service.connectCount == 0)
     }
 
     @Test("sign-in opens the official URL in the system sheet with the Cloud callback scheme")
@@ -430,6 +453,31 @@ struct CloudSignInModelTests {
         #expect(opened.isEmpty)
         #expect(model.errorCode == .conflict)
         #expect(model.isConnectingHostId == nil)
+    }
+
+    @Test("automatic open requires both enrollment and device authorization")
+    func connectWithIncompleteDirectoryConfirmationDoesNotOpen() async {
+        let eligible = host(id: "new-laptop", enrolled: false, eligible: true)
+        let incompleteHosts = [
+            host(id: eligible.hostId, enrolled: false, deviceAccess: "ready"),
+            host(id: eligible.hostId, enrolled: true, deviceAccess: "pending"),
+        ]
+        for incomplete in incompleteHosts {
+            let service = StubCloudAccountService()
+            service.status = CloudAccountStatus(account: service.account, logoutPending: false)
+            service.hosts = [eligible]
+            service.hostAfterConnect = incomplete
+            let model = makeModel(service: service)
+            var opened: [String] = []
+            model.onOpenHost = { opened.append($0) }
+            await model.restore()
+
+            await model.connect(eligible)
+
+            #expect(service.connectHostIds == [eligible.hostId])
+            #expect(model.directory.hosts == [incomplete])
+            #expect(opened.isEmpty)
+        }
     }
 
     @Test("local sign-out keeps a pending remote revocation")
