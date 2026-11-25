@@ -3495,9 +3495,7 @@ dependencies = [
 name = "whalerein-mobile"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "hex",
- "rumqttc",
  "serde_json",
  "tempfile",
  "thiserror",

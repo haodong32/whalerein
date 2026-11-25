@@ -16,15 +16,16 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::task::AbortHandle;
 use whalerein_core::api::{
-    Cancellation, ClientConfig, ClientService, Core, Environment, ObservationInterests,
-    PairingDecision, PairingPrompt, QuestionAnswer, SessionEventPayload, SessionKey,
+    Cancellation, ClientConfig, ClientService, Core, Environment, HistoryContinuity,
+    ObservationInterests, PairingDecision, PairingPrompt, QuestionAnswer, SessionEventPayload,
+    SessionKey,
 };
 use whalerein_core::attachments::{DownloadProgress, DownloadRequest};
 use whalerein_core::history::{HistoryContinuation, HistoryPageRequest};
 use whalerein_core::CoreError;
 
 use crate::diagnostics::{CoreDiagnosticSink, DiagnosticContext, DiagnosticDispatcher};
-use crate::error::{MobileError, CODE_CANCELLED};
+use crate::error::{from_core_code, MobileError, CODE_CANCELLED};
 use crate::queue::{
     action_is_advertised, PendingQueueItemView, PendingQueueView, QueueAction, QueueMutationView,
 };
@@ -35,10 +36,12 @@ use crate::types::{
     AttachmentDownloadRequestView, AttachmentDownloadView, AttachmentProgressView,
     AttachmentTransferView, CloudAccountSessionView, CloudAccountStatusView, CloudAccountView,
     CloudAuthAttemptView, CloudConnectResultView, CloudDirectoryHostView, CommandView,
-    ConversationEvent, DeliveryChoice, DiagnosticsReportView, HistoryPageView, HostConnectionView,
-    HostSummary, MessageReferenceView, MessageView, PairingPromptView, QuestionAnswerView,
-    QuestionBatchView, QuestionCancelReceiptView, QuestionPageView, RetainedOperationView,
-    SendOperationView, SessionCapabilitiesView, SessionSummaryView,
+    ConversationEvent, ConversationEventEnvelope, DeliveryChoice, DiagnosticsReportView,
+    HistoryContinuityView, HistoryPageView, HostConnectionView, HostSummary, MessageReferenceView,
+    MessageView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
+    QuestionCancelReceiptView, QuestionPageView, RetainedOperationView, SendOperationView,
+    SessionCapabilitiesView, SessionKeyView, SessionSummaryView, WatchEventScope,
+    WatchHistoryBaseline,
 };
 use crate::wait::{WaitAttempts, WaitResultView, MAX_WAIT_TIMEOUT_MS};
 
@@ -144,25 +147,7 @@ pub fn android_redirect_uri(environment: String) -> String {
     whalerein_core::api::android_redirect_uri(&environment).to_owned()
 }
 
-/// The Host-qualified observation that produced one queued event.
-///
-/// The generation fences in-flight callbacks at replacement time; the explicit
-/// Host and session identity make it impossible for a queued event to be
-/// relabelled as another watch's output even when IDs or queue ordering match.
-/// `observation_id` is Core's producer identity, learned when the observation
-/// starts; it is carried through the queue so a queued event still names the
-/// exact Core observation that produced it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct WatchScope {
-    generation: u64,
-    host_id: String,
-    session_id: String,
-    observation_id: Option<String>,
-}
-
-impl WatchScope {
-    /// Scope before Core has assigned an observation identity (the binding's
-    /// own connection notice).
+impl WatchEventScope {
     fn pending(generation: u64, host_id: String, session_id: String) -> Self {
         Self {
             generation,
@@ -174,39 +159,24 @@ impl WatchScope {
 
     fn with_observation(&self, observation_id: String) -> Self {
         Self {
-            generation: self.generation,
-            host_id: self.host_id.clone(),
-            session_id: self.session_id.clone(),
             observation_id: Some(observation_id),
+            ..self.clone()
         }
     }
 
-    /// Binding generation plus producer SessionKey decide whether two scopes
-    /// belong to the same watch. Core's observation id is metadata on the
-    /// queued entry, not a second fencing mechanism.
-    fn same_producer(&self, other: &Self) -> bool {
+    fn same_watch(&self, other: &Self) -> bool {
         self.generation == other.generation
             && self.host_id == other.host_id
             && self.session_id == other.session_id
     }
 }
 
-/// One queued event plus the watch scope that produced it.
-///
-/// `None` marks events that are independent of a watch (pairing, command
-/// status, diagnostics) and therefore survive a watch replacement.
-#[derive(Clone)]
-struct QueuedEvent {
-    scope: Option<WatchScope>,
-    event: ConversationEvent,
-}
-
-impl QueuedEvent {
+impl ConversationEventEnvelope {
     fn unscoped(event: ConversationEvent) -> Self {
         Self { scope: None, event }
     }
 
-    fn scoped(scope: WatchScope, event: ConversationEvent) -> Self {
+    fn scoped(scope: WatchEventScope, event: ConversationEvent) -> Self {
         Self {
             scope: Some(scope),
             event,
@@ -231,9 +201,10 @@ struct EventQueue {
 
 #[derive(Default)]
 struct EventQueueState {
-    events: std::collections::VecDeque<QueuedEvent>,
+    events: std::collections::VecDeque<ConversationEventEnvelope>,
     dropped: u64,
-    active_watch: Option<WatchScope>,
+    watch_dropped: Option<(WatchEventScope, u64)>,
+    active_watch: Option<WatchEventScope>,
 }
 
 impl EventQueue {
@@ -249,77 +220,109 @@ impl EventQueue {
     /// command receipt, a bounded-queue loss notice).
     fn push(&self, event: ConversationEvent) {
         let mut state = self.lock();
-        Self::enqueue(&mut state, QueuedEvent::unscoped(event));
+        Self::enqueue(&mut state, ConversationEventEnvelope::unscoped(event));
         drop(state);
         self.ready.notify_one();
     }
 
     /// Start a new watch scope, discarding queued output from every replaced
     /// watch. Unscoped events remain in order.
-    fn begin_watch(&self, scope: &WatchScope) {
+    fn begin_watch(&self, scope: &WatchEventScope) {
         let mut state = self.lock();
-        state.events.retain(|entry| match &entry.scope {
-            None => true,
-            Some(existing) => existing.same_producer(scope),
-        });
+        state.events.retain(|entry| entry.scope.is_none());
+        state.watch_dropped = None;
         state.active_watch = Some(scope.clone());
+    }
+
+    /// Register the Core producer so later output and termination keep its identity.
+    fn attach_watch(&self, scope: &WatchEventScope) -> bool {
+        let mut state = self.lock();
+        let Some(active) = state.active_watch.as_mut() else {
+            return false;
+        };
+        if !active.same_watch(scope) || active.observation_id.is_some() {
+            return false;
+        }
+        *active = scope.clone();
+        true
     }
 
     /// Queue output produced by the active watch.
     ///
     /// A late callback from a replaced watch is dropped here even if it passed
     /// its generation check just before replacement.
-    fn push_watch(&self, scope: &WatchScope, event: ConversationEvent) {
+    fn push_watch(&self, scope: &WatchEventScope, event: ConversationEvent) {
         let mut state = self.lock();
         if !state
             .active_watch
             .as_ref()
-            .is_some_and(|active| active.same_producer(scope))
+            .is_some_and(|active| active == scope)
         {
             return;
         }
-        Self::enqueue(&mut state, QueuedEvent::scoped(scope.clone(), event));
+        Self::enqueue(
+            &mut state,
+            ConversationEventEnvelope::scoped(scope.clone(), event),
+        );
         drop(state);
         self.ready.notify_one();
     }
 
     /// End a watch and queue its terminal event.
     ///
-    /// `explicit` marks an app-initiated stop, which is still delivered when
-    /// the watch had already ended on its own. A stale terminal from a
-    /// replaced watch is dropped and never clears the replacement's scope.
-    fn end_watch(&self, scope: &WatchScope, event: ConversationEvent, explicit: bool) {
+    /// A stale terminal from a replaced watch cannot clear its successor.
+    fn end_watch(&self, scope: &WatchEventScope) {
         let mut state = self.lock();
-        let stored = match state.active_watch.as_ref() {
-            Some(active) if !active.same_producer(scope) => return,
-            Some(active) => active.clone(),
-            None if !explicit => return,
-            None => scope.clone(),
+        let Some(stored) = state.active_watch.as_ref().filter(|active| {
+            active.same_watch(scope)
+                && (scope.observation_id.is_none() || active.observation_id == scope.observation_id)
+        }) else {
+            return;
         };
+        let stored = stored.clone();
         state.active_watch = None;
-        Self::enqueue(&mut state, QueuedEvent::scoped(stored, event));
+        Self::enqueue(
+            &mut state,
+            ConversationEventEnvelope::scoped(stored, ConversationEvent::WatchEnded),
+        );
         drop(state);
         self.ready.notify_one();
     }
 
-    fn enqueue(state: &mut EventQueueState, entry: QueuedEvent) {
+    fn enqueue(state: &mut EventQueueState, entry: ConversationEventEnvelope) {
         if state.events.len() >= EVENT_QUEUE_CAPACITY {
-            state.events.pop_front();
-            state.dropped = state.dropped.saturating_add(1);
+            if let Some(scope) = state.events.pop_front().and_then(|entry| entry.scope) {
+                let (_, count) = state.watch_dropped.get_or_insert((scope, 0));
+                *count = count.saturating_add(1);
+            } else {
+                state.dropped = state.dropped.saturating_add(1);
+            }
         }
         state.events.push_back(entry);
     }
 
-    fn poll(&self, timeout: Duration) -> Vec<ConversationEvent> {
+    fn poll(&self, timeout: Duration) -> Vec<ConversationEventEnvelope> {
+        self.poll_waiting(timeout, || {})
+    }
+
+    fn poll_waiting(
+        &self,
+        timeout: Duration,
+        before_wait: impl FnOnce(),
+    ) -> Vec<ConversationEventEnvelope> {
+        let mut before_wait = Some(before_wait);
         let deadline = Instant::now() + timeout;
         let mut state = self.lock();
         loop {
-            if !state.events.is_empty() || state.dropped > 0 {
+            if !state.events.is_empty() || state.dropped > 0 || state.watch_dropped.is_some() {
                 break;
             }
             let now = Instant::now();
             if now >= deadline {
                 break;
+            }
+            if let Some(before_wait) = before_wait.take() {
+                before_wait();
             }
             let (next, _) = self
                 .ready
@@ -327,14 +330,22 @@ impl EventQueue {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state = next;
         }
-        let mut events = Vec::with_capacity(state.events.len() + 1);
+        let mut events = Vec::with_capacity(state.events.len() + 2);
         if state.dropped > 0 {
-            events.push(ConversationEvent::DroppedEvents {
-                count: state.dropped,
-            });
+            events.push(ConversationEventEnvelope::unscoped(
+                ConversationEvent::DroppedEvents {
+                    count: state.dropped,
+                },
+            ));
             state.dropped = 0;
         }
-        events.extend(state.events.drain(..).map(|entry| entry.event));
+        if let Some((scope, count)) = state.watch_dropped.take() {
+            events.push(ConversationEventEnvelope::scoped(
+                scope,
+                ConversationEvent::DroppedEvents { count },
+            ));
+        }
+        events.extend(state.events.drain(..));
         events
     }
 
@@ -1173,25 +1184,39 @@ impl MobileCore {
     ///
     /// Replaces an existing watch; updates from a replaced watch are dropped.
     /// Pairing and command events are not scoped to the watch and survive.
-    /// Events are delivered through `pollEvents`.
-    pub fn start_watch(&self, host_id: String, session_id: String) -> Result<(), MobileError> {
+    /// Returns the generation carried by this watch's events through `pollEvents`.
+    pub fn start_watch(
+        &self,
+        host_id: String,
+        session_id: String,
+        baseline: WatchHistoryBaseline,
+    ) -> Result<u64, MobileError> {
         validate_id(&host_id)?;
         validate_id(&session_id)?;
         let key = SessionKey {
             host_id: host_id.clone(),
             session_id: session_id.clone(),
         };
-        let previous = {
+        let interests = match baseline {
+            WatchHistoryBaseline::Complete => ObservationInterests::both(),
+            WatchHistoryBaseline::Recent {
+                max_messages,
+                max_bytes,
+            } => ObservationInterests::paged_conversation(max_messages, max_bytes),
+        };
+        let (scope, previous) = {
             let mut state = self.lock_watch();
             let generation = self.next_watch_generation();
             state.generation = generation;
             state.host_id = host_id.clone();
             state.session_id = session_id.clone();
             state.active = true;
+            let scope = WatchEventScope::pending(generation, host_id.clone(), session_id.clone());
+            self.events.begin_watch(&scope);
             let previous = (state.watch.take(), state.watch_stopped.take());
-            (generation, previous)
+            (scope, previous)
         };
-        let (generation, previous) = previous;
+        let generation = scope.generation;
         if let Some(abort) = previous.0 {
             abort.abort();
         }
@@ -1201,22 +1226,24 @@ impl MobileCore {
             let _ = stopped.recv_timeout(Duration::from_secs(2));
         }
 
-        let scope = WatchScope::pending(generation, host_id.clone(), session_id.clone());
-        // Drop every event still queued for a replaced watch before this new
-        // watch can publish anything. Pairing and command events stay queued.
-        self.events.begin_watch(&scope);
+        let mut state = self.lock_watch();
+        if state.generation != generation
+            || self.watch_generation.load(Ordering::SeqCst) != generation
+        {
+            return Ok(generation);
+        }
 
         let (stopped_tx, stopped_rx) = std::sync::mpsc::channel();
         let core = self.core.clone();
         let events = self.events.clone();
         let generations = self.watch_generation.clone();
         let watch_state = self.watch.clone();
-        let callback_scope = scope.clone();
+        let mut producer_scope = scope;
         let task_cancellation = Cancellation::new();
         let task = self.runtime.handle.spawn(async move {
             let _stopped = WatchStopSignal(Some(stopped_tx));
             let mut observation = core
-                .observe_session(&key, ObservationInterests::both(), task_cancellation)
+                .observe_session(&key, interests, task_cancellation)
                 .await;
             // A replacement aborts the old task asynchronously. Retry the
             // attach for a bounded window instead of surfacing a spurious
@@ -1229,18 +1256,28 @@ impl MobileCore {
                 attempts += 1;
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 observation = core
-                    .observe_session(&key, ObservationInterests::both(), Cancellation::new())
+                    .observe_session(&key, interests, Cancellation::new())
                     .await;
             }
             let result = match observation {
                 Ok(mut observation) => {
-                    let producer_scope =
-                        callback_scope.with_observation(observation.observation_id().to_owned());
+                    producer_scope =
+                        producer_scope.with_observation(observation.observation_id().to_owned());
+                    if !events.attach_watch(&producer_scope) {
+                        observation.close().await;
+                        return;
+                    }
                     let mut seen_approvals = None;
                     while generations.load(Ordering::SeqCst) == generation {
                         let Some(event) = observation.next_event().await else {
                             break;
                         };
+                        if event.session != key
+                            || event.observation_id != observation.observation_id()
+                            || event.generation != observation.generation()
+                        {
+                            continue;
+                        }
                         match event.payload {
                             SessionEventPayload::Conversation(update) => {
                                 for event in convert_update(&update, &mut seen_approvals) {
@@ -1255,10 +1292,36 @@ impl MobileCore {
                                     },
                                 );
                             }
+                            SessionEventPayload::HistorySnapshot(snapshot) => {
+                                let continuity = match snapshot.continuity {
+                                    HistoryContinuity::Continuous => {
+                                        HistoryContinuityView::Continuous
+                                    }
+                                    HistoryContinuity::Replacement => {
+                                        HistoryContinuityView::Replacement
+                                    }
+                                };
+                                events.push_watch(
+                                    &producer_scope,
+                                    ConversationEvent::HistorySnapshot {
+                                        page: HistoryPageView::from(&snapshot.page),
+                                        continuity,
+                                    },
+                                );
+                            }
+                            SessionEventPayload::HistoryUnavailable { code } => {
+                                events.push_watch(
+                                    &producer_scope,
+                                    ConversationEvent::HistoryUnavailable {
+                                        code: from_core_code(&code).code().into(),
+                                    },
+                                );
+                            }
                         }
                     }
+                    let error = observation.take_terminal_error();
                     observation.close().await;
-                    Ok(())
+                    error.map_or(Ok(()), Err)
                 }
                 Err(error) => Err(error),
             };
@@ -1268,22 +1331,14 @@ impl MobileCore {
             if let Err(error) = result {
                 let error = MobileError::from(error);
                 events.push_watch(
-                    &callback_scope,
-                    ConversationEvent::Error {
-                        code: error.code().to_owned(),
-                        message: error.message().to_owned(),
-                    },
-                );
-            } else if let Some(error) = terminal_connection_error(&core, &host_id) {
-                events.push_watch(
-                    &callback_scope,
+                    &producer_scope,
                     ConversationEvent::Error {
                         code: error.code().to_owned(),
                         message: error.message().to_owned(),
                     },
                 );
             }
-            events.end_watch(&callback_scope, ConversationEvent::WatchEnded, false);
+            events.end_watch(&producer_scope);
             let mut state = watch_state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1292,12 +1347,9 @@ impl MobileCore {
             }
         });
 
-        let mut state = self.lock_watch();
-        if state.generation == generation {
-            state.watch = Some(task.abort_handle());
-            state.watch_stopped = Some(stopped_rx);
-        }
-        Ok(())
+        state.watch = Some(task.abort_handle());
+        state.watch_stopped = Some(stopped_rx);
+        Ok(generation)
     }
 
     /// Stop observing and emit `watchEnded`.
@@ -1309,7 +1361,7 @@ impl MobileCore {
             }
             self.next_watch_generation();
             state.active = false;
-            let scope = WatchScope::pending(
+            let scope = WatchEventScope::pending(
                 state.generation,
                 state.host_id.clone(),
                 state.session_id.clone(),
@@ -1319,14 +1371,13 @@ impl MobileCore {
         if let Some(abort) = abort {
             abort.abort();
         }
-        self.events
-            .end_watch(&scope, ConversationEvent::WatchEnded, true);
+        self.events.end_watch(&scope);
     }
 
     /// Drain queued events, waiting up to `timeoutMs` when the queue is empty.
     ///
     /// Returns an empty array on timeout. The timeout is capped at 30 seconds.
-    pub fn poll_events(&self, timeout_ms: u64) -> Vec<ConversationEvent> {
+    pub fn poll_events(&self, timeout_ms: u64) -> Vec<ConversationEventEnvelope> {
         let timeout = Duration::from_millis(timeout_ms).min(MAX_POLL_TIMEOUT);
         self.events.poll(timeout)
     }
@@ -1359,7 +1410,7 @@ impl MobileCore {
         let handle = operation
             .receipt
             .ok_or_else(|| MobileError::from(CoreError::UnknownResult))?;
-        Ok(self.publish_command(handle))
+        Ok(self.publish_command(&key, handle))
     }
 
     /// Send with a stable operation identity chosen before submission.
@@ -1817,7 +1868,7 @@ impl MobileCore {
             session_id,
         };
         let handle = self.run(COMMAND_TIMEOUT, self.core.interrupt(&key))?;
-        Ok(self.publish_command(handle))
+        Ok(self.publish_command(&key, handle))
     }
 
     // -----------------------------------------------------------------
@@ -1885,7 +1936,7 @@ impl MobileCore {
             self.core
                 .update_pending_queue(&key, &item_id, action.to_core(), &text),
         )?;
-        let receipt = self.publish_command(handle);
+        let receipt = self.publish_command(&key, handle);
         Ok(QueueMutationView {
             operation_id: receipt.command_id.clone(),
             host_id,
@@ -2088,7 +2139,7 @@ impl MobileCore {
             COMMAND_TIMEOUT,
             self.core.answer_question(&key, &guard, answers),
         )?;
-        Ok(self.publish_command(handle))
+        Ok(self.publish_command(&key, handle))
     }
 
     /// Ask Core to cancel an in-flight open answer by its original command.
@@ -2414,10 +2465,15 @@ impl MobileCore {
         self.watch_generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    /// Queue a `commandStatus` event for observers of the same watch.
-    fn publish_command(&self, handle: whalerein_core::api::CommandHandle) -> CommandView {
+    /// Queue a command event under its own session identity.
+    fn publish_command(
+        &self,
+        session: &SessionKey,
+        handle: whalerein_core::api::CommandHandle,
+    ) -> CommandView {
         let view = CommandView::from(handle);
         self.events.push(ConversationEvent::CommandStatus {
+            session: SessionKeyView::from(session),
             command: view.clone(),
         });
         view
@@ -2495,17 +2551,6 @@ fn connection_view(snapshot: whalerein_core::api::ConnectionSnapshot) -> HostCon
         state: snapshot.state.as_str().to_owned(),
         code: snapshot.code,
         since_unix_ms: snapshot.since_unix_ms,
-    }
-}
-
-/// Best-effort terminal cause after an observation stream ends. Core's public
-/// observation surface reports the end but not its error value, so the binding
-/// retains the previous watch behavior by sampling the Host connection state.
-fn terminal_connection_error(core: &Core, host_id: &str) -> Option<MobileError> {
-    match core.connection_snapshot(host_id)?.code.as_deref() {
-        Some("revoked") => Some(MobileError::revoked()),
-        Some(_) => Some(MobileError::unavailable()),
-        None => None,
     }
 }
 
@@ -2589,20 +2634,24 @@ mod tests {
 
     use crate::BlockView;
 
+    fn payloads(events: Vec<ConversationEventEnvelope>) -> Vec<ConversationEvent> {
+        events.into_iter().map(|entry| entry.event).collect()
+    }
+
     fn queue_with(capacity: usize) -> EventQueue {
         // The production capacity is fixed; tests fill it directly.
         let queue = EventQueue::new();
         {
             let mut state = queue.lock();
             for index in 0..capacity {
-                state
-                    .events
-                    .push_back(QueuedEvent::unscoped(ConversationEvent::HostConnection {
+                state.events.push_back(ConversationEventEnvelope::unscoped(
+                    ConversationEvent::HostConnection {
                         host_id: format!("h{index}"),
                         state: "connected".into(),
                         code: None,
                         since_unix_ms: 0,
-                    }));
+                    },
+                ));
             }
         }
         queue
@@ -2624,7 +2673,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
             producer.push(ConversationEvent::WatchEnded);
         });
-        let events = queue.poll(Duration::from_secs(5));
+        let events = payloads(queue.poll(Duration::from_secs(5)));
         thread.join().unwrap();
         assert_eq!(events, vec![ConversationEvent::WatchEnded]);
     }
@@ -2640,7 +2689,7 @@ mod tests {
                 since_unix_ms: 0,
             });
         }
-        let events = queue.poll(Duration::ZERO);
+        let events = payloads(queue.poll(Duration::ZERO));
         assert_eq!(
             events.first(),
             Some(&ConversationEvent::DroppedEvents { count: 3 })
@@ -2659,14 +2708,39 @@ mod tests {
     }
 
     #[test]
+    fn overflow_notice_keeps_the_watch_scope_and_is_discarded_on_replacement() {
+        let queue = EventQueue::new();
+        let first = scope(1, "host-1", "session-1").with_observation("first".into());
+        let second = scope(2, "host-1", "session-1").with_observation("second".into());
+        queue.begin_watch(&first);
+        for _ in 0..=EVENT_QUEUE_CAPACITY {
+            queue.push_watch(&first, preview("synthetic"));
+        }
+        let events = queue.poll(Duration::ZERO);
+        assert_eq!(
+            events.first(),
+            Some(&ConversationEventEnvelope::scoped(
+                first.clone(),
+                ConversationEvent::DroppedEvents { count: 1 },
+            )),
+        );
+
+        for _ in 0..=EVENT_QUEUE_CAPACITY {
+            queue.push_watch(&first, preview("synthetic"));
+        }
+        queue.begin_watch(&second);
+        assert!(queue.poll(Duration::ZERO).is_empty());
+    }
+
+    #[test]
     fn queue_never_exceeds_capacity() {
         let queue = queue_with(EVENT_QUEUE_CAPACITY);
         queue.push(ConversationEvent::WatchEnded);
         assert_eq!(queue.lock().events.len(), EVENT_QUEUE_CAPACITY);
     }
 
-    fn scope(generation: u64, host_id: &str, session_id: &str) -> WatchScope {
-        WatchScope::pending(generation, host_id.into(), session_id.into())
+    fn scope(generation: u64, host_id: &str, session_id: &str) -> WatchEventScope {
+        WatchEventScope::pending(generation, host_id.into(), session_id.into())
     }
 
     fn message(id: &str, text: &str) -> ConversationEvent {
@@ -2716,6 +2790,10 @@ mod tests {
             code: None,
         });
         queue.push(ConversationEvent::CommandStatus {
+            session: SessionKeyView::from(&SessionKey {
+                host_id: "host-1".into(),
+                session_id: "session-1".into(),
+            }),
             command: CommandView {
                 request_id: "request-1".into(),
                 command_id: "command-1".into(),
@@ -2724,26 +2802,41 @@ mod tests {
                 delivery_id: None,
             },
         });
-        queue.end_watch(&old, ConversationEvent::WatchEnded, true);
+        queue.push(ConversationEvent::HostConnection {
+            host_id: "host-1".into(),
+            state: "connected".into(),
+            code: None,
+            since_unix_ms: 1,
+        });
+        queue.end_watch(&old);
 
         let new = scope(2, "host-1", "session-2");
         queue.begin_watch(&new);
         // A late callback or terminal from the replaced watch must not be
         // accepted and must not clear the replacement's scope.
-        queue.end_watch(&old, ConversationEvent::WatchEnded, false);
-        queue.end_watch(&old, ConversationEvent::WatchEnded, true);
+        queue.end_watch(&old);
         queue.push_watch(&old, message("late-old", "late old text"));
         queue.push_watch(&new, message("new-message", "new committed text"));
         queue.push_watch(&new, preview("new preview text"));
 
-        let events = queue.poll(Duration::ZERO);
+        let batch = queue.poll(Duration::ZERO);
+        assert_eq!(batch.len(), 5);
+        assert!(batch[..3].iter().all(|entry| entry.scope.is_none()));
+        assert!(batch[3..]
+            .iter()
+            .all(|entry| entry.scope.as_ref() == Some(&new)));
+        let events = payloads(batch);
         assert!(matches!(
             events.first(),
             Some(ConversationEvent::PairingFinished { .. })
         ));
         assert!(events.iter().any(|event| matches!(
             event,
-            ConversationEvent::CommandStatus { command } if command.command_id == "command-1"
+            ConversationEvent::CommandStatus { command, .. } if command.command_id == "command-1"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ConversationEvent::HostConnection { host_id, .. } if host_id == "host-1"
         )));
         assert!(events.iter().any(
             |event| matches!(event, ConversationEvent::Message { message, .. } if message.message_id == "new-message")
@@ -2774,10 +2867,13 @@ mod tests {
         );
 
         // The new watch keeps working and ends normally.
-        queue.end_watch(&new, ConversationEvent::WatchEnded, false);
+        queue.end_watch(&new);
         assert_eq!(
             queue.poll(Duration::ZERO),
-            vec![ConversationEvent::WatchEnded]
+            vec![ConversationEventEnvelope::scoped(
+                new.clone(),
+                ConversationEvent::WatchEnded
+            )]
         );
         // Nothing from the ended watch is accepted afterwards.
         queue.push_watch(&new, message("after-end", "after end"));
@@ -2799,32 +2895,73 @@ mod tests {
             },
         );
         let observed = pending.with_observation("obs-42".into());
+        assert!(queue.attach_watch(&observed));
         queue.push_watch(&observed, message("m-1", "producer scoped text"));
-        {
-            let state = queue.lock();
-            let scopes: Vec<_> = state
-                .events
-                .iter()
-                .map(|entry| entry.scope.clone().expect("scoped entries"))
-                .collect();
-            assert_eq!(scopes[0].observation_id, None);
-            assert_eq!(scopes[1].observation_id.as_deref(), Some("obs-42"));
-            assert_eq!(scopes[1].host_id, "host-1");
-            assert_eq!(scopes[1].session_id, "session-1");
-            assert_eq!(scopes[1].generation, 7);
-            assert!(scopes[1].same_producer(&pending));
-        }
+        let foreign = pending.with_observation("foreign-obs".into());
+        queue.push_watch(&foreign, preview("foreign observation"));
         // A different Core observation identity cannot be relabelled as the
         // active watch; the binding generation is the replacement fence.
         let stale = scope(8, "host-1", "session-1").with_observation("obs-old".into());
         queue.push_watch(&stale, preview("relabelled stale output"));
         let events = queue.poll(Duration::ZERO);
-        assert_eq!(events.len(), 2, "unexpected events: {events:?}");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].scope.as_ref(), Some(&pending));
+        assert_eq!(events[1].scope.as_ref(), Some(&observed));
         assert!(
             !events
                 .iter()
-                .any(|event| matches!(event, ConversationEvent::Preview { .. })),
+                .any(|event| matches!(event.event, ConversationEvent::Preview { .. })),
             "an old observation generation leaked: {events:?}"
+        );
+    }
+
+    #[test]
+    fn poll_spanning_replacement_keeps_the_same_session_reopen_producer() {
+        let queue = Arc::new(EventQueue::new());
+        let first = scope(1, "host-1", "session-1").with_observation("first-observation".into());
+        let reopened =
+            scope(2, "host-1", "session-1").with_observation("reopened-observation".into());
+        queue.begin_watch(&first);
+        let waiting = Arc::new(std::sync::Barrier::new(2));
+        let poller = {
+            let queue = Arc::clone(&queue);
+            let waiting = Arc::clone(&waiting);
+            std::thread::spawn(move || {
+                queue.poll_waiting(Duration::from_secs(5), || {
+                    waiting.wait();
+                })
+            })
+        };
+        waiting.wait();
+
+        queue.begin_watch(&reopened);
+        queue.end_watch(&first);
+        queue.push_watch(&first, message("late", "synthetic old message"));
+        let baseline = ConversationEvent::HistorySnapshot {
+            page: HistoryPageView {
+                source: "online".into(),
+                projection: "projection".into(),
+                complete: true,
+                messages: Vec::new(),
+                activities: Vec::new(),
+                continuation: None,
+            },
+            continuity: HistoryContinuityView::Continuous,
+        };
+        queue.push_watch(&reopened, baseline.clone());
+
+        let batch = poller.join().expect("read from blocked poll");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].scope.as_ref(), Some(&reopened));
+        assert_eq!(batch[0].event, baseline);
+
+        queue.end_watch(&reopened);
+        assert_eq!(
+            queue.poll(Duration::ZERO),
+            vec![ConversationEventEnvelope::scoped(
+                reopened,
+                ConversationEvent::WatchEnded
+            )],
         );
     }
 
@@ -2845,7 +2982,7 @@ mod tests {
         queue.push_watch(&forged, message("forged", "forged content"));
         queue.push_watch(&host_b, message("message-b", "content from host b"));
 
-        let events = queue.poll(Duration::ZERO);
+        let events = payloads(queue.poll(Duration::ZERO));
         assert_eq!(
             events
                 .iter()

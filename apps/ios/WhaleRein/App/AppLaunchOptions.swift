@@ -30,6 +30,7 @@ struct LaunchOptions: Sendable {
     var serviceMode: ServiceMode = .live
     var resetState = false
     var seedPairedFixture = false
+    var delaysViewportTransitions = false
     var largeText = false
     var streamOnOpen = false
     var lateEventLeak = false
@@ -105,6 +106,7 @@ struct LaunchOptions: Sendable {
         }
         self.resetState = launch.resetState
         self.seedPairedFixture = fixture.initiallyPaired
+        self.delaysViewportTransitions = fixture.delaysViewportTransitions
         self.largeText = scenario.presentation.accessibilityTextSize
         self.streamOnOpen = fixture.streamOnOpen
         self.lateEventLeak = fixture.lateEventLeak

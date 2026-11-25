@@ -5,8 +5,7 @@ Every state change goes through `ConversationReduce.reduce(state, action)`.
 actions. This table is the review reference: an action that is not listed here
 must not exist.
 
-Dimensions: `lifecycle` (command), `queue`, `wait`, `approval`, `history`,
-`provenance`.
+Dimensions: `lifecycle` (command), `queue`, `wait`, `approval` and `history`.
 
 ## Load and connection
 
@@ -14,10 +13,10 @@ Dimensions: `lifecycle` (command), `queue`, `wait`, `approval`, `history`,
 | --- | --- | --- | --- |
 | `loadStarted` | any | `isLoaded = false`, `loadError = nil` | A retry clears the previous error. |
 | `loadFailed(code)` | any | `isLoaded = false`, `loadError = code` | One error dimension for the screen. |
-| `snapshot(messages, approvals)` | any | `isLoaded = true`, `loadError = nil`, `connection = .online`, `watchEnded = false` | A pending approval absent from the snapshot becomes `.none`. |
+| `contentLoaded` | any | `isLoaded = true`, `isLoading = false`, `loadError = nil` | The model has applied the accepted history snapshot. |
 | `watchEnded` | any | `watchEnded = true`, `connection = .offline` | The screen offers reconnect; it never shows stale content as live. |
 | `connectionChanged(status)` | any | `connection = status`; `.online` clears `watchEnded` | Connection is a projection of the watch, not a user toggle. |
-| `capabilitiesLoaded(caps)` | any | `capabilities = caps`; unsupported queue/history become `unavailable` | A capability is declared once, never probed per view. |
+| `capabilitiesLoaded(caps)` | any | `capabilities = caps`; unsupported queue becomes `unavailable` | A capability is declared once, never probed per view. |
 
 ## Command lifecycle
 
@@ -57,19 +56,24 @@ Dimensions: `lifecycle` (command), `queue`, `wait`, `approval`, `history`,
 | `approvalResolved` | `resolving` | `none` | Success removes the card. |
 | `approvalRejected(code)` | `resolving` | `pending(a)` | A rejected decision returns to actionable, not stale. |
 
-## History
+## History and viewport
 
 | Action | From | To | Invariant |
 | --- | --- | --- | --- |
-| `historyUnavailable` | any | `unavailable` | No page capability means no history affordance. |
-| `historyCachedOnly` | any | `cachedOnly` | Cached content is labelled, never presented as live. |
-| `historyLoaded(complete)` | any | `idle(complete:)` | A page establishes whether older content exists. |
-| `historyLoadingMore` | `idle` | `loadingMore` | Cannot page from a non-idle history. |
-| `historyFailed(code)` | any | `failed(code)` | A failed page keeps the traversal retryable. |
+| `olderHistoryStarted` | Ready continuation | Older page in flight | Only one request may hold the same traversal. |
+| `olderHistoryFinished` | In-flight traversal | Ready, exhausted or local error | An older read failure keeps visible rows and exposes a local retry. |
+| `historyTraversalInvalidated` | Any traversal | Waiting for new source and cut | A generation check discards both a stale success and a stale failure. |
+
+The observation supplies the first bounded snapshot. Its disposition decides
+whether to retain previous pages or install a replacement. History readiness is
+independent of questions and command feedback. The viewport follows the bottom
+only at the latest edge and keeps a measured row offset while reading earlier.
+The older edge requests a page on reader movement. When the initial content
+cannot scroll, one additional automatic page may fill it before the user gets a
+Continue Loading action.
 
 ## Content
 
-| Action | From | To | Invariant |
-| --- | --- | --- | --- |
-| `messageReceived(message, provenance)` | any | message replaced or appended by `messageId`; `provenance` set | A replay is idempotent by committed message id. |
-| `messageReplaced(message)` | any | replaced by `messageId` | Updating content never duplicates a row. |
+The conversation model applies committed updates by message ID. Replay and
+replacement update the corresponding row. Pending sends retain a separate
+identity until Core supplies an authoritative message ID.

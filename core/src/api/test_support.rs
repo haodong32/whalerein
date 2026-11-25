@@ -268,6 +268,11 @@ struct FakeAttachmentTransfer {
     last_part: Option<whalerein_proto::AttachmentPart>,
 }
 
+pub struct HistoryReadGate {
+    pub entered: tokio::sync::oneshot::Sender<()>,
+    pub release: tokio::sync::oneshot::Receiver<()>,
+}
+
 pub struct FakeHost {
     pub identity: StaticIdentity,
     pub host_id: String,
@@ -413,6 +418,14 @@ pub struct FakeHost {
     pub history_projection: String,
     /// Latest-first page size override; zero uses the request's max_messages.
     pub history_page_size: usize,
+    /// Optional fixed Source positions for controlled observation tests.
+    pub history_positions: HashMap<String, usize>,
+    pub history_reverse_gate: Option<HistoryReadGate>,
+    pending_history_gate: Option<tokio::sync::oneshot::Receiver<()>>,
+    pub history_reverse_error: Option<ErrorCode>,
+    pub history_empty_first_page: bool,
+    pub history_watch_projection: Option<String>,
+    pub history_forward_error: Option<ErrorCode>,
     pub history_advance: Option<(Vec<whalerein_proto::ConversationMessage>, String)>,
     /// Authoritative question descriptor served in `WatchReady`/refresh/state.
     pub question_descriptor: whalerein_proto::QuestionDescriptor,
@@ -810,6 +823,13 @@ impl FakeHost {
             history_cut: "bookmark:committed".into(),
             history_projection: "projection-1".into(),
             history_page_size: 0,
+            history_positions: HashMap::new(),
+            history_reverse_gate: None,
+            pending_history_gate: None,
+            history_reverse_error: None,
+            history_empty_first_page: false,
+            history_watch_projection: None,
+            history_forward_error: None,
             history_advance: None,
             question_descriptor: fake_question_descriptor(),
             question_pages: std::collections::VecDeque::new(),
@@ -1612,6 +1632,28 @@ impl FakeHost {
                 }
                 if let Some(page) = read.page.as_ref() {
                     let total = self.history_messages.len();
+                    if page.before_cursor.is_empty() && !read.cut_cursor.is_empty() {
+                        if let Some(gate) = self.history_reverse_gate.take() {
+                            let _ = gate.entered.send(());
+                            self.pending_history_gate = Some(gate.release);
+                        }
+                    }
+                    if let Some(error) = self.history_reverse_error {
+                        return Err(error);
+                    }
+                    let cut = if read.cut_cursor.is_empty() {
+                        &self.history_cut
+                    } else {
+                        &read.cut_cursor
+                    };
+                    let fixed_end = if self.history_positions.is_empty() {
+                        total
+                    } else {
+                        self.history_positions
+                            .get(cut)
+                            .copied()
+                            .ok_or(ErrorCode::SnapshotRequired)?
+                    };
                     let requested = if self.history_page_size > 0 {
                         self.history_page_size
                     } else {
@@ -1619,16 +1661,21 @@ impl FakeHost {
                     };
                     let before = page.before_cursor.as_str();
                     let end = if before.is_empty() {
-                        total
+                        fixed_end
                     } else {
                         let index = before
                             .strip_prefix("page:")
                             .and_then(|value| value.parse::<usize>().ok())
                             .ok_or(ErrorCode::InvalidArgument)?;
-                        index.min(total)
+                        index.min(fixed_end)
                     };
                     let start = end.saturating_sub(requested);
-                    let changes = history_upserts(self.history_messages[start..end].to_vec());
+                    let changes = if before.is_empty() && self.history_empty_first_page {
+                        // The first source range contains no projectable entries.
+                        Vec::new()
+                    } else {
+                        history_upserts(self.history_messages[start..end].to_vec())
+                    };
                     let next = format!("page:{start}");
                     let complete = start == 0;
                     return Ok(ResponsePayload {
@@ -1636,17 +1683,74 @@ impl FakeHost {
                             session,
                             batch: Some(HistoryBatch {
                                 from_cursor: next.clone(),
-                                to_cursor: format!("page:{end}"),
+                                to_cursor: if read.cut_cursor.is_empty() {
+                                    format!("page:{end}")
+                                } else {
+                                    cut.clone()
+                                },
                                 batch_id: format!("page:{start}:{end}"),
                                 changes,
                                 projection_id: projection.clone(),
                             }),
-                            cut_cursor: self.history_cut.clone(),
+                            cut_cursor: cut.clone(),
                             complete,
                             snapshot: false,
                             continuation: if complete { String::new() } else { next },
                             projection_id: projection,
                             source: HistorySource::Online as i32,
+                        })),
+                        ..Default::default()
+                    });
+                }
+                if let Some(error) = self.history_forward_error {
+                    return Err(error);
+                }
+                if !read.snapshot && !self.history_positions.is_empty() {
+                    let cut = if read.cut_cursor.is_empty() {
+                        &self.history_cut
+                    } else {
+                        &read.cut_cursor
+                    };
+                    let end = self
+                        .history_positions
+                        .get(cut)
+                        .copied()
+                        .ok_or(ErrorCode::SnapshotRequired)?;
+                    let start = self
+                        .history_positions
+                        .get(&read.after_cursor)
+                        .copied()
+                        .ok_or(ErrorCode::SnapshotRequired)?;
+                    if end < start {
+                        return Err(ErrorCode::SnapshotRequired);
+                    }
+                    let capped = end.min(start + read.max_messages.max(1) as usize);
+                    let next = if capped == end {
+                        cut
+                    } else {
+                        self.history_positions
+                            .iter()
+                            .find(|(_, index)| **index == capped)
+                            .map(|(position, _)| position)
+                            .ok_or(ErrorCode::SnapshotRequired)?
+                    };
+                    return Ok(ResponsePayload {
+                        payload: Some(response_payload::Payload::HistoryPage(HistoryPage {
+                            session,
+                            cut_cursor: cut.clone(),
+                            complete: capped == end,
+                            projection_id: projection.clone(),
+                            source: HistorySource::Online as i32,
+                            batch: Some(HistoryBatch {
+                                from_cursor: read.after_cursor.clone(),
+                                to_cursor: next.clone(),
+                                batch_id: format!("delta:{}:{next}", read.after_cursor),
+                                projection_id: projection,
+                                changes: history_upserts(
+                                    self.history_messages[start..capped].to_vec(),
+                                ),
+                            }),
+                            ..Default::default()
                         })),
                         ..Default::default()
                     });
@@ -1701,6 +1805,9 @@ impl FakeHost {
                     fake_watch(
                         &watch.session_id,
                         &self.history_cut,
+                        self.history_watch_projection
+                            .as_deref()
+                            .unwrap_or("projection-1"),
                         self.question_descriptor.clone(),
                     ),
                 )),
@@ -1722,7 +1829,10 @@ impl FakeHost {
                                 run_phase: whalerein_proto::RunPhase::Idle as i32,
                                 live_epoch: "epoch".into(),
                                 history_head: self.history_cut.clone(),
-                                projection_id: "projection-1".into(),
+                                projection_id: self
+                                    .history_watch_projection
+                                    .clone()
+                                    .unwrap_or_else(|| "projection-1".into()),
                                 questions: Some(self.question_descriptor.clone()),
                             }],
                         },
@@ -2374,9 +2484,10 @@ async fn serve_broker_connection(shared: Arc<BrokerShared>, stream: tokio::net::
                 }) else {
                     continue;
                 };
-                let (result, delay_ms) = {
+                let (result, delay_ms, history_gate) = {
                     let mut host = shared.host.lock().unwrap();
-                    broker_answer(&mut host, &request)
+                    let (result, delay_ms) = broker_answer(&mut host, &request);
+                    (result, delay_ms, host.pending_history_gate.take())
                 };
                 if delay_ms > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -2403,19 +2514,32 @@ async fn serve_broker_connection(shared: Arc<BrokerShared>, stream: tokio::net::
                     )],
                     ..Default::default()
                 };
-                let pkid = {
-                    let mut state = shared.state.lock().unwrap();
-                    state.next_pkid = state.next_pkid.wrapping_add(1).max(1);
-                    state.next_pkid
+                let reply_state = shared.clone();
+                let reply_sender = outgoing.clone();
+                let send_reply = move || {
+                    let pkid = {
+                        let mut state = reply_state.state.lock().unwrap();
+                        state.next_pkid = state.next_pkid.wrapping_add(1).max(1);
+                        state.next_pkid
+                    };
+                    let bytes = broker_publish(
+                        &reply_topic,
+                        1,
+                        result.encode_to_vec(),
+                        pkid,
+                        Some(reply_properties),
+                    );
+                    let _ = reply_sender.send(bytes);
                 };
-                let bytes = broker_publish(
-                    &reply_topic,
-                    1,
-                    result.encode_to_vec(),
-                    pkid,
-                    Some(reply_properties),
-                );
-                let _ = outgoing.send(bytes);
+                if let Some(gate) = history_gate {
+                    tokio::spawn(async move {
+                        if gate.await.is_ok() {
+                            send_reply();
+                        }
+                    });
+                } else {
+                    send_reply();
+                }
             }
             Packet::PingReq(_) => {
                 let _ = outgoing.send(vec![0xD0, 0]);
@@ -2675,6 +2799,7 @@ fn fake_question_descriptor() -> whalerein_proto::QuestionDescriptor {
 fn fake_watch(
     session: &str,
     history_head: &str,
+    projection: &str,
     question_descriptor: whalerein_proto::QuestionDescriptor,
 ) -> whalerein_proto::WatchReady {
     whalerein_proto::WatchReady {
@@ -2691,7 +2816,7 @@ fn fake_watch(
             history_head: history_head.into(),
             run_phase: whalerein_proto::RunPhase::Idle as i32,
             questions: Some(question_descriptor),
-            projection_id: "projection-1".into(),
+            projection_id: projection.into(),
         }),
     }
 }

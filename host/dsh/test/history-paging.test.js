@@ -80,6 +80,38 @@ test('a fixed cut excludes concurrent appends while a new traversal sees them', 
   }
 })
 
+test('latest-first page attests the registered Watch cut', async () => {
+  const adapter = await source()
+  try {
+    adapter.output('s', 'a')
+    adapter.output('s', 'b')
+    const watch = await adapter.readState('s')
+    adapter.output('s', 'c')
+
+    const first = await page(adapter, {}, { cut_cursor: watch.history_head, max_messages: 1 })
+    assert.deepEqual(texts(first), ['b'])
+    assert.equal(first.cut_cursor, watch.history_head)
+    assert.equal(first.batch.to_cursor, watch.history_head)
+    const older = await page(adapter, { before_cursor: first.continuation }, { cut_cursor: first.cut_cursor })
+    assert.deepEqual(texts(older), ['a'])
+    assert.equal(older.cut_cursor, watch.history_head)
+
+    const stale = error => error.code === 'snapshot_required'
+    await assert.rejects(adapter.readHistory('other', { page: {}, cut_cursor: watch.history_head }), stale)
+    const [session, projection, position] = JSON.parse(Buffer.from(watch.history_head, 'base64url'))
+    const token = value => Buffer.from(JSON.stringify(value)).toString('base64url')
+    for (const invalid of [
+      [session, projection, 'page', position],
+      [session, projection, String(position)],
+      [session, projection, position + 10]
+    ]) await assert.rejects(page(adapter, {}, { cut_cursor: token(invalid) }), stale)
+    adapter.nativeHead = async () => 0
+    await assert.rejects(page(adapter, {}, { cut_cursor: watch.history_head }), stale)
+  } finally {
+    await adapter.close()
+  }
+})
+
 test('one canonical message larger than the soft target occupies its page alone', async () => {
   const adapter = await source()
   try {

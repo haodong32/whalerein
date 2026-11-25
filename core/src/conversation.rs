@@ -926,6 +926,13 @@ impl Conversation {
         self.reset(epoch)
     }
 
+    /// Discard an invalidated committed range while retaining the active
+    /// connection's epoch for subsequent live frames.
+    pub(crate) fn clear_history_projection(&mut self) {
+        let epoch = self.epoch.clone();
+        self.reset_projection(&epoch);
+    }
+
     /// Drain tool activity updates produced by committed folds.
     pub(crate) fn take_activity_updates(&mut self) -> Vec<ViewUpdate> {
         self.pending_activity_updates

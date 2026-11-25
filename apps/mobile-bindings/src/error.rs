@@ -153,7 +153,11 @@ impl MobileError {
 
 /// Maps a Core failure onto the flat contract without forwarding its text.
 pub(crate) fn from_core(error: &CoreError) -> MobileError {
-    match error.code() {
+    from_core_code(error.code())
+}
+
+pub(crate) fn from_core_code(code: &str) -> MobileError {
+    match code {
         "invalid_argument" | "invalid_configuration" => MobileError::invalid_input(),
         "not_paired" => MobileError::not_paired(),
         "not_found" => MobileError::not_found(),

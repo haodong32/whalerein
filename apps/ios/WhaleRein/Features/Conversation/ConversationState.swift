@@ -17,12 +17,11 @@ struct ConversationState: Equatable, Sendable {
     var queue: QueueState = .unavailable
     var wait: WaitState = .idle
     var approval: ApprovalSlot = .none
-    var history: HistoryState = .unavailable
-    var provenance: ContentProvenance = .confirmed
     var messages: [ConversationMessage] = []
     var approvals: [Approval] = []
     var question = QuestionFacet()
     var historyFacet = HistoryFacet()
+    var viewport = ScrollAnchorState()
     var previewFacet = PreviewFacet()
     var approvalFacet = ApprovalFacet()
     var operation = OperationFacet()

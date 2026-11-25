@@ -5,6 +5,11 @@
 
 import Foundation
 
+enum ConversationHistoryLimit {
+    static let messages = 50
+    static let bytes = 256 * 1024
+}
+
 @MainActor
 protocol ConversationHistoryService: AnyObject {
     /// One latest-first bounded page. `continuation` is opaque and scoped to

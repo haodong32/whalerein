@@ -409,6 +409,10 @@ impl HostConnection {
         connection
     }
 
+    pub(crate) fn subscribe_state(&self) -> watch::Receiver<ConnectionSnapshot> {
+        self.changes.subscribe()
+    }
+
     pub(crate) fn snapshot(&self) -> ConnectionSnapshot {
         self.changes.borrow().clone()
     }
@@ -546,7 +550,7 @@ impl HostConnection {
     /// Wait for the transport to become usable. A terminal state fails with
     /// the recorded reason instead of pretending a transient outage.
     pub(crate) async fn wait_ready(&self, cancellation: &Cancellation) -> CoreResult<()> {
-        let mut changes = self.changes.subscribe();
+        let mut changes = self.subscribe_state();
         loop {
             let snapshot = changes.borrow_and_update().clone();
             match snapshot.state {
@@ -565,6 +569,10 @@ impl HostConnection {
                 }
             }
         }
+    }
+
+    pub(crate) fn control_queue_bytes(&self) -> usize {
+        self.queue_bytes
     }
 
     /// Attach one observer to the shared transport. The guard detaches it when

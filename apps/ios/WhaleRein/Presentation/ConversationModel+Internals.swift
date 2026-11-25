@@ -54,10 +54,12 @@ extension ConversationModel {
     }
 
     func updateScroll(isAtLatest: Bool) {
+        guard scroll.isAtLatest != isAtLatest else { return }
         scroll.update(isAtLatest: isAtLatest)
     }
 
     func noteTopVisibleMessage(_ messageId: String?) {
+        guard !scroll.isAtLatest, scroll.anchorMessageId != messageId else { return }
         scroll.noteTopVisibleMessage(messageId)
     }
 
@@ -68,63 +70,65 @@ extension ConversationModel {
 
     // MARK: - Internals
 
-    @discardableResult
-    func appendOptimisticUserMessage(text: String, receipt: CommandReceipt) -> String? {
-        // The committed echo may have arrived before the send response (Core can
-        // deliver the message event first). In that case the authoritative row
-        // already exists and a local placeholder would be a duplicate.
-        if let committedId = receipt.messageId,
-           messages.contains(where: { $0.messageId == committedId }) {
-            return nil
-        }
-        let messageId = "local-\(receipt.commandId)"
-        guard !messages.contains(where: { $0.messageId == messageId }) else { return nil }
-        optimisticMessages[messageId] = OptimisticMessage(
-            localId: messageId,
-            commandId: receipt.commandId,
-            text: text,
-            committedMessageId: receipt.messageId
+    func presentationID(for messageID: String) -> String {
+        committedPresentationIDs[messageID] ?? messageID
+    }
+
+    func appendPendingSend(_ command: PendingCommand, text: String) {
+        let messageID = "local-\(command.id)"
+        optimisticMessages[messageID] = OptimisticMessage()
+        state.messages.append(
+            ConversationMessage(
+                messageId: messageID,
+                role: .user,
+                blocks: [
+                    ConversationBlock(blockId: "\(messageID)-block-0", kind: .text, text: text)
+                ],
+                createdAtUnixMs: Int64(command.submittedAt.timeIntervalSince1970 * 1000)
+            )
         )
-        let message = ConversationMessage(
-            messageId: messageId,
-            role: .user,
-            blocks: [
-                ConversationBlock(
-                    blockId: "\(messageId)-block-0",
-                    kind: .text,
-                    text: text
-                )
-            ],
-            createdAtUnixMs: Int64(now().timeIntervalSince1970 * 1000)
-        )
-        state.messages.append(message)
+        scroll.markLayoutChange()
         _ = scroll.recordIncoming(isOwnMessage: true)
-        requestScroll(animated: true)
-        return messageId
     }
 
-    /// Removes the optimistic row that stands in for this committed echo and
-    /// returns its index, so the committed message can take the same position.
-    /// Matching uses the Core message id when the receipt supplied one; only
-    /// Sources that never echo a correlation id fall back to exact text. Text
-    /// fallback must not merge two distinct authoritative identities.
-    func reconcileUserEcho(_ message: ConversationMessage) -> Int? {
-        let echoText = normalizedText(message.plainText)
-        let match = messages.firstIndex { local in
-            guard let pending = optimisticMessages[local.messageId] else { return false }
-            if let committed = pending.committedMessageId {
-                return committed == message.messageId
-            }
-            return normalizedText(pending.text) == echoText
+    func settlePendingSend(_ command: PendingCommand, receipt: CommandReceipt) {
+        let localID = "local-\(command.id)"
+        guard optimisticMessages[localID] != nil else { return }
+        guard receipt.status != .rejected, receipt.status != .cancelled else {
+            removePendingSend(command)
+            return
         }
-        guard let match else { return nil }
-        let local = state.messages.remove(at: match)
-        optimisticMessages.removeValue(forKey: local.messageId)
-        return match
+        if let committedID = receipt.messageId {
+            if messages.contains(where: { $0.messageId == committedID }) {
+                removePendingSend(command)
+            } else {
+                optimisticMessages[localID] = OptimisticMessage(
+                    committedMessageId: committedID
+                )
+            }
+        } else if receipt.status != .uncertain {
+            // The existing receipt row reports acceptance independently of
+            // committed content when the Source provides no message identity.
+            removePendingSend(command)
+        }
     }
 
-    func normalizedText(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    func removePendingSend(_ command: PendingCommand) {
+        let localID = "local-\(command.id)"
+        optimisticMessages.removeValue(forKey: localID)
+        state.messages.removeAll { $0.messageId == localID }
+        scroll.markLayoutChange()
+    }
+
+    /// A committed echo inherits the pending presentation identity only when
+    /// a receipt explicitly associated it with this send.
+    func reconcileUserEcho(_ message: ConversationMessage) {
+        guard message.role == .user, let index = messages.firstIndex(where: {
+            optimisticMessages[$0.messageId]?.committedMessageId == message.messageId
+        }) else { return }
+        let local = state.messages.remove(at: index)
+        optimisticMessages.removeValue(forKey: local.messageId)
+        committedPresentationIDs[message.messageId] = local.messageId
     }
 
     func draftMatchesSubmission(_ submittedText: String) -> Bool {
@@ -136,6 +140,7 @@ extension ConversationModel {
         guard case .uncertain(let command, let inFlight) = state.lifecycle,
               inFlight.commandId == receipt.commandId else { return }
         state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
+        settlePendingSend(command, receipt: receipt)
     }
 
     func applyCommandStatus(_ receipt: CommandReceipt) {
@@ -143,8 +148,10 @@ extension ConversationModel {
            inFlight.commandId == receipt.commandId {
             if receipt.status == .uncertain {
                 state.lastReceipt = receipt
+                settlePendingSend(command, receipt: receipt)
             } else {
                 state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
+                settlePendingSend(command, receipt: receipt)
                 if receipt.status == .confirmed || receipt.status == .accepted {
                     let submitted = inFlightSendText
                     if let submitted, draftMatchesSubmission(submitted) {
@@ -203,14 +210,14 @@ extension ConversationModel {
         if earlyCommandStatuses[receipt.commandId] == nil {
             earlyCommandStatusOrder.append(receipt.commandId)
         }
-        earlyCommandStatuses[receipt.commandId] = receipt.status
+        earlyCommandStatuses[receipt.commandId] = receipt
         while earlyCommandStatusOrder.count > 32 {
             let oldest = earlyCommandStatusOrder.removeFirst()
             earlyCommandStatuses.removeValue(forKey: oldest)
         }
     }
 
-    func takeEarlyCommandStatus(for commandId: String) -> CommandStatus? {
+    func takeEarlyCommandStatus(for commandId: String) -> CommandReceipt? {
         earlyCommandStatusOrder.removeAll { $0 == commandId }
         return earlyCommandStatuses.removeValue(forKey: commandId)
     }
