@@ -159,19 +159,20 @@ the relay epoch, topic/body scope, response topic, correlation, deadline,
 connection reference and current grant/enrollment all match. It then forwards
 the same request on the existing `.../request` topic with
 `HostRequest.connection_ref`, `grant_generation` and `enrollment_generation`
-filled, and keeps one in-memory waiter keyed by host, device, connection
-reference and request id with the immutable admitted scope. No durable request
+filled, and keeps one in-memory waiter keyed by Host, Device and request ID.
+The waiter retains the admitted connection and grant through completion. No durable request
 row is written. Once the caller and grant are verified, a known offline Host
 receives no dispatch. Access returns a correlated `host_offline` status to
 the requesting connection. An unreconciled presence view returns `unavailable`.
 A malformed or unauthorized request has no reply path.
 
-The Host replies on `.../result`. Access matches the result to the waiter,
-checks any referenced result object against the original scope and current
+The Host replies on `.../result`. Access matches and removes the waiter in one
+step. A reply without a Device ID requires a unique Host and request ID match.
+Access checks any referenced result object against the original scope and current
 grant, marks it issued, and publishes the reply on
 `.../d/<device_id>/reply` at QoS 1 with Correlation Data, the remaining Message
 Expiry Interval and `whalerein-target` set to the admitted connection
-reference. Then it removes the waiter. `HANDSHAKE` and `QUERY` kinds are the only
+reference. `HANDSHAKE` and `QUERY` kinds are the only
 kinds admitted on this ingress; `COMMAND` keeps its durable HTTPS path.
 
 The object directory records the managed login session from the authenticated

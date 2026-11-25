@@ -120,6 +120,19 @@ type harness struct {
 	now         time.Time
 }
 
+func (s *Service) waiterCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.waiters)
+}
+
+func (s *Service) waiterFor(hostID, deviceID, requestID string) (*waiter, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok := s.waiters[waiterKey{hostID, deviceID, requestID}]
+	return w, ok
+}
+
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{
@@ -206,12 +219,12 @@ func TestQueryAdmissionBindsConnectionGrantAndDeadline(t *testing.T) {
 	if err := h.service.Admit(context.Background(), h.queryMessage(t, nil)); err != nil {
 		t.Fatalf("admit: %v", err)
 	}
-	scope, ok := h.service.Waiter(testHost, testDevice, "request-1")
+	scope, ok := h.service.waiterFor(testHost, testDevice, "request-1")
 	if !ok {
 		t.Fatal("waiter was not registered")
 	}
 	if scope.Conn != testRef || scope.Grant.GrantGeneration != 7 ||
-		scope.Grant.EnrollmentGeneration != 3 || scope.ReplyTopic != broker.DeviceReplyTopic(testHost, testDevice) {
+		scope.Grant.EnrollmentGeneration != 3 {
 		t.Fatalf("scope = %+v", scope)
 	}
 	// The Broker's remaining expiry (30s) shortens the application deadline.
@@ -358,7 +371,7 @@ func TestQueryRejectsForgedStampAndForeignReplyTopic(t *testing.T) {
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("admit error = %v, want %v", err, tc.want)
 			}
-			if h.service.WaiterCount() != 0 || len(h.publisher.snapshot()) != 0 {
+			if h.service.waiterCount() != 0 || len(h.publisher.snapshot()) != 0 {
 				t.Fatal("rejected query registered a waiter or was forwarded")
 			}
 		})
@@ -374,7 +387,7 @@ func TestQueryPresenceRepliesOnlyToAdmittedDevice(t *testing.T) {
 			t.Fatal(err)
 		}
 		messages := h.publisher.snapshot()
-		if h.service.WaiterCount() != 0 || len(messages) != 1 || messages[0].Topic != message.Properties.ResponseTopic ||
+		if h.service.waiterCount() != 0 || len(messages) != 1 || messages[0].Topic != message.Properties.ResponseTopic ||
 			messages[0].Properties.Get(broker.PropertyTarget) != testRef.String() ||
 			!bytes.Equal(messages[0].Properties.CorrelationData, message.Properties.CorrelationData) {
 			t.Fatal("presence refusal must resolve only its original caller")
@@ -413,7 +426,7 @@ func TestQueryReplyAffinityAndExpiredPublish(t *testing.T) {
 	if !h.service.Complete(context.Background(), testHost, message) {
 		t.Fatal("waiter result was not handled")
 	}
-	if h.service.WaiterCount() != 0 {
+	if h.service.waiterCount() != 0 {
 		t.Fatal("waiter survived completion")
 	}
 	messages := h.publisher.snapshot()
@@ -465,7 +478,7 @@ func TestQueryExpiredWaiterDropsLateResult(t *testing.T) {
 	if len(h.publisher.snapshot()) != 1 {
 		t.Fatal("expired waiter reply was published")
 	}
-	if h.service.WaiterCount() != 0 {
+	if h.service.waiterCount() != 0 {
 		t.Fatal("expired waiter survived")
 	}
 }
@@ -583,7 +596,7 @@ func TestQueryRestartDropsWaiters(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.service.CancelAll()
-	if h.service.WaiterCount() != 0 {
+	if h.service.waiterCount() != 0 {
 		t.Fatal("waiters survived a restart")
 	}
 	result := &whalereinv1.HostResult{
@@ -615,10 +628,10 @@ func TestQueryCancelConnectionDropsOnlyItsWaiters(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.service.CancelConnection(second)
-	if h.service.WaiterCount() != 1 {
-		t.Fatalf("waiters = %d", h.service.WaiterCount())
+	if h.service.waiterCount() != 1 {
+		t.Fatalf("waiters = %d", h.service.waiterCount())
 	}
-	if _, ok := h.service.Waiter(testHost, testDevice, "request-1"); !ok {
+	if _, ok := h.service.waiterFor(testHost, testDevice, "request-1"); !ok {
 		t.Fatal("sibling waiter was cancelled")
 	}
 }
@@ -681,7 +694,7 @@ func TestQuerySweepRemovesExpiredWaiters(t *testing.T) {
 	if removed := h.service.Sweep(); removed != 1 {
 		t.Fatalf("swept = %d", removed)
 	}
-	if h.service.WaiterCount() != 0 {
+	if h.service.waiterCount() != 0 {
 		t.Fatal("sweep left a waiter")
 	}
 }
@@ -692,8 +705,38 @@ func TestQueryPublishFailureDropsTheWaiter(t *testing.T) {
 	if err := h.service.Admit(context.Background(), h.queryMessage(t, nil)); err == nil {
 		t.Fatal("publish failure accepted")
 	}
-	if h.service.WaiterCount() != 0 {
+	if h.service.waiterCount() != 0 {
 		t.Fatal("publish failure left a waiter")
+	}
+}
+
+type publishFunc func(context.Context, broker.Message) error
+
+func (f publishFunc) PublishMessage(ctx context.Context, message broker.Message) error {
+	return f(ctx, message)
+}
+
+func TestQueryLatePublishFailurePreservesReadmittedWaiter(t *testing.T) {
+	h := newHarness(t)
+	message := h.queryMessage(t, nil)
+	interrupted := errors.New("publish interrupted")
+	first := true
+	h.service.publisher = publishFunc(func(ctx context.Context, forward broker.Message) error {
+		if !first {
+			return h.publisher.PublishMessage(ctx, forward)
+		}
+		first = false
+		h.service.CancelAll()
+		if err := h.service.Admit(ctx, message); err != nil {
+			t.Fatalf("readmit: %v", err)
+		}
+		return interrupted
+	})
+	if err := h.service.Admit(context.Background(), message); !errors.Is(err, interrupted) {
+		t.Fatalf("original publish = %v", err)
+	}
+	if h.service.waiterCount() != 1 {
+		t.Fatal("original publish failure removed the readmitted waiter")
 	}
 }
 

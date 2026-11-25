@@ -24,7 +24,7 @@ func TestNewRejectsMissingDependenciesAndAppliesDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if service.config.MaxWaiters == 0 || service.config.MaxWaitersPerConnection == 0 ||
-		service.config.MaxTTL == 0 || service.now().IsZero() {
+		service.config.MaxTTL == 0 || service.config.Now().IsZero() {
 		t.Fatal("defaults were not applied")
 	}
 }
@@ -138,7 +138,7 @@ func TestQueryCompleteIgnoresMalformedAndForeignResults(t *testing.T) {
 	if h.service.Complete(context.Background(), testHost, broker.Message{Payload: mustMarshal(t, foreign)}) {
 		t.Fatal("foreign device result was consumed")
 	}
-	if _, ok := h.service.Waiter(testHost, testDevice, "request-1"); !ok {
+	if _, ok := h.service.waiterFor(testHost, testDevice, "request-1"); !ok {
 		t.Fatal("foreign result removed the waiter")
 	}
 	// A result that omits device_id still resolves the single waiter.
@@ -150,6 +150,26 @@ func TestQueryCompleteIgnoresMalformedAndForeignResults(t *testing.T) {
 	}
 	if len(h.publisher.snapshot()) != 2 {
 		t.Fatal("anonymous result did not publish a reply")
+	}
+}
+
+func TestQueryResultWithoutDeviceRequiresAUniqueWaiter(t *testing.T) {
+	h := newHarness(t)
+	for _, deviceID := range []string{"device-a", "device-b"} {
+		key := waiterKey{testHost, deviceID, "shared-request"}
+		h.service.waiters[key] = &waiter{waiterKey: key}
+	}
+	result := &whalereinv1.HostResult{RequestId: "shared-request"}
+	if h.service.takeResultWaiter(testHost, result) != nil || h.service.waiterCount() != 2 {
+		t.Fatal("ambiguous reply consumed a waiter")
+	}
+	result.DeviceId = "device-b"
+	if w := h.service.takeResultWaiter(testHost, result); w == nil || w.DeviceID != "device-b" {
+		t.Fatal("addressed reply did not resolve its waiter")
+	}
+	result.DeviceId = ""
+	if w := h.service.takeResultWaiter(testHost, result); w == nil || w.DeviceID != "device-a" {
+		t.Fatal("anonymous reply did not resolve the remaining waiter")
 	}
 }
 
@@ -288,15 +308,5 @@ func TestQueryRemainingExpiryRoundsUpAndCaps(t *testing.T) {
 	large := uint32(^uint32(0))
 	if value := remainingExpiry(now.Add(time.Hour), now, &large); value == nil || *value != 3600 {
 		t.Fatalf("long expiry = %v", value)
-	}
-}
-
-func TestQueryWaiterLookupAndRemoval(t *testing.T) {
-	h := newHarness(t)
-	if _, ok := h.service.Waiter(testHost, testDevice, "missing"); ok {
-		t.Fatal("unknown waiter found")
-	}
-	if h.service.remove("missing") {
-		t.Fatal("missing waiter removed")
 	}
 }

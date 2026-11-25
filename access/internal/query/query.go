@@ -76,27 +76,18 @@ type Config struct {
 	Now                     func() time.Time
 }
 
-// Scope is the immutable authorization captured at query admission. Host
-// cannot restamp it with a later grant, enrollment or connection.
-type Scope struct {
+type waiterKey struct {
+	HostID, DeviceID, RequestID string
+}
+
+// A waiter retains only the immutable scope needed after forwarding.
+type waiter struct {
+	waiterKey
 	DeviceSessionID string
-	HostID          string
-	DeviceID        string
 	ChannelID       string
-	RequestID       string
-	Kind            whalereinv1.RequestKind
 	Conn            broker.ConnectionRef
 	Grant           store.AdmissionGrant
 	Deadline        time.Time
-	// Correlation is the exact Correlation Data the Device sent; the reply
-	// echoes it.
-	Correlation []byte
-	ReplyTopic  string
-}
-
-type waiter struct {
-	scope   Scope
-	request *whalereinv1.HostRequest
 }
 
 // Service owns the transient query waiters.
@@ -106,10 +97,9 @@ type Service struct {
 	hosts       Hosts
 	publisher   Publisher
 	config      Config
-	now         func() time.Time
 
 	mu      sync.Mutex
-	waiters map[string]*waiter
+	waiters map[waiterKey]*waiter
 }
 
 // Dependencies wires the transient query service.
@@ -145,15 +135,8 @@ func New(deps Dependencies) (*Service, error) {
 		hosts:       deps.Hosts,
 		publisher:   deps.Publisher,
 		config:      config,
-		now:         config.Now,
-		waiters:     map[string]*waiter{},
+		waiters:     map[waiterKey]*waiter{},
 	}, nil
-}
-
-// waiterKey is (host, device, request). A duplicate request id on a different
-// connection is rejected at admission, so one key identifies one waiter.
-func waiterKey(hostID, deviceID, requestID string) string {
-	return hostID + "\x00" + deviceID + "\x00" + requestID
 }
 
 // Admit validates one inbound query envelope and forwards it to the Host. The
@@ -163,7 +146,7 @@ func (s *Service) Admit(ctx context.Context, message broker.Message) error {
 		return ErrInvalidTopic
 	}
 	parsed, err := broker.ParseTopic(message.Topic)
-	if err != nil || parsed.Kind != broker.KindDeviceQuery || parsed.HostID == "" || parsed.DeviceID == "" {
+	if err != nil || parsed.Kind != broker.KindDeviceQuery {
 		return ErrInvalidTopic
 	}
 	var request whalereinv1.HostRequest
@@ -200,7 +183,7 @@ func (s *Service) Admit(ctx context.Context, message broker.Message) error {
 	if message.Properties.MessageExpiry == nil || *message.Properties.MessageExpiry == 0 {
 		return ErrMessageExpiry
 	}
-	now := s.now()
+	now := s.config.Now()
 	deadline := time.UnixMilli(request.GetExpiresAtUnixMs()).UTC()
 	if request.GetExpiresAtUnixMs() <= 0 || !deadline.After(now) {
 		return ErrExpired
@@ -212,9 +195,6 @@ func (s *Service) Admit(ctx context.Context, message broker.Message) error {
 	upstream := time.Duration(*message.Properties.MessageExpiry) * time.Second
 	if capped := now.Add(upstream); capped.Before(deadline) {
 		deadline = capped
-	}
-	if !deadline.After(now) {
-		return ErrExpired
 	}
 	// The reserved connection reference must be the Broker-stamped instance
 	// Access currently observes for this Device. A client-supplied or stale
@@ -239,12 +219,10 @@ func (s *Service) Admit(ctx context.Context, message broker.Message) error {
 	}
 	request.HostId = parsed.HostID
 	request.DeviceId = parsed.DeviceID
-	scope := Scope{
-		DeviceSessionID: deviceSession, HostID: parsed.HostID, DeviceID: parsed.DeviceID,
-		ChannelID: request.GetChannelId(), RequestID: request.GetRequestId(),
-		Kind: request.GetKind(), Conn: ref, Grant: grant, Deadline: deadline,
-		Correlation: append([]byte(nil), message.Properties.CorrelationData...),
-		ReplyTopic:  replyTopic,
+	scope := &waiter{
+		waiterKey:       waiterKey{parsed.HostID, parsed.DeviceID, request.GetRequestId()},
+		DeviceSessionID: deviceSession, ChannelID: request.GetChannelId(),
+		Conn: ref, Grant: grant, Deadline: deadline,
 	}
 	if s.hosts != nil {
 		if online, known := s.hosts.HostPresence(scope.HostID); !online {
@@ -284,15 +262,15 @@ func validBody(request *whalereinv1.HostRequest) error {
 	return nil
 }
 
-func (s *Service) registerAndForward(ctx context.Context, scope Scope, request *whalereinv1.HostRequest, upstream *uint32) error {
-	key := waiterKey(scope.HostID, scope.DeviceID, scope.RequestID)
+func (s *Service) registerAndForward(ctx context.Context, scope *waiter, request *whalereinv1.HostRequest, upstream *uint32) error {
+	key := scope.waiterKey
 	s.mu.Lock()
 	if existing, ok := s.waiters[key]; ok {
 		s.mu.Unlock()
 		// A repeated publication of the same request on the same connection is
 		// idempotent: the waiter already exists and the Host was already
 		// asked. A second connection must not attach to that waiter.
-		if existing.scope.Conn == scope.Conn {
+		if existing.Conn == scope.Conn {
 			return nil
 		}
 		return ErrDuplicate
@@ -301,53 +279,56 @@ func (s *Service) registerAndForward(ctx context.Context, scope Scope, request *
 		s.mu.Unlock()
 		return ErrCapacity
 	}
-	s.waiters[key] = &waiter{scope: scope, request: proto.Clone(request).(*whalereinv1.HostRequest)}
+	s.waiters[key] = scope
 	s.mu.Unlock()
 
-	forward := proto.Clone(request).(*whalereinv1.HostRequest)
-	forward.ConnectionRef = scope.Conn.String()
-	forward.GrantGeneration = scope.Grant.GrantGeneration
-	forward.EnrollmentGeneration = scope.Grant.EnrollmentGeneration
-	transport := forward.GetTransport()
+	err := s.forward(ctx, scope, request, upstream)
+	if err != nil {
+		s.mu.Lock()
+		if s.waiters[key] == scope {
+			delete(s.waiters, key)
+		}
+		s.mu.Unlock()
+	}
+	return err
+}
+
+func (s *Service) forward(ctx context.Context, scope *waiter, request *whalereinv1.HostRequest, upstream *uint32) error {
+	request.ConnectionRef = scope.Conn.String()
+	request.GrantGeneration = scope.Grant.GrantGeneration
+	request.EnrollmentGeneration = scope.Grant.EnrollmentGeneration
+	transport := request.GetTransport()
 	if transport == nil {
 		transport = &whalereinv1.RequestTransportMetadata{}
 	}
 	transport.GrantGeneration = scope.Grant.GrantGeneration
 	transport.RevocationGeneration = scope.Grant.RevocationGeneration
 	transport.EnrollmentGeneration = scope.Grant.EnrollmentGeneration
-	forward.Transport = transport
-	forward.RelayVersion = broker.RelayEpoch
-	payload, err := proto.Marshal(forward)
+	request.Transport = transport
+	payload, err := proto.Marshal(request)
 	if err != nil {
-		s.remove(key)
 		return fmt.Errorf("%w: marshal: %v", ErrInvalidBody, err)
 	}
-	expiry := remainingExpiry(scope.Deadline, s.now(), upstream)
+	expiry := remainingExpiry(scope.Deadline, s.config.Now(), upstream)
 	if expiry == nil {
-		s.remove(key)
 		return ErrExpired
 	}
-	err = s.publisher.PublishMessage(ctx, broker.Message{
+	return s.publisher.PublishMessage(ctx, broker.Message{
 		Topic:   broker.RequestTopic(scope.HostID),
 		Payload: payload,
 		QoS:     1,
 		Properties: broker.MessageProperties{
-			CorrelationData: append([]byte(nil), scope.Correlation...),
+			CorrelationData: []byte(scope.RequestID),
 			ResponseTopic:   broker.ResultTopic(scope.HostID),
 			MessageExpiry:   expiry,
 		},
 	})
-	if err != nil {
-		s.remove(key)
-		return err
-	}
-	return nil
 }
 
 func (s *Service) connectionWaitersLocked(ref broker.ConnectionRef) int {
 	count := 0
 	for _, waiter := range s.waiters {
-		if waiter.scope.Conn == ref {
+		if waiter.Conn == ref {
 			count++
 		}
 	}
@@ -365,39 +346,11 @@ func (s *Service) Complete(ctx context.Context, hostID string, message broker.Me
 	if result.GetRequestId() == "" {
 		return false
 	}
-	key := waiterKey(hostID, result.GetDeviceId(), result.GetRequestId())
-	s.mu.Lock()
-	current := s.waiters[key]
-	if current == nil {
-		// A result may omit device_id; resolve by host and request id then.
-		if result.GetDeviceId() == "" {
-			for candidateKey, candidate := range s.waiters {
-				if candidate.scope.HostID == hostID && candidate.scope.RequestID == result.GetRequestId() {
-					key, current = candidateKey, candidate
-					break
-				}
-			}
-		}
-	}
-	if current == nil {
-		s.mu.Unlock()
+	scope := s.takeResultWaiter(hostID, &result)
+	if scope == nil {
 		return false
 	}
-	s.mu.Unlock()
-
-	if result.GetDeviceId() != "" && result.GetDeviceId() != current.scope.DeviceID {
-		return false
-	}
-	if result.GetChannelId() != "" && current.scope.ChannelID != "" &&
-		result.GetChannelId() != current.scope.ChannelID {
-		return false
-	}
-	// Exactly one completion removes the waiter.
-	if !s.remove(key) {
-		return true
-	}
-	scope := current.scope
-	now := s.now()
+	now := s.config.Now()
 	if !now.Before(scope.Deadline) {
 		return true
 	}
@@ -416,8 +369,32 @@ func (s *Service) Complete(ctx context.Context, hostID string, message broker.Me
 	return true
 }
 
+// Match and consume one waiter under the same lock. A mismatched result
+// leaves the waiter available for its own reply.
+func (s *Service) takeResultWaiter(hostID string, result *whalereinv1.HostResult) *waiter {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := waiterKey{hostID, result.GetDeviceId(), result.GetRequestId()}
+	if key.DeviceID == "" {
+		for candidate := range s.waiters {
+			if candidate.HostID == hostID && candidate.RequestID == key.RequestID {
+				if key.DeviceID != "" {
+					return nil // Ambiguous across devices.
+				}
+				key = candidate
+			}
+		}
+	}
+	w := s.waiters[key]
+	if w == nil || (result.GetChannelId() != "" && w.ChannelID != "" && result.GetChannelId() != w.ChannelID) {
+		return nil
+	}
+	delete(s.waiters, key)
+	return w
+}
+
 // publishReply sends a terminal result only to the admitted connection.
-func (s *Service) publishReply(ctx context.Context, scope Scope, reply *whalereinv1.HostResult, upstream *uint32) error {
+func (s *Service) publishReply(ctx context.Context, scope *waiter, reply *whalereinv1.HostResult, upstream *uint32) error {
 	reply.HostId = scope.HostID
 	reply.DeviceId = scope.DeviceID
 	reply.RequestId = scope.RequestID
@@ -427,16 +404,16 @@ func (s *Service) publishReply(ctx context.Context, scope Scope, reply *whalerei
 	if err != nil {
 		return err
 	}
-	expiry := remainingExpiry(scope.Deadline, s.now(), upstream)
+	expiry := remainingExpiry(scope.Deadline, s.config.Now(), upstream)
 	if expiry == nil {
 		return ErrExpired
 	}
 	properties := broker.MessageProperties{
-		CorrelationData: scope.Correlation,
+		CorrelationData: []byte(scope.RequestID),
 		MessageExpiry:   expiry,
 	}.WithUserProperty(broker.PropertyTarget, scope.Conn.String())
 	return s.publisher.PublishMessage(ctx, broker.Message{
-		Topic: scope.ReplyTopic, Payload: payload, QoS: 1, Properties: properties,
+		Topic: broker.DeviceReplyTopic(scope.HostID, scope.DeviceID), Payload: payload, QoS: 1, Properties: properties,
 	})
 }
 
@@ -450,7 +427,7 @@ func sameGrant(left, right store.AdmissionGrant) bool {
 // issueReference verifies that a ready result object is still bound to the
 // waiter's original query scope, grant and enrollment, then durably marks it
 // issued before any reply is published.
-func (s *Service) issueReference(ctx context.Context, scope Scope, grant store.AdmissionGrant, reference *whalereinv1.PayloadReference) error {
+func (s *Service) issueReference(ctx context.Context, scope *waiter, grant store.AdmissionGrant, reference *whalereinv1.PayloadReference) error {
 	objectID := reference.GetObjectId()
 	switch reference.GetPurpose() {
 	case whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT,
@@ -465,7 +442,7 @@ func (s *Service) issueReference(ctx context.Context, scope Scope, grant store.A
 		}
 		return err
 	}
-	if object.State != store.PayloadReady || !object.ExpiresAt.After(s.now()) ||
+	if object.State != store.PayloadReady || !object.ExpiresAt.After(s.config.Now()) ||
 		object.ExpiresAt.After(scope.Deadline) {
 		return ErrObject
 	}
@@ -508,7 +485,7 @@ func (s *Service) issueReference(ctx context.Context, scope Scope, grant store.A
 		RevocationGeneration:       grant.RevocationGeneration,
 		DeviceRevocationGeneration: grant.DeviceRevocationGeneration,
 		EnrollmentGeneration:       grant.EnrollmentGeneration,
-	}, s.now())
+	}, s.config.Now())
 	if err != nil {
 		return err
 	}
@@ -525,17 +502,15 @@ func (s *Service) AuthorizeObjectReserve(ctx context.Context, hostID, deviceID, 
 		return "", ErrNoWaiter
 	}
 	s.mu.Lock()
-	current := s.waiters[waiterKey(hostID, deviceID, requestID)]
+	scope := s.waiters[waiterKey{hostID, deviceID, requestID}]
 	s.mu.Unlock()
-	if current == nil {
+	if scope == nil {
 		return "", ErrNoWaiter
 	}
-	scope := current.scope
-	if !s.now().Before(scope.Deadline) {
+	if !s.config.Now().Before(scope.Deadline) {
 		return "", ErrExpired
 	}
-	if scope.HostID != hostID || scope.DeviceID != deviceID ||
-		scope.ChannelID != channelID || scope.RequestID != requestID {
+	if scope.ChannelID != channelID {
 		return "", ErrScope
 	}
 	if connectionRef != scope.Conn.String() || enrollment != scope.Grant.EnrollmentGeneration {
@@ -557,7 +532,7 @@ func (s *Service) CancelConnection(ref broker.ConnectionRef) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, waiter := range s.waiters {
-		if waiter.scope.Conn == ref {
+		if waiter.Conn == ref {
 			delete(s.waiters, key)
 		}
 	}
@@ -573,45 +548,17 @@ func (s *Service) CancelAll() {
 
 // Sweep removes waiters whose deadline has passed and returns the count.
 func (s *Service) Sweep() int {
-	now := s.now()
+	now := s.config.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	removed := 0
 	for key, waiter := range s.waiters {
-		if !now.Before(waiter.scope.Deadline) {
+		if !now.Before(waiter.Deadline) {
 			delete(s.waiters, key)
 			removed++
 		}
 	}
 	return removed
-}
-
-// WaiterCount reports the current bounded waiter count.
-func (s *Service) WaiterCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.waiters)
-}
-
-// Waiter returns a copy of one waiter scope, for focused tests and diagnostics.
-func (s *Service) Waiter(hostID, deviceID, requestID string) (Scope, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	waiter := s.waiters[waiterKey(hostID, deviceID, requestID)]
-	if waiter == nil {
-		return Scope{}, false
-	}
-	return waiter.scope, true
-}
-
-func (s *Service) remove(key string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.waiters[key]; !ok {
-		return false
-	}
-	delete(s.waiters, key)
-	return true
 }
 
 // remainingExpiry renders the positive remaining whole seconds from the
@@ -627,12 +574,7 @@ func remainingExpiry(deadline, now time.Time, upstream *uint32) *uint32 {
 		seconds++
 	}
 	if upstream != nil {
-		if uint64(*upstream) < seconds {
-			seconds = uint64(*upstream)
-		}
-		if *upstream == 0 {
-			return nil
-		}
+		seconds = min(seconds, uint64(*upstream))
 	}
 	if seconds == 0 || seconds > math.MaxUint32 {
 		return nil
