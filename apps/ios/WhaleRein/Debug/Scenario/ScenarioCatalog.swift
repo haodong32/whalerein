@@ -154,6 +154,22 @@ enum ScenarioCatalog {
                 )
             ),
             Scenario(
+                id: "conversation.reply-without-echo",
+                category: .conversation,
+                title: "Assistant reply without a user echo",
+                notes: "Provides an accepted receipt without a message ID, then streams a reply.",
+                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                fixture: FixtureScenario(initiallyPaired: true, replyWithoutUserEcho: true)
+            ),
+            Scenario(
+                id: "conversation.short-history-retry",
+                category: .conversation,
+                title: "Short history with a recoverable older-page error",
+                notes: "The first automatic older read fails once. Subsequent pages contain one row each.",
+                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                fixture: FixtureScenario(initiallyPaired: true, shortHistoryWithRetry: true)
+            ),
+            Scenario(
                 id: "conversation.streaming",
                 category: .conversation,
                 title: "Streaming reply",

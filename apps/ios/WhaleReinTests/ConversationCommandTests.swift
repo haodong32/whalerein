@@ -20,7 +20,7 @@ struct ConversationCommandTests {
         await model.send()
 
         #expect(model.lastSendStatus == .accepted)
-        #expect(!model.messages.contains { $0.role == .user && $0.plainText == "ship the release" })
+        #expect(model.messages.contains { $0.role == .user && $0.plainText == "ship the release" })
         #expect(model.draft.isEmpty)
         #expect(model.isRunning)
         #expect(model.delivery == .queue)

@@ -938,6 +938,13 @@ extension IntegrationTestCase {
                 + "queue=\(queue), events=\(eventKinds(watcher.envelopes)))"
         )
         XCTAssertEqual(echoes.count, 1, "the idle send must be committed exactly once")
+        if let echo = echoes.first {
+            XCTAssertNotNil(receipt.deliveryId)
+            XCTAssertEqual(
+                receipt.deliveryId, echo.deliveryId,
+                "The receipt and streamed user echo must identify the same delivery"
+            )
+        }
     }
 
     func testAC06_defaultQueue() async throws {

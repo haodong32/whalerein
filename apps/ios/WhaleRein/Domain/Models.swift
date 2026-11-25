@@ -231,6 +231,7 @@ struct ConversationMessage: Identifiable, Hashable, Sendable {
     let role: MessageRole
     let blocks: [ConversationBlock]
     let createdAtUnixMs: Int64
+    var deliveryId: String? = nil
 
     var id: String { messageId }
 

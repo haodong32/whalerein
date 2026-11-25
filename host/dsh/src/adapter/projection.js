@@ -460,8 +460,16 @@ export class DshProjection {
       if (kind === 'user') {
         const blocks = blocksFromUserContent(sessionId, view, event, event.data?.content ?? event.data?.message?.content, this.#attachments)
         if (blocks.length === 0) return null
+        const nativeId = event.data?.id ?? event.data?.message?.id
+        const rpcId = source?.rpcId
+        // Older native events carry the operation ID in the user message ID.
+        // Only use that fallback for the Host's canonical operation ID shape.
+        const deliveryId = typeof rpcId === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(rpcId)
+          ? rpcId
+          : typeof nativeId === 'string' && /^[a-f0-9]{64}$/.test(nativeId) ? nativeId : undefined
         return {
           message_id: messageId(sessionId, view, event.dshSeq),
+          ...(deliveryId ? { delivery_id: deliveryId } : {}),
           role: 'USER',
           blocks,
           authored_at_unix_ms: event.createdAt ?? 0,

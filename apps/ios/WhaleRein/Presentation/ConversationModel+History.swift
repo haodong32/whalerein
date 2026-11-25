@@ -144,12 +144,35 @@ extension ConversationModel {
             reasoningPreviewText = nil
             liveToolActivities.removeAll()
             liveMessageIds = page.source == .online ? pageIDs : []
-            // Snapshot is authoritative for the replacement range.
-            let previouslyVisible = state.messages.filter { optimisticMessages[$0.messageId] != nil }
+            // Prefer the observable order over comparing the device and Host
+            // clocks when the replacement still contains a following row.
+            var successorID: String?
+            var pendingSuccessors: [String: String] = [:]
+            let previouslyVisible = state.messages
+            for row in previouslyVisible.reversed() {
+                if pageIDs.contains(row.messageId) {
+                    successorID = row.messageId
+                } else if optimisticMessages[row.messageId] != nil, let successorID {
+                    pendingSuccessors[row.messageId] = successorID
+                }
+            }
             for message in page.messages {
                 reconcileUserEcho(message)
             }
-            state.messages = page.messages + previouslyVisible.filter { optimisticMessages[$0.messageId] != nil }
+            state.messages = page.messages
+            for pending in previouslyVisible {
+                guard let submission = optimisticMessages[pending.messageId] else { continue }
+                let successor = pendingSuccessors[pending.messageId].flatMap { id in
+                    state.messages.firstIndex { $0.messageId == id }
+                }
+                let inferred = submission.queuedBehindRun ? nil : state.messages.firstIndex {
+                    $0.createdAtUnixMs > pending.createdAtUnixMs
+                }
+                let next = successor ?? inferred ?? state.messages.endIndex
+                optimisticMessages[pending.messageId]?.preservesPosition =
+                    !submission.queuedBehindRun && next != state.messages.endIndex
+                state.messages.insert(pending, at: next)
+            }
             committedPresentationIDs = committedPresentationIDs.filter { pageIDs.contains($0.key) }
         } else {
             let currentIDs = Set(messages.map(\.messageId))
@@ -250,6 +273,9 @@ extension ConversationModel {
     private func applyHistoryPage(_ page: ConversationHistoryPage) {
         var existing = Set(messages.map(\.messageId))
         let prepended = page.messages.filter { existing.insert($0.messageId).inserted }
+        for message in prepended {
+            reconcileUserEcho(message)
+        }
         if !prepended.isEmpty {
             state.messages.insert(contentsOf: prepended, at: 0)
         }

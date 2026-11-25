@@ -25,8 +25,17 @@ extension ConversationModel {
             kind: .send(text: text),
             submittedAt: now()
         )
+        let submissionEpoch = authoritativeRunEpoch
+        let submittedEditID = draftEditID
+        let submittedDraft = draft
         state = ConversationReduce.reduce(state, .sendSubmitted(command))
-        appendPendingSend(command, text: text)
+        appendPendingSend(command, text: text, queuedBehindRun: choice == .queue && capabilities.running)
+        let draftSubmission: DraftService.Submission?
+        if let lease = draftLease {
+            draftSubmission = await drafts.beginSubmission(lease, text: submittedDraft, editID: submittedEditID)
+        } else {
+            draftSubmission = nil
+        }
         do {
             var receipt = try await service.send(
                 hostId: hostId,
@@ -34,13 +43,24 @@ extension ConversationModel {
                 text: text,
                 delivery: choice
             )
-            guard !isClosed else { return }
             // The submission settled: release the gate even though an uncertain
             // receipt continues to block Send until reconciliation.
             if let early = takeEarlyCommandStatus(for: receipt.commandId) {
                 receipt.status = preferredStatus(early.status, over: receipt.status)
                 receipt.messageId = receipt.messageId ?? early.messageId
                 receipt.deliveryId = receipt.deliveryId ?? early.deliveryId
+            }
+            if isClosed {
+                let localID = "local-\(command.id)"
+                settlePendingSend(localID: localID, receipt: receipt)
+                outgoingStore?.updateClosedSend(
+                    scope: outgoingScope, localID: localID,
+                    submission: optimisticMessages[localID], receipt: receipt
+                )
+                if receipt.status == .accepted || receipt.status == .confirmed {
+                    await settleSubmittedDraft(draftSubmission)
+                }
+                return
             }
             state.lastCommandKind = command.kind
             // A rejected send was definitively not accepted, so it has no
@@ -53,13 +73,14 @@ extension ConversationModel {
             operationReadErrorKey = nil
             if receipt.status == .uncertain {
                 state = ConversationReduce.reduce(state, .sendUncertain(command, receipt))
-                inFlightSendText = text
+                inFlightDraftSubmission = draftSubmission
             } else {
                 state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
-                inFlightSendText = nil
+                inFlightDraftSubmission = nil
             }
             settlePendingSend(command, receipt: receipt)
-            if admitted, choice == .send || (choice == .queue && !capabilities.running) {
+            if admitted, submissionEpoch == authoritativeRunEpoch,
+               choice == .send || (choice == .queue && !capabilities.running) {
                 // An idle native-queue submission starts the turn; a running
                 // queue submission leaves the current run untouched.
                 updateCapabilities(running: true)
@@ -69,16 +90,19 @@ extension ConversationModel {
                 // until the original request is reconciled.
                 await persistDraftNow()
             } else if admitted {
-                // A successful older send consumes only the text it submitted.
-                // Text typed while the response was in flight belongs to a
-                // newer message and must survive.
-                if draftMatchesSubmission(text) {
-                    await clearDraftNow()
+                if draftSubmission == nil, draftEditID == submittedEditID {
+                    draft = ""
                 } else {
-                    await persistDraftNow()
+                    await settleSubmittedDraft(draftSubmission)
                 }
             }
         } catch {
+            if isClosed {
+                outgoingStore?.updateClosedSend(
+                    scope: outgoingScope, localID: "local-\(command.id)", submission: nil, receipt: nil
+                )
+                return
+            }
             // A definite failure releases the gate so the same intent can be
             // retried; a late settlement of the failed command cannot re-arm it.
             let code = (error as? SessionServiceError)?.code ?? .internalError

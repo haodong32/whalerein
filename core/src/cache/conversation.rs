@@ -464,6 +464,11 @@ impl Cache {
         let mut canonical = batch.clone();
         for change in &mut canonical.changes {
             change.origin = None;
+            // Delivery correlation is metadata. A replay across an upgrade
+            // still identifies the same committed batch and content.
+            if let Some(message) = &mut change.message {
+                message.delivery_id.clear();
+            }
         }
         let digest = crate::util::sha256(&canonical.encode_to_vec());
         let projection = page.projection_id.clone();
@@ -870,6 +875,38 @@ mod tests {
             Err(CacheError::HistoryGap)
         ));
     }
+    #[test]
+    fn replaying_existing_history_with_delivery_identity_keeps_the_cached_view() {
+        let cache = Cache::open_in_memory([1; 32]).unwrap();
+        cache
+            .apply_history_page(&page("a", "start", "one", "one", true, true, "first"))
+            .unwrap();
+
+        let mut old_delta = page("a", "one", "two", "two", true, false, "sent");
+        old_delta.batch.as_mut().unwrap().changes[0]
+            .message
+            .as_mut()
+            .unwrap()
+            .role = MessageRole::User as i32;
+        assert!(cache.apply_history_page(&old_delta).unwrap());
+
+        let mut upgraded_replay = old_delta;
+        upgraded_replay.batch.as_mut().unwrap().changes[0]
+            .message
+            .as_mut()
+            .unwrap()
+            .delivery_id = "fixture-delivery".into();
+
+        assert!(!cache.apply_history_page(&upgraded_replay).unwrap());
+        let messages = cache.history_messages(&key("a")).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].message_id, "sent");
+        assert_eq!(
+            cache.history_cursor(&key("a")).unwrap().as_deref(),
+            Some("two")
+        );
+    }
+
     #[test]
     fn discarded_partial_views_and_empty_source_positions_do_not_erase_committed_history() {
         let cache = Cache::open_in_memory([1; 32]).unwrap();

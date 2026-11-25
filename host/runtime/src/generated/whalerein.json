@@ -2982,6 +2982,10 @@
                 "authored_at_unix_ms": {
                   "type": "int64",
                   "id": 4
+                },
+                "delivery_id": {
+                  "type": "string",
+                  "id": 5
                 }
               }
             },

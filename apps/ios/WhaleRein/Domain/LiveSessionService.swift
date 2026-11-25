@@ -1045,7 +1045,8 @@ final class LiveSessionService: SessionService {
                     attachment: block.attachment.map(map(attachment:))
                 )
             },
-            createdAtUnixMs: view.createdAtUnixMs
+            createdAtUnixMs: view.createdAtUnixMs,
+            deliveryId: view.deliveryId
         )
     }
 

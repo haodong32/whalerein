@@ -10170,8 +10170,10 @@ type ConversationMessage struct {
 	Role             MessageRole            `protobuf:"varint,2,opt,name=role,proto3,enum=whalerein.v1.MessageRole" json:"role,omitempty"`
 	Blocks           []*ContentBlock        `protobuf:"bytes,3,rep,name=blocks,proto3" json:"blocks,omitempty"`
 	AuthoredAtUnixMs int64                  `protobuf:"varint,4,opt,name=authored_at_unix_ms,json=authoredAtUnixMs,proto3" json:"authored_at_unix_ms,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Source-assigned delivery correlation for a committed user message.
+	DeliveryId    string `protobuf:"bytes,5,opt,name=delivery_id,json=deliveryId,proto3" json:"delivery_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ConversationMessage) Reset() {
@@ -10230,6 +10232,13 @@ func (x *ConversationMessage) GetAuthoredAtUnixMs() int64 {
 		return x.AuthoredAtUnixMs
 	}
 	return 0
+}
+
+func (x *ConversationMessage) GetDeliveryId() string {
+	if x != nil {
+		return x.DeliveryId
+	}
+	return ""
 }
 
 type MessageUpsert struct {
@@ -14422,13 +14431,15 @@ const file_whalerein_proto_rawDesc = "" +
 	"attachment\x18\x06 \x01(\v2\x1f.whalerein.v1.AttachmentContentH\x00R\n" +
 	"attachment\x12>\n" +
 	"\treasoning\x18\a \x01(\v2\x1e.whalerein.v1.ReasoningContentH\x00R\treasoningB\t\n" +
-	"\acontentJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05R\ttool_callR\vtool_result\"\xc6\x01\n" +
+	"\acontentJ\x04\b\x03\x10\x04J\x04\b\x04\x10\x05R\ttool_callR\vtool_result\"\xe7\x01\n" +
 	"\x13ConversationMessage\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12-\n" +
 	"\x04role\x18\x02 \x01(\x0e2\x19.whalerein.v1.MessageRoleR\x04role\x122\n" +
 	"\x06blocks\x18\x03 \x03(\v2\x1a.whalerein.v1.ContentBlockR\x06blocks\x12-\n" +
-	"\x13authored_at_unix_ms\x18\x04 \x01(\x03R\x10authoredAtUnixMs\"~\n" +
+	"\x13authored_at_unix_ms\x18\x04 \x01(\x03R\x10authoredAtUnixMs\x12\x1f\n" +
+	"\vdelivery_id\x18\x05 \x01(\tR\n" +
+	"deliveryId\"~\n" +
 	"\rMessageUpsert\x12;\n" +
 	"\amessage\x18\x01 \x01(\v2!.whalerein.v1.ConversationMessageR\amessage\x120\n" +
 	"\x06origin\x18\x02 \x01(\v2\x18.whalerein.v1.AttemptRefR\x06origin\"\xc3\x01\n" +

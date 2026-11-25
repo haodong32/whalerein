@@ -1193,6 +1193,8 @@ message ConversationMessage {
   MessageRole role = 2;
   repeated ContentBlock blocks = 3;
   int64 authored_at_unix_ms = 4;
+  // Source-assigned delivery correlation for a committed user message.
+  string delivery_id = 5;
 }
 message MessageUpsert { ConversationMessage message = 1; AttemptRef origin = 2; }
 message HistoryBatch {

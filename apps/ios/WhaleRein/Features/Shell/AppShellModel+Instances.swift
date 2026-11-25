@@ -173,6 +173,7 @@ extension AppShellModel {
         self.pendingInvitationLink = nil
         self.service = service
         self.drafts = DraftService(service: service)
+        self.outgoingStore = ConversationOutgoingStore()
         self.preferences = preferences
         self.dataDirectory = dataDirectory
         self.activeInstance = instance

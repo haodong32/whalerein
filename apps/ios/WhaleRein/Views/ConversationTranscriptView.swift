@@ -56,10 +56,12 @@ struct ConversationTranscriptView: View {
                     TranscriptGeometry(
                         offset: geometry.contentOffset.y + geometry.contentInsets.top,
                         extent: geometry.contentSize.height + geometry.contentInsets.top
-                            + geometry.contentInsets.bottom - geometry.containerSize.height,
-                        viewport: geometry.containerSize.height
+                            + geometry.contentInsets.bottom - geometry.bounds.height,
+                        viewport: geometry.bounds.height
                     )
-                } action: { before, after in
+                } action: { _, measured in
+                    let before = geometry
+                    let after = nativeGeometry ?? measured
                     geometry = after
                     if let target = trailingTarget, after.extent > before.extent,
                        nativeOffset.completeTrailingShift(to: target) {
@@ -128,7 +130,7 @@ struct ConversationTranscriptView: View {
                     }
                 }
                 .onChange(of: model.history.continuation) { _, _ in fillShortTranscript() }
-                .onChange(of: model.history.loading) { _, _ in fillShortTranscript() }
+                .onChange(of: model.canLoadOlderHistory, initial: true) { _, _ in fillShortTranscript() }
             }
 
             if model.history.positionChanged {
@@ -207,9 +209,22 @@ struct ConversationTranscriptView: View {
         if let anchor = visible.first { model.noteTopVisibleMessage(anchor.id) }
     }
 
+    private var nativeGeometry: TranscriptGeometry? {
+        // SwiftUI can report an already inset-reduced container. Use the
+        // same native viewport as offset correction when the probe is ready.
+        guard let scrollView = nativeOffset.scrollView, scrollView.bounds.height > 0 else { return nil }
+        let insets = scrollView.adjustedContentInset
+        return TranscriptGeometry(
+            offset: scrollView.contentOffset.y + insets.top,
+            extent: scrollView.contentSize.height + insets.top + insets.bottom - scrollView.bounds.height,
+            viewport: scrollView.bounds.height
+        )
+    }
+
     private func fillShortTranscript() {
-        guard geometry.viewport > 0 else { return }
-        Task { await model.updateHistoryViewport(canScroll: geometry.canScroll) }
+        let measured = nativeGeometry ?? geometry
+        guard measured.viewport > 0 else { return }
+        Task { await model.updateHistoryViewport(canScroll: measured.canScroll) }
     }
 
     private var transcriptRows: some View {

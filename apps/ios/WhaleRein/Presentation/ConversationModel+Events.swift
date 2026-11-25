@@ -111,8 +111,8 @@ extension ConversationModel {
                 state.messages[index] = message
                 return
             }
-            reconcileUserEcho(message)
-            state.messages.append(message)
+            let insertion = reconcileUserEcho(message) ?? state.messages.endIndex
+            state.messages.insert(message, at: insertion)
             if message.role == .assistant {
                 previewText = nil
                 previewAttemptId = nil
@@ -126,8 +126,8 @@ extension ConversationModel {
             if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
                 state.messages[index] = message
             } else {
-                reconcileUserEcho(message)
-                state.messages.append(message)
+                let insertion = reconcileUserEcho(message) ?? state.messages.endIndex
+                state.messages.insert(message, at: insertion)
             }
             if message.role == .assistant {
                 previewText = nil

@@ -29,6 +29,7 @@ class AdapterMappingTest {
                 ),
             ),
             createdAtUnixMs = 7,
+            deliveryId = null,
         )
         val mapped = message.toStateMessage(sequence = 3)
         assertEquals("m-1", mapped.messageId)

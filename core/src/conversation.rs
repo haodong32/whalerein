@@ -495,6 +495,7 @@ pub struct ConversationMessage {
     pub role: MessageRole,
     pub blocks: Vec<ContentBlock>,
     pub authored_at_unix_ms: i64,
+    pub delivery_id: Option<String>,
 }
 
 /// One typed notice with its ordered placement.
@@ -714,6 +715,8 @@ impl From<whalerein_proto::ConversationMessage> for ConversationMessage {
             role,
             blocks,
             authored_at_unix_ms: value.authored_at_unix_ms,
+            delivery_id: (role == MessageRole::User && !value.delivery_id.is_empty())
+                .then_some(value.delivery_id),
         }
     }
 }
