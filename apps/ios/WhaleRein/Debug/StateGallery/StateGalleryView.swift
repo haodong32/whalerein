@@ -40,7 +40,7 @@ struct StateGalleryView: View {
                     Section(group.category.title) {
                         ForEach(group.scenarios) { scenario in
                             Button {
-                                apply(scenario)
+                                Task { await apply(scenario) }
                             } label: {
                                 row(scenario)
                             }
@@ -81,10 +81,10 @@ struct StateGalleryView: View {
         .contentShape(Rectangle())
     }
 
-    private func apply(_ scenario: Scenario) {
+    private func apply(_ scenario: Scenario) async {
         // Rebuild first, then dismiss so the new group is the one presented.
         // The rebuilt group applies the scenario entry from its own start().
-        runtime.apply(scenario)
+        await runtime.apply(scenario)
         dismiss()
     }
 }

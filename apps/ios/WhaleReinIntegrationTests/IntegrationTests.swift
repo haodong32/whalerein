@@ -155,7 +155,7 @@ final class LiveCase {
     let dataDirectory: URL
     var service: LiveSessionService!
 
-    init(environment: StackEnvironment, kind: StackServiceKind = .standalone) throws {
+    init(environment: StackEnvironment, kind: StackServiceKind = .standalone) async throws {
         self.environment = environment
         self.control = StackControl(baseURL: environment.controlURL, token: environment.controlToken)
         self.kind = kind
@@ -165,10 +165,10 @@ final class LiveCase {
         self.dataDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("WhaleReinIntegration-\(identifier)", isDirectory: true)
         try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
-        self.service = try makeService()
+        self.service = try await makeService()
     }
 
-    private func makeService() throws -> LiveSessionService {
+    private func makeService() async throws -> LiveSessionService {
         let document = AppStorageLocations.appConfigurationURL(in: dataDirectory)
         let store = try AppConfigurationStore(documentPath: document.path)
         switch kind {
@@ -194,12 +194,13 @@ final class LiveCase {
             try store.activate(id: "cloud-staging")
         }
         let instance = store.activeInstance
-        return try LiveSessionService(
+        return try await LiveSessionService.open(
             configPath: instance.configPath,
-            keychainService: keychainService,
             appVersion: "0.1.0-integration",
             instanceId: instance.id
-        )
+        ) { [keychain] in
+            keychain
+        }
     }
 
     /// Drops the current Core instance (releasing its instance lock), then
@@ -212,7 +213,7 @@ final class LiveCase {
         try await Task.sleep(for: .milliseconds(700))
         service = nil
         try await Task.sleep(for: .milliseconds(300))
-        service = try makeService()
+        service = try await makeService()
     }
 
     func cleanup() {
@@ -418,8 +419,8 @@ class IntegrationTestCase: XCTestCase {
     func makeLive(
         _ environment: StackEnvironment,
         kind: StackServiceKind = .standalone
-    ) throws -> LiveCase {
-        let live = try LiveCase(environment: environment, kind: kind)
+    ) async throws -> LiveCase {
+        let live = try await LiveCase(environment: environment, kind: kind)
         liveCases.append(live)
         return live
     }
@@ -500,7 +501,7 @@ class IntegrationTestCase: XCTestCase {
 extension IntegrationTestCase {
     func testAC01_provenance() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         let revision = live.service.coreRevision
 
         XCTAssertFalse(revision.isEmpty)
@@ -520,7 +521,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC02_confirm() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         let prompt = try await live.pairFreshInvitation()
         XCTAssertEqual(prompt.hostId, environment.hostId)
 
@@ -533,7 +534,7 @@ extension IntegrationTestCase {
 
     func testAC02_invalidInvitation() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         // Same shape as a real invitation with a bogus one-time token.
         let invitation = try await live.control.freshInvitation()
         guard var components = URLComponents(string: invitation) else {
@@ -571,7 +572,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC03_decline() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         let invitation = try await live.control.freshInvitation()
         _ = try await live.service.pairingStart(invitation: invitation)
         try await live.service.pairingDecide(approved: false, expectedFingerprint: nil)
@@ -580,7 +581,7 @@ extension IntegrationTestCase {
 
     func testAC03_fingerprint() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         let invitation = try await live.control.freshInvitation()
         let prompt = try await live.service.pairingStart(invitation: invitation)
         do {
@@ -597,7 +598,7 @@ extension IntegrationTestCase {
 
     func testAC03_invalidInvitation() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         do {
             _ = try await live.service.pairingStart(invitation: "not-an-invitation")
             XCTFail("a malformed invitation unexpectedly produced a prompt")
@@ -613,7 +614,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC04_sessionSwitch() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
 
         let first = try await startWatching(live)
@@ -657,7 +658,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC05_00_previewThenFinal() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         let collector = try await startWatching(live)
         _ = await collector.wait(timeout: 20) { lastConnection(in: $0) == .connected }
@@ -689,7 +690,7 @@ extension IntegrationTestCase {
 
     func testAC05_historyLiveCut() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         let expected = try await live.expectedTranscript()
 
@@ -763,7 +764,7 @@ extension IntegrationTestCase {
 
     func testAC05_mqttLossHttpsOk() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         let collector = try await startWatching(live)
         let online = await collector.wait(timeout: 20) { lastConnection(in: $0) == .connected }
@@ -806,7 +807,7 @@ extension IntegrationTestCase {
 
     func testAC05_processRestart() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         let expected = try await live.expectedTranscript()
 
@@ -863,7 +864,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC06_idleSend() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         let watcher = try await startWatching(live)
         try await live.control.seedEvent("idle")
@@ -930,7 +931,7 @@ extension IntegrationTestCase {
 
     func testAC06_defaultQueue() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         let watcher = try await startWatching(live)
         try await live.control.seedEvent("running")
@@ -966,7 +967,7 @@ extension IntegrationTestCase {
 
     func testAC06_explicitQueue() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         _ = try await startWatching(live)
         try await live.control.seedEvent("running")
@@ -1007,7 +1008,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC08_allowOnce() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         let watch = try await startWatching(live)
         try await live.control.seedEvent("approval")
@@ -1046,7 +1047,7 @@ extension IntegrationTestCase {
 
     func testAC08_reject() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         let watch = try await startWatching(live)
         try await live.control.seedEvent("approval")
@@ -1075,7 +1076,7 @@ extension IntegrationTestCase {
 
     func testAC08_originalCard() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         let watch = try await startWatching(live)
         try await live.control.seedEvent("approval")
@@ -1106,7 +1107,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC09_changedVersion() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         try await live.control.seedEvent("approval")
 
@@ -1153,7 +1154,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC10_sameDeviceRestart() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
 
         let draft = "integration draft sentinel \(UUID().uuidString)"
@@ -1222,7 +1223,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC11_mqttHttpsDistinction() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         let watch = try await startWatching(live)
         _ = await watch.wait(timeout: 20) { lastConnection(in: $0) == .connected }
@@ -1252,7 +1253,7 @@ extension IntegrationTestCase {
 
     func testAC11_redaction() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
         _ = try await startWatching(live)
 
@@ -1305,7 +1306,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC12_cloudBoundaryWithoutLiveSession() async throws {
         let environment = try environment()
-        let live = try makeLive(environment, kind: .cloudStaging)
+        let live = try await makeLive(environment, kind: .cloudStaging)
 
         let initial = try await live.service.cloudStatus()
         XCTAssertNil(initial.account, "a fresh Cloud instance must not claim a signed-in account")
@@ -1347,7 +1348,7 @@ extension IntegrationTestCase {
 extension IntegrationTestCase {
     func testAC13_draftScopeWithEqualSessionIds() async throws {
         let environment = try environment()
-        let live = try makeLive(environment)
+        let live = try await makeLive(environment)
         try await live.pairFreshInvitation()
 
         let otherHost = "integration-second-host"

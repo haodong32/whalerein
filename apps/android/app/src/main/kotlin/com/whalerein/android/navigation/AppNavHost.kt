@@ -45,8 +45,9 @@ fun AppNavHost(
     appLinks: AppLinkRouter,
     platform: ActivityPlatform?,
     onRestartGraph: () -> Unit,
+    initialBackStack: List<NavKey> = listOf(StartupKey),
 ) {
-    val backStack = rememberNavBackStack(StartupKey)
+    val backStack = rememberNavBackStack(*initialBackStack.toTypedArray())
     val twoPane = isTwoPaneWindow()
     val strategy = remember(twoPane) { ListDetailSceneStrategy<NavKey>(twoPane) }
     val callback by appLinks.callback.collectAsStateWithLifecycle()

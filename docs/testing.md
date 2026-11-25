@@ -351,7 +351,8 @@ runs. Test failures and safety timeouts still fail; slow successful jobs pass.
 Add `run-full-ci` to request full checks/builds/coverage, native Rust matrices,
 contract checks when `proto` is affected, deployment acceptance when Access is
 affected, and iOS Unit and full UI plans for that revision. The iOS job matrix
-runs Unit and four UI shards on separate macOS runners. Each shard executes its
+runs Unit and four UI shards on separate Xcode 27.2 runners, plus an iOS 18 Unit
+job on Xcode 16.4. Each UI shard executes its
 share of the sorted XCTest inventory and uploads its own report. The iOS gate
 requires the entire matrix to succeed. Only that label event requests heavy
 work on PRs. After a new push, remove and re-add the label to verify the new

@@ -14,8 +14,11 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from ..errors import ToolMissingError
 from ..sources import SourceSelection
 from ..verification import Invocation, VerificationError, run_suite
+
+PROJECT_GENERATOR = ("bash", "apps/ios/scripts/generate-project.sh")
 
 PLANS = {"ios-unit": "Unit", "ios-ui": "UI", "ios-ui-smoke": "UI", "ios-integration": "Integration"}
 SMOKE_CASES = {
@@ -35,6 +38,16 @@ STACK_FIELDS = (
     "session_id",
     "teardown_marker",
 )
+
+
+def generate_project(root, runner):
+    if sys.platform != "darwin":
+        raise ToolMissingError("iOS project generation requires macOS and Xcode")
+    runner.out.info("Preparing the iOS Xcode project")
+    runner.run(PROJECT_GENERATOR, root, check=True)
+    project = root / "apps" / "ios" / "WhaleRein.xcodeproj"
+    runner.out.info(f"Xcode project: {project}")
+    return {"target": "ios", "project": str(project)}
 
 
 def _json(result, failure):
@@ -283,21 +296,9 @@ def _build(ctx, runner, root, captured, plan, destination):
     with _build_workspace(ctx, runner, root) as (source, derived):
         ios = source / "apps" / "ios"
         with ctx.phase("compilation"):
-            binding = ctx.run(
-                runner,
-                ["bash", "apps/mobile-bindings/scripts/build-xcframework.sh"],
-                source,
-                env={
-                    "WHALEREIN_MOBILE_SOURCE": captured.fingerprint,
-                    "WHALEREIN_MOBILE_SIMULATOR_ONLY": "1",
-                },
-            )
-            if not binding.ok:
-                raise VerificationError("mobile-bindings-build-failed")
-            revision = (ios / "Vendor" / "revision.txt").read_text().strip()
-            ctx.record_artifact("mobile-bindings", revision)
-            if not revision.startswith(f"source:{captured.fingerprint} "):
-                raise VerificationError("mobile-bindings-identity-mismatch")
+            generation = ctx.run(runner, PROJECT_GENERATOR, source)
+            if not generation.ok:
+                raise VerificationError("xcode-project-generation-failed")
             result = ctx.run(
                 runner,
                 [
@@ -315,9 +316,14 @@ def _build(ctx, runner, root, captured, plan, destination):
                     str(derived),
                 ],
                 source,
+                env={"WHALEREIN_MOBILE_SOURCE": captured.fingerprint},
             )
             if not result.ok:
                 raise VerificationError("xcode-build-failed")
+            revision = (ios / "Vendor" / "revision.txt").read_text().strip()
+            ctx.record_artifact("mobile-bindings", revision)
+            if not revision.startswith(f"source:{captured.fingerprint} "):
+                raise VerificationError("mobile-bindings-identity-mismatch")
         with ctx.phase("artifact-publication"):
             products = derived / "Build" / "Products"
             runs = list(products.glob(f"WhaleRein_{plan}_*.xctestrun"))

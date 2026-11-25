@@ -177,20 +177,19 @@ val generateUniffiKotlin = tasks.register<Exec>("generateUniffiKotlin") {
 
 fun registerCargoBuild(
     name: String,
-    abi: String,
     target: String,
     linkerName: String,
-    profile: String,
-    profileArgs: List<String>,
+    release: Boolean,
     output: Provider<RegularFile>,
 ): TaskProvider<Exec> = tasks.register<Exec>(name) {
+    val profile = if (release) "release" else "debug"
     group = "rust"
     description = "Compile whalerein-mobile for $target ($profile)"
     workingDir = repoRoot
     commandLine(
         buildList {
             add(cargoExecutable)
-            add("build")
+            add(if (release) "rustc" else "build")
             add("--locked")
             add("-p")
             add("whalerein-mobile")
@@ -198,7 +197,10 @@ fun registerCargoBuild(
             add("--no-default-features")
             add("--target")
             add(target)
-            addAll(profileArgs)
+            if (release) {
+                // Request only the Android shared library so Cargo can apply ThinLTO.
+                addAll(listOf("--release", "--crate-type=cdylib"))
+            }
             add("--target-dir")
             add(rustTargetDir.get().asFile.absolutePath)
         }
@@ -212,13 +214,32 @@ fun registerCargoBuild(
     environment("CC_$target", linker)
     environment("AR_$target", llvmAr.absolutePath)
     environment("RANLIB_$target", llvmRanlib.absolutePath)
-    environment(
-        "CARGO_ENCODED_RUSTFLAGS",
-        listOf(
-            "-Clink-arg=-Wl,-z,max-page-size=16384",
-            "-Clink-arg=-Wl,-z,common-page-size=16384",
-        ).joinToString("\u001f"),
-    )
+    val rustFlags = buildList {
+        add("-Clink-arg=-Wl,-z,max-page-size=16384")
+        add("-Clink-arg=-Wl,-z,common-page-size=16384")
+        // Standard RELR is supported from Android API 30. Our minimum is 31.
+        if (release) add("-Clink-arg=-Wl,--pack-dyn-relocs=relr")
+    }.joinToString("\u001f")
+    environment("CARGO_ENCODED_RUSTFLAGS", rustFlags)
+    inputs.property("rustFlags", rustFlags)
+    if (release) {
+        val releaseEnvironment = mapOf(
+            "CARGO_PROFILE_RELEASE_OPT_LEVEL" to "z",
+            "CARGO_PROFILE_RELEASE_LTO" to "thin",
+            "CARGO_PROFILE_RELEASE_CODEGEN_UNITS" to "1",
+            "LIBSQLITE3_FLAGS" to listOf(
+                "-USQLITE_ENABLE_FTS3",
+                "-USQLITE_ENABLE_FTS3_PARENTHESIS",
+                "-USQLITE_ENABLE_FTS5",
+                "-USQLITE_ENABLE_RTREE",
+                "-USQLITE_ENABLE_DBSTAT_VTAB",
+                "-USQLITE_ENABLE_LOAD_EXTENSION",
+                "-DSQLITE_OMIT_LOAD_EXTENSION",
+            ).joinToString(" "),
+        )
+        environment(releaseEnvironment)
+        inputs.properties(releaseEnvironment)
+    }
     inputs.files(rustInputs)
     inputs.property("mobileSource", mobileSource)
     inputs.property("target", target)
@@ -230,23 +251,19 @@ fun registerCargoBuild(
 val cargoBuildAndroidDebug = androidAbis.map { (abi, target, linkerName) ->
     registerCargoBuild(
         "cargoBuildAndroidDebug${abi.replace("-", "")}",
-        abi,
         target,
         linkerName,
-        "debug",
-        listOf(),
-        androidDebugLibs.getValue(abi),
+        release = false,
+        output = androidDebugLibs.getValue(abi),
     )
 }
 val cargoBuildAndroidRelease = androidAbis.map { (abi, target, linkerName) ->
     registerCargoBuild(
         "cargoBuildAndroidRelease${abi.replace("-", "")}",
-        abi,
         target,
         linkerName,
-        "release",
-        listOf("--release"),
-        androidReleaseLibs.getValue(abi),
+        release = true,
+        output = androidReleaseLibs.getValue(abi),
     )
 }
 

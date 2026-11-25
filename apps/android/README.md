@@ -79,6 +79,10 @@ application ID and one version sequence for both flavors. `noGms` carries no
 Google service dependency, manifest entry or initializer. Release packaging is
 minified and shrunk.
 
+The Android Release Rust build emits a shared library with size optimization,
+ThinLTO, one codegen unit and RELR relocations. It bundles SQLite without
+full-text search, RTree, DBSTAT or runtime extension loading.
+
 Signing is deliberately outside the tracked tree. Local development uses a
 repository-local test keystore created by `apps/android/scripts/`; release
 signing material comes from environment or keystore properties and is never
@@ -123,6 +127,51 @@ and statuses, the tested revision, and the device ABI, API level, release,
 effective page size and emulator flag when `adb` exposes them. The
 `android-bridge-jvm` target accepts `--only` and `--json`; it does not support
 `--list`, because Gradle has no body-free discovery mode for that suite.
+
+## Debug state gallery
+
+Debug builds have a second launcher entry, **WhaleRein State Gallery**. It lists
+deterministic scenarios that render the production Compose screens with
+in-memory fakes, so a scenario opens without sign-in, pairing, a Host, or the
+native Core graph. The catalog lives in `app/src/debug` and is the same list the
+`StateGalleryTest` instrumentation cases open.
+
+| Scenario ID | What it shows |
+|---|---|
+| `sessions.empty` | Empty session list, refresh and create-session entry |
+| `sessions.populated` | Selecting a session plus narrow back and wide list-detail |
+| `conversation.streaming` | Incremental output, final replacement and scroll position |
+| `conversation.approval` | Pending indicator and approval sheet with decision feedback |
+| `conversation.question` | Question options, open answer, submission and feedback |
+
+Each row starts a fresh `ScenarioActivity`, so leaving the scenario disposes its
+back stack, view models and observation subscriptions; opening it again builds
+new fixtures. Debug builds defer the production graph to the first production
+caller (`MainActivity`), while Release builds open it in
+`WhaleReinApplication.onCreate()` as before.
+
+Open the Gallery from Gradle without any IDE run configuration:
+
+```bash
+cd apps/android
+./gradlew :app:stateGallery
+```
+
+The task installs the `noGms` Debug APK and starts the Gallery Activity through
+the SDK's `adb`; `ANDROID_SERIAL` selects a device when more than one is
+connected. In Android Studio the same task is available under
+`app > Tasks > install > stateGallery`. To debug, start the task and then attach
+the debugger to `com.whalerein.android.debug`.
+
+Targeted instrumentation (a device is required):
+
+```bash
+./repo test android-ui --only StateGallery
+```
+
+Release artifacts must not contain the gallery Activity, its launcher entry,
+the scenario catalog or the fake dependencies. Verify the merged manifests and
+compiled classes for both product flavors before publishing a build.
 
 ## CI
 

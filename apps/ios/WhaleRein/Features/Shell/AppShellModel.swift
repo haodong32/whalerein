@@ -88,7 +88,7 @@ final class AppShellModel {
         set { newValue ? present(.sessionSwitcher) : dismissSheet() }
     }
 
-    let serviceFactory: (@MainActor (AppInstance) throws -> any SessionService)?
+    let serviceFactory: (@MainActor (AppInstance) async throws -> any SessionService)?
     let preferencesFactory: (@MainActor (AppInstance) -> PreferencesStore)?
     var didBootstrap = false
     var isBootstrapping = false
@@ -101,7 +101,7 @@ final class AppShellModel {
         options: LaunchOptions,
         configuration: AppConfigurationStore? = nil,
         activeInstance: AppInstance? = nil,
-        serviceFactory: (@MainActor (AppInstance) throws -> any SessionService)? = nil,
+        serviceFactory: (@MainActor (AppInstance) async throws -> any SessionService)? = nil,
         preferencesFactory: (@MainActor (AppInstance) -> PreferencesStore)? = nil
     ) {
         self.service = service

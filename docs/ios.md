@@ -33,39 +33,33 @@ Requirements: macOS with Xcode 16.4 or later, Rust with the
 (`rustup target add aarch64-apple-ios-macabi`).
 
 ```bash
-bash apps/mobile-bindings/scripts/build-xcframework.sh
+./repo generate ios
+open apps/ios/WhaleRein.xcodeproj
 ```
 
-The script builds the Rust library for device and Simulator with
-`--no-default-features` (the app injects the Keychain `SecretStore`), generates
-Swift bindings from the same crate revision, and writes
-`apps/ios/Vendor/WhaleReinMobile.xcframework` together with a recorded revision.
-Generated artifacts stay untracked.
+XcodeGen reads [project.yml](../apps/ios/project.yml) to generate the Xcode
+project and installs the pinned XcodeGen release on first use. Regenerate the
+project after editing that file.
+
+The shared schemes prepare Rust bindings in a Build pre-action. Build or run
+again after changing Rust or UniFFI. The hook checks the binding inputs and the
+selected platform slice, then calls the binding scripts when needed. Rust
+builds keep default Core features disabled because the app injects the
+Keychain `SecretStore`. The hook writes
+`apps/ios/Vendor/WhaleReinMobile.xcframework`, matching Swift bindings, and a
+recorded revision.
 
 The project compiles the generated `WhaleReinMobile.swift` and
 `WhaleReinMobileError.swift` into a dedicated `WhaleReinMobile` framework target
 and links the XCFramework there; the app and test targets import the resulting
 `WhaleReinMobile` module. The generated binding defines `HostSummary` and
 `DeliveryChoice`, so a separate module keeps them from colliding with the app's
-domain models. A "Check Vendor" build phase fails with an explicit message when
-`apps/ios/Vendor/` is missing; generated files are never vendored into git.
+domain models. The generated project and bindings stay untracked.
 
 The deployment target is iOS 18.0. The project targets both iPhone and iPad
 (`TARGETED_DEVICE_FAMILY = "1,2"`) and enables Mac Catalyst for the app and test
 targets. `DEVELOPER_DIR` must point at a full Xcode installation; a
 CommandLineTools-only selection cannot build or test the app.
-
-The shared XCFramework build produces iOS device and Simulator slices only.
-Mac Catalyst needs a separate Rust slice:
-
-```bash
-bash apps/mobile-bindings/scripts/build-xcframework.sh
-bash apps/ios/scripts/build-catalyst-slice.sh
-```
-
-The second script builds `aarch64-apple-ios-macabi`, adds a Mac Catalyst slice
-to the generated XCFramework, and reuses the generated Swift binding. Re-run it
-after rebuilding the binding.
 
 ```bash
 # iPad
@@ -146,6 +140,10 @@ apps/ios/scripts/release-surface-scan.sh
 The Debug state gallery (`conversation.gallery`) lists the same catalog and
 rebuilds the runtime group when a scenario is applied, so a state is inspectable
 on device without a UI test.
+
+GitHub-hosted Unit and UI jobs use Xcode 27.2 and an iOS 27 simulator. Full
+verification also runs the Unit plan on iOS 18 with Xcode 16.4 to check the
+deployment baseline.
 
 ## Local integration stack
 
@@ -340,9 +338,6 @@ Swift. The question fixture appears only when the app is launched with
   signing disabled. A 1000 pt wide window showed the sidebar and a 550 pt window
   fell back to the compact switcher. The Unit and UI plans run on the iOS
   Simulator, not Catalyst, and no signed Mac distribution exists.
-- `build-xcframework.sh` does not emit a Catalyst slice; run
-  `apps/ios/scripts/build-catalyst-slice.sh` after it. The generated slice is
-  gitignored.
 - The loopback stack is plaintext HTTP/MQTT with a FakeDSH fixture and one
   session. It does not establish TLS, multi-Host or real source persistence.
 - Textual is not adopted in the first baseline. Committed assistant text uses

@@ -1,3 +1,10 @@
+import org.gradle.api.DefaultTask
+import org.gradle.api.provider.Property
+import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.TaskAction
+import org.gradle.process.ExecOperations
+import javax.inject.Inject
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -192,4 +199,43 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    androidTestImplementation(libs.androidx.test.core)
+}
+
+/**
+ * Installs the noGms Debug APK and opens the debug-only State Gallery.
+ *
+ * The adb path comes from the Android Gradle plugin, so the task works from a
+ * fresh checkout without a hand-written IDE run configuration. `ANDROID_SERIAL`
+ * selects a device when several are connected.
+ */
+abstract class StateGalleryTask : DefaultTask() {
+    @get:Internal
+    abstract val adbExecutable: Property<String>
+
+    @get:Inject
+    abstract val execOperations: ExecOperations
+
+    @TaskAction
+    fun openGallery() {
+        execOperations.exec {
+            commandLine(
+                adbExecutable.get(),
+                "shell",
+                "am",
+                "start",
+                "-W",
+                "-S",
+                "-n",
+                "com.whalerein.android.debug/com.whalerein.android.gallery.StateGalleryActivity",
+            )
+        }
+    }
+}
+
+tasks.register<StateGalleryTask>("stateGallery") {
+    group = "install"
+    description = "Install the noGms Debug app and open the State Gallery"
+    dependsOn("installNoGmsDebug")
+    adbExecutable.set(androidComponents.sdkComponents.adb.map { it.asFile.absolutePath })
 }

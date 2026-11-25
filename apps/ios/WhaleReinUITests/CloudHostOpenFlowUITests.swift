@@ -4,6 +4,20 @@
 import XCTest
 
 final class CloudHostOpenFlowUITests: WhaleReinUITestCase {
+    func testDirectoryShowsShortHostIDAndOffersFullID() {
+        let app = launchScenario("cloud.signed-in")
+
+        let details = waitFor("cloud.host.details.travel-laptop")
+        XCTAssertTrue(details.label.contains("Travel Laptop"))
+        XCTAssertTrue(details.label.contains("laptop"))
+        details.tap()
+
+        let alert = app.alerts["Host ID"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 5))
+        XCTAssertTrue(alert.staticTexts["travel-laptop"].exists)
+        XCTAssertTrue(alert.buttons["Copy Host ID"].exists)
+    }
+
     func testEnrolledHostWithoutGrantConnectsThenOpensAndStays() {
         let app = launchScenario("cloud.signed-in")
 

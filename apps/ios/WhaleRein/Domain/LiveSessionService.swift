@@ -12,7 +12,8 @@ import WhaleReinMobile
 
 @MainActor
 final class LiveSessionService: SessionService {
-    let core: MobileCore
+    private let coreHandle: CoreHandle
+    var core: MobileCore { coreHandle.core }
     let instanceId: String
     let appVersion: String
 
@@ -31,78 +32,68 @@ final class LiveSessionService: SessionService {
 
     var coreRevision: String { WhaleReinMobile.coreRevision() }
 
+    // Core startup and shutdown can wait for default-QoS Rust threads.
+    private nonisolated static let coreQueue = DispatchQueue(
+        label: "com.whalerein.ios.core-lifecycle",
+        qos: .default
+    )
+
+    private final class CoreHandle {
+        // The owning retain is released on the lifecycle queue because the
+        // final UniFFI release can join the Rust runtime thread.
+        private let reference: Unmanaged<MobileCore>
+        var core: MobileCore { reference.takeUnretainedValue() }
+
+        init(_ core: MobileCore) {
+            reference = .passRetained(core)
+        }
+
+        deinit {
+            let reference = self.reference
+            LiveSessionService.coreQueue.async { reference.release() }
+        }
+    }
+
     // MARK: - Construction
 
-    /// Production initializer: the materialized per-instance TOML produced by
-    /// the authoritative app document plus an explicit Keychain namespace.
-    ///
-    /// Opening never creates or rewrites configuration; composition owns that.
-    convenience init(
+    /// Opens the materialized config off the main actor, then installs the
+    /// service and its event pump on the main actor.
+    static func open(
         configPath: URL,
-        keychainService: String,
-        appVersion: String,
-        instanceId: String
-    ) throws {
-        let store = KeychainSecretStore(service: keychainService)
-        try self.init(
-            configPath: configPath,
-            secretStore: store,
-            appVersion: appVersion,
-            instanceId: instanceId
-        )
-    }
-
-    /// Test initializer with an explicit materialized config and secret store.
-    init(
-        configPath: URL,
-        secretStore: any SecretStore,
         appVersion: String,
         instanceId: String,
-        diagnosticSink: (any CoreDiagnosticSink)? = nil
-    ) throws {
+        diagnosticSink: (any CoreDiagnosticSink)? = nil,
+        secretStore: @escaping @Sendable () throws -> any SecretStore
+    ) async throws -> LiveSessionService {
         do {
-            if let diagnosticSink {
-                self.core = try MobileCore.newWithDiagnosticSink(
-                    configPath: configPath.path,
-                    secretStore: secretStore,
-                    appVersion: appVersion,
-                    sink: diagnosticSink
-                )
-            } else {
-                self.core = try MobileCore(
-                    configPath: configPath.path,
-                    secretStore: secretStore,
-                    appVersion: appVersion
-                )
+            let core: MobileCore = try await withCheckedThrowingContinuation { continuation in
+                coreQueue.async {
+                    continuation.resume(with: Result {
+                        let store = try secretStore()
+                        if let diagnosticSink {
+                            return try MobileCore.newWithDiagnosticSink(
+                                configPath: configPath.path,
+                                secretStore: store,
+                                appVersion: appVersion,
+                                sink: diagnosticSink
+                            )
+                        }
+                        return try MobileCore(
+                            configPath: configPath.path,
+                            secretStore: store,
+                            appVersion: appVersion
+                        )
+                    })
+                }
             }
+            return LiveSessionService(core: core, appVersion: appVersion, instanceId: instanceId)
         } catch let error as MobileError {
             throw SessionServiceError(Self.map(error: error))
         }
-        self.instanceId = instanceId
-        self.appVersion = appVersion
-        self.eventPump = startEventPump()
-    }
-
-    /// Isolated Simulator/test initializer: process-local secrets, no Keychain.
-    static func memory(
-        configPath: URL,
-        appVersion: String,
-        instanceId: String
-    ) throws -> LiveSessionService {
-        let core: MobileCore
-        do {
-            core = try MobileCore.newWithMemorySecretStore(
-                configPath: configPath.path,
-                appVersion: appVersion
-            )
-        } catch let error as MobileError {
-            throw SessionServiceError(Self.map(error: error))
-        }
-        return LiveSessionService(core: core, appVersion: appVersion, instanceId: instanceId)
     }
 
     private init(core: MobileCore, appVersion: String, instanceId: String) {
-        self.core = core
+        self.coreHandle = CoreHandle(core)
         self.instanceId = instanceId
         self.appVersion = appVersion
         self.eventPump = startEventPump()
@@ -130,11 +121,10 @@ final class LiveSessionService: SessionService {
         let core = self.core
         return Task.detached(priority: .utility) { [weak self, core] in
             while !Task.isCancelled {
-                guard let self else { return }
-                let generation = await self.watchGenerationSnapshot()
+                guard let generation = await self?.watchGenerationSnapshot() else { return }
                 let events = core.pollEvents(timeoutMs: 500)
                 if events.isEmpty { continue }
-                await self.ingest(events, generation: generation)
+                await self?.ingest(events, generation: generation)
             }
         }
     }

@@ -21,6 +21,7 @@ final class AppRuntime {
     /// Monotonic fence. Every asynchronous result carries the generation it
     /// started under and is dropped when the runtime has moved on.
     private(set) var activationGeneration: UInt64 = 0
+    private var isApplyingScenario = false
     private var launchInterval: OSSignpostIntervalState?
 
     init(environment: AppEnvironment, legacy: AppShellModel, router: AppRouter? = nil) {
@@ -80,7 +81,7 @@ final class AppRuntime {
     static func bootstrap(
         arguments: [String] = CommandLine.arguments,
         fileManager: FileManager = .default
-    ) -> AppRuntime {
+    ) async -> AppRuntime {
         AppLog.install(AppLog(
             store: AppLog.makeDefaultStore(appVersion: Self.appVersion),
             appVersion: Self.appVersion
@@ -90,7 +91,7 @@ final class AppRuntime {
         #else
         let scenario = Scenario.normal
         #endif
-        let group = makeGroup(
+        let group = await makeGroup(
             scenario: scenario,
             arguments: arguments,
             fileManager: fileManager
@@ -100,9 +101,12 @@ final class AppRuntime {
 
     /// Replaces the current group with one built for `scenario`. Debug only:
     /// Release has no scenario surface, so the group never changes at runtime.
-    func apply(_ scenario: Scenario) {
+    func apply(_ scenario: Scenario) async {
         #if DEBUG
-        let group = Self.makeGroup(
+        guard !isApplyingScenario else { return }
+        isApplyingScenario = true
+        defer { isApplyingScenario = false }
+        let group = await Self.makeGroup(
             scenario: scenario,
             arguments: [],
             fileManager: .default
@@ -120,7 +124,7 @@ final class AppRuntime {
         scenario: Scenario,
         arguments: [String],
         fileManager: FileManager
-    ) -> RuntimeGroup {
+    ) async -> RuntimeGroup {
         #if DEBUG
         let options = LaunchOptions(scenario: scenario, arguments: arguments)
         #else
@@ -194,7 +198,7 @@ final class AppRuntime {
             activeInstance: activeInstance,
             usesFixtures: options.serviceMode == .fixtures,
             serviceFactory: { instance in
-                try Self.makeService(
+                try await Self.makeService(
                     for: instance,
                     options: options,
                     draftStore: draftStore,
@@ -220,7 +224,7 @@ final class AppRuntime {
                 instanceId: activeInstance?.id ?? "fixtures"
             )
         } else if let activeInstance {
-            service = (try? Self.makeService(
+            service = (try? await Self.makeService(
                 for: activeInstance,
                 options: options,
                 draftStore: draftStore,
@@ -245,7 +249,7 @@ final class AppRuntime {
             configuration: configuration,
             activeInstance: activeInstance,
             serviceFactory: { instance in
-                try environment.makeService(for: instance)
+                try await environment.makeService(for: instance)
             },
             preferencesFactory: { instance in
                 environment.makePreferences(instanceId: instance.id, fallback: instance.id)
@@ -265,7 +269,7 @@ final class AppRuntime {
         initiallyPaired: Bool,
         recoverableFallback: Bool = false,
         diagnosticSink: (any CoreDiagnosticSink)? = nil
-    ) throws -> any SessionService {
+    ) async throws -> any SessionService {
         switch options.serviceMode {
         case .fixtures:
             return AppComposition.makeFixtureService(
@@ -284,7 +288,7 @@ final class AppRuntime {
                 )
             }
             do {
-                return try AppComposition.makeLiveService(
+                return try await AppComposition.makeLiveService(
                     for: instance,
                     options: options,
                     appVersion: Self.appVersion,

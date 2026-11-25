@@ -33,9 +33,6 @@ struct RootView: View {
             let mapped = AppScenePhase(phase)
             Task { await app.handleScenePhase(mapped) }
         }
-        .onOpenURL { url in
-            Task { await app.handleOpenURL(url) }
-        }
         .sheet(isPresented: sheet(.settings)) {
             SettingsView(
                 settings: app.settings,

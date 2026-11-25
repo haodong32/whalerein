@@ -228,8 +228,17 @@ struct CloudDirectoryView: View {
                 .accessibilityIdentifier("cloud.directory.retry")
             }
         case .loaded(let hosts):
+            let shortIdCounts = hosts.reduce(into: [String: Int]()) { counts, host in
+                counts[host.shortHostId, default: 0] += 1
+            }
             ForEach(hosts) { host in
-                CloudDirectoryHostRow(cloud: cloud, host: host, connectivity: connectivity)
+                let shortId = host.shortHostId
+                CloudDirectoryHostRow(
+                    cloud: cloud,
+                    host: host,
+                    hostIdLabel: shortIdCounts[shortId] == 1 ? shortId : host.hostId,
+                    connectivity: connectivity
+                )
             }
         }
     }
