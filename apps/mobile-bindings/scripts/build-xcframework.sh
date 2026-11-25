@@ -122,7 +122,8 @@ log "Revision: $REVISION"
 build_slice() {
   local target=$1
   log "Building $target"
-  (cd "$ROOT" && cargo build -p whalerein-mobile --lib --no-default-features "$PROFILE_FLAG" --target "$target")
+  (cd "$ROOT" && IPHONEOS_DEPLOYMENT_TARGET="$MIN_IOS_VERSION" \
+    cargo build -p whalerein-mobile --lib --no-default-features "$PROFILE_FLAG" --target "$target")
   local lib="$CARGO_TARGET_DIR/$target/$PROFILE_DIR/libwhalerein_mobile.a"
   [[ -f "$lib" ]] || fail "static library not found for $target: $lib"
   printf '%s\n' "$lib"

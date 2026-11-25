@@ -183,6 +183,16 @@ def ios_matrix(suite: str = "") -> dict:
     if suite == "smoke":
         jobs.append({"name": "smoke", "target": "ios-ui-smoke", "shard": ""})
     elif suite != "unit":
+        jobs.append(
+            {
+                "name": "unit-ios18",
+                "target": "ios-unit",
+                "shard": "",
+                "runner": "macos-15",
+                "xcode": "16.4",
+                "ios_major": "18",
+            }
+        )
         for index in range(1, 5):
             jobs.append({"name": f"ui-{index}", "target": "ios-ui", "shard": f"{index}/4"})
     return {"include": jobs}

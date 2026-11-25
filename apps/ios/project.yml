@@ -1,0 +1,164 @@
+name: WhaleRein
+options:
+  minimumXcodeGenVersion: 2.48.0
+  projectFormat: xcode16_0
+  deploymentTarget:
+    iOS: "18.0"
+fileGroups:
+  - Config
+  - TestPlans
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.1.0"
+    CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+    GCC_C_LANGUAGE_STANDARD: gnu17
+    LOCALIZATION_PREFERS_STRING_CATALOGS: YES
+    ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+
+targetTemplates:
+  iOS:
+    platform: iOS
+    settings:
+      base:
+        CODE_SIGN_STYLE: Automatic
+        DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
+        GENERATE_INFOPLIST_FILE: YES
+        SUPPORTED_PLATFORMS: iphoneos iphonesimulator macosx
+        SUPPORTS_MACCATALYST: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+  HostedTests:
+    templates: [iOS]
+    type: bundle.unit-test
+    settings:
+      base:
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/WhaleRein.app/WhaleRein"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+          - "@loader_path/Frameworks"
+
+targets:
+  WhaleRein:
+    templates: [iOS]
+    type: application
+    sources:
+      - path: WhaleRein
+        type: syncedFolder
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.whalerein.ios
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Config/WhaleRein-Info.plist
+        ENABLE_PREVIEWS: YES
+        SWIFT_EMIT_LOC_STRINGS: NO
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    dependencies:
+      - target: WhaleReinMobile
+        embed: false
+        link: true
+
+  WhaleReinMobile:
+    templates: [iOS]
+    type: framework
+    sources:
+      - path: Vendor/WhaleReinMobile/WhaleReinMobile.swift
+        type: file
+        optional: true
+      - path: Vendor/WhaleReinMobile/WhaleReinMobileError.swift
+        type: file
+        optional: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.whalerein.ios.mobile
+        DEFINES_MODULE: YES
+        MACH_O_TYPE: staticlib
+        SKIP_INSTALL: YES
+    dependencies:
+      - framework: Vendor/WhaleReinMobile.xcframework
+        embed: false
+        link: true
+
+  WhaleReinTests:
+    templates: [HostedTests]
+    sources:
+      - path: WhaleReinTests
+        type: syncedFolder
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.whalerein.ios.tests
+    dependencies:
+      - target: WhaleRein
+        link: false
+
+  WhaleReinUITests:
+    templates: [iOS]
+    type: bundle.ui-testing
+    sources:
+      - path: WhaleReinUITests
+        type: syncedFolder
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.whalerein.ios.uitests
+        TEST_TARGET_NAME: WhaleRein
+    dependencies:
+      - target: WhaleRein
+        link: false
+
+  WhaleReinIntegrationTests:
+    templates: [HostedTests]
+    sources:
+      - path: WhaleReinIntegrationTests
+        type: syncedFolder
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.whalerein.ios.integrationtests
+    dependencies:
+      - target: WhaleRein
+        link: false
+      - target: WhaleReinMobile
+        embed: false
+        link: true
+
+schemes:
+  WhaleRein:
+    build:
+      preActions:
+        - &prepareBindings
+          name: Prepare Rust bindings
+          settingsTarget: WhaleRein
+          script: |
+            exec python3 "$SRCROOT/scripts/prepare-bindings.py"
+      targets:
+        WhaleRein: all
+        WhaleReinTests: [test]
+        WhaleReinUITests: [test]
+        WhaleReinIntegrationTests: [test]
+    test:
+      testPlans:
+        - path: TestPlans/Unit.xctestplan
+          defaultPlan: true
+        - path: TestPlans/Integration.xctestplan
+        - path: TestPlans/UI.xctestplan
+
+  WhaleReinTests:
+    build:
+      preActions: [*prepareBindings]
+      targets:
+        WhaleRein: all
+        WhaleReinTests: [test]
+    test:
+      testPlans:
+        - path: TestPlans/Unit.xctestplan
+
+  WhaleReinUITests:
+    build:
+      preActions: [*prepareBindings]
+      targets:
+        WhaleReinUITests: [test]
+    test:
+      testPlans:
+        - path: TestPlans/UI.xctestplan

@@ -95,11 +95,18 @@ def test_requested_ios_detects_core_without_requiring_swift_changes(tmp_path):
     jobs = json.loads(outputs["matrix"])["include"]
     assert [(job["target"], job["shard"]) for job in jobs] == [
         ("ios-unit", ""),
+        ("ios-unit", ""),
         ("ios-ui", "1/4"),
         ("ios-ui", "2/4"),
         ("ios-ui", "3/4"),
         ("ios-ui", "4/4"),
     ]
+    compatibility = next(job for job in jobs if job["name"] == "unit-ios18")
+    assert (compatibility["runner"], compatibility["xcode"], compatibility["ios_major"]) == (
+        "macos-15",
+        "16.4",
+        "18",
+    )
     assert len({job["name"] for job in jobs}) == len(jobs)
     assert outputs["integration"] == "false"
 
@@ -132,6 +139,7 @@ def test_ios_schedule_requests_stack_integration(tmp_path):
     assert outputs["build"] == "true"
     assert outputs["integration"] == "true"
     assert [job["target"] for job in json.loads(outputs["matrix"])["include"]] == [
+        "ios-unit",
         "ios-unit",
         "ios-ui",
         "ios-ui",
