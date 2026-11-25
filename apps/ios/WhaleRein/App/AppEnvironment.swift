@@ -43,7 +43,7 @@ struct AppEnvironment {
     /// True when the fixture service (rather than Core) backs this runtime.
     let usesFixtures: Bool
 
-    private let serviceFactory: (AppInstance) throws -> any SessionService
+    private let serviceFactory: @MainActor (AppInstance) async throws -> any SessionService
     private let preferencesFactory: (String, String) -> PreferencesStore
 
     init(
@@ -55,7 +55,7 @@ struct AppEnvironment {
         configuration: AppConfigurationStore?,
         activeInstance: AppInstance?,
         usesFixtures: Bool,
-        serviceFactory: @escaping (AppInstance) throws -> any SessionService,
+        serviceFactory: @escaping @MainActor (AppInstance) async throws -> any SessionService,
         preferencesFactory: @escaping (String, String) -> PreferencesStore
     ) {
         self.appVersion = appVersion
@@ -72,8 +72,8 @@ struct AppEnvironment {
 
     /// Builds the service for any instance the user can switch to. Throws so a
     /// failed switch can keep the previous runtime alive.
-    func makeService(for instance: AppInstance) throws -> any SessionService {
-        try serviceFactory(instance)
+    func makeService(for instance: AppInstance) async throws -> any SessionService {
+        try await serviceFactory(instance)
     }
 
     /// Per-instance non-secret UI state (last Host/session). The file lives

@@ -64,33 +64,27 @@ enum AppComposition {
         options: LaunchOptions,
         appVersion: String,
         diagnosticSink: (any CoreDiagnosticSink)? = nil
-    ) throws -> any SessionService {
-        let secretStore: any SecretStore
-        if usesFileSecrets(for: instance) {
-            do {
-                secretStore = try FileSecretStore(
-                    directory: secretsDirectory(for: instance)
-                )
-            } catch {
-                throw SessionServiceError(.internalError)
-            }
-        } else {
-            let keychain = KeychainSecretStore(
-                service: keychainService(for: instance, options: options)
-            )
-            guard keychain.availability() == .available else {
-                throw SessionServiceError(.keychainUnavailable)
-            }
-            secretStore = keychain
-        }
+    ) async throws -> any SessionService {
+        let fileSecrets = usesFileSecrets(for: instance)
+            ? secretsDirectory(for: instance)
+            : nil
+        let keychainNamespace = keychainService(for: instance, options: options)
         do {
-            return try LiveSessionService(
+            return try await LiveSessionService.open(
                 configPath: instance.configPath,
-                secretStore: secretStore,
                 appVersion: appVersion,
                 instanceId: instance.id,
                 diagnosticSink: diagnosticSink
-            )
+            ) {
+                if let fileSecrets {
+                    return try FileSecretStore(directory: fileSecrets)
+                }
+                let keychain = KeychainSecretStore(service: keychainNamespace)
+                guard keychain.availability() == .available else {
+                    throw SessionServiceError(.keychainUnavailable)
+                }
+                return keychain
+            }
         } catch let error as SessionServiceError {
             throw error
         } catch {
@@ -105,7 +99,7 @@ enum AppComposition {
         diagnosticSink: (any CoreDiagnosticSink)? = nil
     ) -> RecoverableSessionService {
         RecoverableSessionService(instanceId: instance.id) {
-            try makeLiveService(
+            try await makeLiveService(
                 for: instance,
                 options: options,
                 appVersion: appVersion,

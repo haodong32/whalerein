@@ -19,7 +19,8 @@ struct InstanceActivationTests {
 
     private func makeHarness(
         factoryError: SessionServiceError? = nil,
-        activateError: Error? = nil
+        activateError: Error? = nil,
+        beforeOpen: (() async throws -> Void)? = nil
     ) throws -> Harness {
         let dataDirectory = makeTempDirectory()
         let document = AppStorageLocations.appConfigurationURL(in: dataDirectory)
@@ -60,6 +61,7 @@ struct InstanceActivationTests {
             configuration: store,
             activeInstance: store.activeInstance,
             serviceFactory: { instance in
+                try await beforeOpen?()
                 if let factoryError { throw factoryError }
                 return instance.id == "standalone" ? newService : oldService
             },
@@ -92,6 +94,23 @@ struct InstanceActivationTests {
         #expect(harness.binding.activateCalls == ["standalone"])
         #expect(harness.oldService.stopWatchCount > 0)
         #expect(harness.app.preferences === harness.destinationPreferences)
+    }
+
+    @Test("an instance switch keeps the old runtime while the new service opens")
+    func keepsRuntimeWhileOpening() async throws {
+        let opening = SuspendedResponse<Void>()
+        let harness = try makeHarness(beforeOpen: { try await opening.wait() })
+        let switching = Task { await harness.app.switchInstance(id: "standalone") }
+        await opening.waitUntilStarted()
+
+        #expect(harness.app.service === harness.oldService)
+        #expect(harness.app.activeInstance?.id == "cloud-production")
+        #expect(harness.oldService.stopWatchCount == 0)
+        #expect(await harness.app.switchInstance(id: "standalone") == .conflict)
+
+        opening.resume(with: ())
+        #expect(await switching.value == nil)
+        #expect(harness.app.service === harness.newService)
     }
 
     @Test("a failed document write returns an error and keeps the old runtime")
