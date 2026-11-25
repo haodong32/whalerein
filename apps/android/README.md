@@ -146,6 +146,19 @@ new fixtures. Debug builds defer the production graph to the first production
 caller (`MainActivity`), while Release builds open it in
 `WhaleReinApplication.onCreate()` as before.
 
+Open the Gallery from Gradle without any IDE run configuration:
+
+```bash
+cd apps/android
+./gradlew :app:stateGallery
+```
+
+The task installs the `noGms` Debug APK and starts the Gallery Activity through
+the SDK's `adb`; `ANDROID_SERIAL` selects a device when more than one is
+connected. In Android Studio the same task is available under
+`app > Tasks > install > stateGallery`. To debug, start the task and then attach
+the debugger to `com.whalerein.android.debug`.
+
 Targeted instrumentation (a device is required):
 
 ```bash
