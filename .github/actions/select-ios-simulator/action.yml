@@ -3,6 +3,11 @@ description: >-
   Resolve one currently available iPhone simulator UDID so builds and tests do
   not depend on a device name that a runner image may have retired.
 
+inputs:
+  ios-major:
+    description: Select a simulator from this iOS major version when specified.
+    required: false
+
 outputs:
   udid:
     description: UDID of the selected iPhone simulator
@@ -14,15 +19,22 @@ runs:
     - name: Select an available iPhone simulator
       id: select
       shell: bash
+      env:
+        IOS_MAJOR: ${{ inputs.ios-major }}
       run: |
         udid=$(xcrun simctl list devices available --json | python3 -c '
-        import json, sys
+        import json, os, sys
+        major = os.environ["IOS_MAJOR"]
         devices = json.load(sys.stdin)["devices"]
         for runtime in sorted(devices, reverse=True):
+            version = runtime.rsplit(".iOS-", 1)[-1]
+            parts = version.split("-")
+            if major and (parts[0] != major or not all(part.isdecimal() for part in parts)):
+                continue
             for device in devices[runtime]:
                 if device.get("isAvailable") and device.get("name", "").startswith("iPhone"):
                     print(device["udid"])
                     raise SystemExit
-        raise SystemExit("no available iPhone simulator")
+        raise SystemExit("no available iPhone simulator" + (f" for iOS {major}" if major else ""))
         ')
         echo "udid=$udid" >> "$GITHUB_OUTPUT"

@@ -1,4 +1,5 @@
-# GitHub-hosted Ubuntu 26.04 is available before this label is built into actionlint.
+# GitHub-hosted runner labels newer than the pinned actionlint release.
 self-hosted-runner:
   labels:
     - ubuntu-26.04
+    - xcode-27

@@ -13,6 +13,8 @@ DESTINATION="${DESTINATION:-platform=iOS Simulator,name=iPhone 17 Pro}"
 
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
+bash "$IOS_DIR/scripts/generate-project.sh"
+
 BUILD_LOG="${DERIVED}/release-scan-build.log"
 mkdir -p "${DERIVED}"
 if ! xcodebuild \

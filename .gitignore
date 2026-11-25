@@ -53,7 +53,8 @@ certs/
 # Native plugin build output.
 deploy/mosquitto/plugin/*.so
 
-# Generated iOS vendor artifacts (XCFramework and Swift bindings).
+# Generated iOS project, XCFramework, and Swift bindings.
+apps/ios/WhaleRein.xcodeproj/
 apps/ios/Vendor/
 
 # Local release surface scan build output.

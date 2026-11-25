@@ -42,28 +42,31 @@ keeps the fixture path.
 
 ## Build and test
 
-The generated XCFramework and Swift binding are prerequisites:
+Generate the Xcode project before opening it:
 
 ```sh
-bash apps/mobile-bindings/scripts/build-xcframework.sh
-# Mac Catalyst needs a fourth Rust slice; run this after the command above:
-bash apps/ios/scripts/build-catalyst-slice.sh
+./repo generate ios
+open apps/ios/WhaleRein.xcodeproj
 ```
 
-The first command produces the iOS device and Simulator slices. The Catalyst
-script rebuilds the Rust binding for `aarch64-apple-ios-macabi` and adds a
-Mac Catalyst slice to the same generated XCFramework without changing the
-generated Swift binding. Re-run it after any `build-xcframework.sh` run or
-Rust binding change.
+Edit `project.yml` for target, scheme, and build setting changes, then rerun
+`./repo generate ios`. The generator downloads and verifies the pinned
+XcodeGen release on first use.
+
+Build or run the `WhaleRein` scheme in Xcode. Its Build pre-action prepares
+the Rust XCFramework and Swift bindings for the selected destination. It
+reuses current bindings and rebuilds them when Rust or UniFFI inputs change.
+Simulator builds need only the Simulator Rust target. Mac Catalyst builds
+also add the Catalyst slice. Build scripts and native `./repo test` targets
+generate the project as needed and use the same Xcode hook.
 
 The project has a `WhaleReinMobile` framework target that compiles the generated
 `WhaleReinMobile.swift`/`WhaleReinMobileError.swift` and links
 `Vendor/WhaleReinMobile.xcframework`. The app and integration test targets link
 that framework and `import WhaleReinMobile`. A dedicated module is required
 because the generated binding also defines `HostSummary` and `DeliveryChoice`,
-which would collide with the app's domain models in the same module. A
-"Check Vendor" build phase fails with a clear message when `apps/ios/Vendor/` is
-missing; generated artifacts remain gitignored.
+which would collide with the app's domain models in the same module. The generated
+project and `apps/ios/Vendor/` are Git-ignored.
 
 ```sh
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
@@ -427,9 +430,6 @@ point.
   wide window shows the sidebar; a 550 pt window falls back to the compact
   switcher). The Unit and UI plans are executed on the iOS Simulator; no Catalyst
   test plan or signed Mac distribution is part of this milestone.
-- `build-xcframework.sh` does not emit a Catalyst slice by itself. Run
-  `apps/ios/scripts/build-catalyst-slice.sh` after it before building Catalyst;
-  the slice is generated and gitignored like the other binding artifacts.
 - No explicit minimum Catalyst window size is imposed because a hard minimum
   would block resizing below the breakpoint. The default window opens wide
   enough for the sidebar and can be resized narrower to exercise the sheet.
