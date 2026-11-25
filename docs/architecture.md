@@ -9,11 +9,11 @@ The first version targets one host, one CLI, and one server stack.
 ```mermaid
 flowchart LR
     CLI[CLI] --> Core[Rust Core]
-    Core -->|HTTPS requests/results| Access[Go Access]
+    Core -->|HTTPS commands, recovery and objects| Access[Go Access]
     Access --> DB[(PostgreSQL)]
     Access <-->|MQTT| Broker[Mosquitto + plugin]
     Broker <-->|MQTT| Plugin[Node.js plugin]
-    Broker -->|MQTT events| Core
+    Broker <-->|MQTT queries, replies, control and previews| Core
     Plugin --> Adapter[DSH adapter]
     Adapter --> DSH[DSH]
 ```

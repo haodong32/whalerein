@@ -98,7 +98,7 @@ def test_journey_first_self_hosted_message(scenario):
         watch.wait(lambda value: _event(value).get("type") == "state", timeout=20)
         device.send_confirmed(session, "first self-hosted message")
         watch.wait(
-            lambda value: any(
+            lambda value: _event(value).get("role") == "ASSISTANT" and any(
                 "first self-hosted message" in text for text in _texts(_event(value))
             ),
             timeout=25,
@@ -124,13 +124,13 @@ def test_journey_approval_expires_while_away(scenario, paired_device):
     """An expired approval authorizes nothing and leaves no silent pending wait."""
     session = _session(scenario)
     scenario.dsh.start_running(session)
-    request_approval(scenario, session, ttl_ms=1500)
+    request_approval(scenario, session, ttl_ms=5000)
     listed = paired_device.approvals(session)
     assert len(listed) == 1
     assert listed[0]["expires_at_unix_ms"] > 0
 
     # The operator is away (locked phone): no interaction until the lifetime passed.
-    time.sleep(1.8)
+    time.sleep(max(0, listed[0]["expires_at_unix_ms"] / 1000 - time.time()))
     assert paired_device.approvals(session) == []
 
     code, values = invoke_approval(paired_device, "approve", listed[0])
@@ -138,7 +138,7 @@ def test_journey_approval_expires_while_away(scenario, paired_device):
     assert values[-1].get("data") is None
     assert effects(scenario, "resolveApproval") == 0
 
-    observation = paired_device.call("session", "wait", session, "--timeout", "1")
+    observation = paired_device.call("session", "wait", session, "--timeout", "8")
     # An expired approval releases the native turn: the session is idle, with no
     # phantom pending input. It must not report a stale running/input-required.
     assert observation["reason"] == "idle"
@@ -752,7 +752,8 @@ def test_journey_token_and_certificate_rotation_keeps_grants(scenario, paired_de
         sent = paired_device.send_confirmed(session, "after rotation")
         assert sent["status"] == "succeeded"
         watch.wait(
-            lambda value: any("after rotation" in text for text in _texts(_event(value))),
+            lambda value: _event(value).get("role") == "ASSISTANT"
+            and any("after rotation" in text for text in _texts(_event(value))),
             timeout=25,
         )
     finally:
@@ -779,7 +780,7 @@ def test_journey_token_and_certificate_rotation_keeps_grants(scenario, paired_de
 def test_journey_frozen_host_clock_and_backoff(scenario, paired_device):
     """A long gap expires approvals and bounds the reconnect delay."""
     session = _session(scenario)
-    request_approval(scenario, session, ttl_ms=1200)
+    request_approval(scenario, session, ttl_ms=5000)
     card = paired_device.approvals(session)[0]
 
     stop_process(scenario.plugin)
@@ -787,7 +788,7 @@ def test_journey_frozen_host_clock_and_backoff(scenario, paired_device):
         restart_broker(scenario)
         wait_online(paired_device, scenario.host, online=False, timeout=30)
         # The approval lifetime passes while the Host process timers are frozen.
-        time.sleep(1.5)
+        time.sleep(max(0, card["expires_at_unix_ms"] / 1000 - time.time()))
     finally:
         continue_process(scenario.plugin)
 

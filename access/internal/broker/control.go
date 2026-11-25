@@ -50,6 +50,7 @@ type SnapshotClient struct {
 
 // Notification is one ordered connection lifecycle event.
 type Notification struct {
+	SessionID   string
 	Sequence    uint64
 	Event       string
 	ClientID    string
@@ -247,12 +248,13 @@ func (c *Control) handleReply(payload []byte) {
 func (c *Control) handleNotification(payload []byte) {
 	fields := parseControlLines(payload)
 	notification := &Notification{
-		Event:    firstField(fields, "event"),
-		ClientID: firstField(fields, "client"),
-		Kind:     firstField(fields, "kind"),
-		HostID:   firstField(fields, "host"),
-		DeviceID: firstField(fields, "device"),
-		Epoch:    firstField(fields, "epoch"),
+		Event:     firstField(fields, "event"),
+		SessionID: firstField(fields, "session"),
+		ClientID:  firstField(fields, "client"),
+		Kind:      firstField(fields, "kind"),
+		HostID:    firstField(fields, "host"),
+		DeviceID:  firstField(fields, "device"),
+		Epoch:     firstField(fields, "epoch"),
 	}
 	notification.Sequence, _ = strconv.ParseUint(firstField(fields, "seq"), 10, 64)
 	notification.ConnID, _ = strconv.ParseUint(firstField(fields, "conn"), 10, 64)

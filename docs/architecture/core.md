@@ -286,6 +286,19 @@ than an HTTPS handshake. The command lane keeps HTTPS submission, exact
 heartbeat and authoritative result read, and its notice handling stays on the
 same owner.
 
+A query deadline covers connection readiness, publication and receipt. Dropping
+the operation releases its correlation entry. A broker credential refusal is
+checked against Access before it is treated as a grant decision. Device-scoped
+event topics may carry ciphertext for a sibling connection. An observer opens
+only envelopes addressed to its own Host, Device and Noise channel.
+
+Session wait uses read-only Host observations with one monotonic caller
+deadline. Each slice has a bounded reply window so a lost transient waiter can
+be recovered before the overall deadline. Only a verified Host timeout
+observation near the end of that deadline is returned as a business timeout.
+A late or missing reply is a transport error. Cancellation addresses the same
+session, wait ID and Noise channel as the native wait.
+
 The initial device transport has one active watch per Core instance. Competing
 calls fail explicitly rather than opening clients with the same MQTT identity.
 Timeout/callback cancellation releases admission and aborts the pump; normal

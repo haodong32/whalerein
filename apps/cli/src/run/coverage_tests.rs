@@ -70,6 +70,7 @@ impl Fixture {
             signal,
             &diagnostics,
             DiagnosticContext::new(diagnostics.clone()),
+            &mut std::io::sink(),
         ))
         .await
     }

@@ -650,7 +650,8 @@ async fn run_connection(
     // A preview or control frame that arrives during attach is queued by this
     // subscription instead of being dropped by the shared connection.
     let (subscription, detach) = connection.subscribe();
-    connection.wait_ready(cancellation).await?;
+    core.wait_host_transport(&key.host_id, &connection, cancellation)
+        .await?;
     let connection_generation = connection.generation();
     let channel = core.ensure_channel(&key.host_id, fresh).await?;
     let interrupted = subscription.interrupted.clone();
@@ -1257,9 +1258,16 @@ async fn handle_envelope(
     sync: Option<&crate::sync::SyncService>,
     envelope: &EventEnvelope,
 ) -> CoreResult<Flow> {
-    // A referenced control event is fetched and verified over HTTPS before
-    // AEAD; a partial or failed fetch never becomes an event. Live envelopes
-    // are always inline, so this resolves to the same bytes without a fetch.
+    // The control and live topics are shared by this Device's connections.
+    // Only the observation that owns the Noise channel can open the event.
+    if envelope.device_id == channel.device_id()
+        && envelope.host_id == channel.host_id()
+        && !envelope.channel_id.is_empty()
+        && envelope.channel_id != channel.channel_id()
+    {
+        return Ok(Flow::Continue);
+    }
+    // Resolve and verify a referenced control event before opening it.
     let envelope = core.resolve_event_envelope(envelope).await?;
     let update = match crate::sync::open_event(channel, &envelope)? {
         crate::sync::OpenedEvent::Update(update) => update,

@@ -160,14 +160,14 @@ func TestPresenceTracksManagedSessionConnectionRefs(t *testing.T) {
 	presence.SetAvailable(true)
 	ref := ConnectionRef{Epoch: "0123456789abcdef", ID: 11}
 	presence.HandleNotification(&Notification{
-		Sequence: 1, Event: "connected", Kind: "session", DeviceID: "d1",
+		Sequence: 1, Event: "connected", Kind: "session", SessionID: "managed-login", DeviceID: "d1",
 		ConnID: ref.ID, Epoch: ref.Epoch, AtUnixMilli: time.Now().UTC().UnixMilli(),
 	})
-	if !presence.DeviceConnectionActive("d1", ref) {
+	if login, active := presence.DeviceConnectionSession("d1", ref); !active || login != "managed-login" {
 		t.Fatal("managed session ref was not tracked")
 	}
 	presence.HandleNotification(&Notification{
-		Sequence: 2, Event: "disconnected", Kind: "session", DeviceID: "d1",
+		Sequence: 2, Event: "disconnected", Kind: "session", SessionID: "managed-login", DeviceID: "d1",
 		ConnID: ref.ID, Epoch: ref.Epoch, AtUnixMilli: time.Now().UTC().UnixMilli(),
 	})
 	if presence.DeviceConnectionActive("d1", ref) {

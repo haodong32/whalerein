@@ -1282,6 +1282,7 @@ def test_native_pair_send_revoke(scenario, paired_device):
             http("/v1/hosts", token=bearer)
 
 
+@pytest.mark.relay_directory
 def test_native_stream_prefix_and_fixed_cut(scenario, paired_device):
     """When an actual native Attempt streams a large message and later history grows, intact preview prefixes match the final message and fixed-cut paging excludes the later turn."""
     session = scenario.create()

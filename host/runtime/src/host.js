@@ -65,22 +65,6 @@ function admittedConnectionScope(request) {
   return { connectionRef, grantGeneration, enrollmentGeneration }
 }
 
-/** Best-effort session scope for a relay-object reference. */
-function payloadSessionId(payload) {
-  for (const name of [
-    'read_history', 'watch_session', 'check_versions', 'unwatch_session',
-    'get_session', 'list_questions', 'get_question', 'wait_session', 'read_wait_state',
-    'read_pending_queue', 'read_message_reply', 'list_approvals',
-  ]) {
-    const value = payload?.[name]?.session_id
-    if (typeof value === 'string' && value !== '') return value
-  }
-  const session = payload?.open_attachment?.session?.session_id
-    ?? payload?.pull_attachment?.session?.session_id
-    ?? payload?.close_attachment?.session?.session_id
-  return typeof session === 'string' && session !== '' ? session : undefined
-}
-
 export class HostRuntime {
   #started = false
   #starting = null
@@ -285,7 +269,7 @@ export class HostRuntime {
     // A connection-scoped lifecycle close replaces the Device Will. Only the
     // observations bound to that exact Broker connection instance end; a
     // delayed close for an old reference can never touch a newer observation.
-    if (event?.event === 'connection_closed' || event?.event === 'device_offline') {
+    if (event?.event === 'connection_closed') {
       return this.#handleConnectionClosed(event)
     }
   }
@@ -701,7 +685,6 @@ export class HostRuntime {
     if (deadline > 0 && isExpired(deadline, this.now())) {
       return await this.#reply(request, { status: 'rejected', errorCode: 'expired' })
     }
-    request.sessionId = payloadSessionId(payload)
     // Local stop fence: once shutdown begins, no fresh read, watch or send may
     // be admitted. A command is journal-fenced so it can never execute later
     // when the same Host resumes; accepted work keeps its recorded outcome.
@@ -806,9 +789,7 @@ export class HostRuntime {
     const replyOptions = {
       envelopeLimit: receiverLimitBytes,
       requestId: request.request_id,
-      expiresAt: Number(request.expires_at_unix_ms) || undefined,
-      upstreamExpirySeconds: request.upstreamExpirySeconds,
-      sessionId: request.sessionId,
+      expiresAt: request.replyDeadline ?? (Number(request.expires_at_unix_ms) || undefined),
       connectionRef: request.connection_ref,
       enrollmentGeneration: Number(request.enrollment_generation) || 0,
     }

@@ -60,6 +60,7 @@ func (f *fakeApplier) Allow(_ context.Context, hostID, deviceID string) error {
 }
 
 type recordedRequest struct {
+	id     string
 	op     string
 	fields []string
 }
@@ -79,7 +80,7 @@ func parseRequest(t *testing.T, payload []byte) recordedRequest {
 		}
 		switch key {
 		case "id":
-			request.fields = append(request.fields, "id "+value)
+			request.id = value
 		case "op":
 			request.op = value
 		default:
@@ -101,12 +102,6 @@ func newTestControl(t *testing.T, respond func(request recordedRequest) (extra s
 		}
 		request := parseRequest(t, payload)
 		*requests = append(*requests, request)
-		id := ""
-		for _, field := range request.fields {
-			if strings.HasPrefix(field, "id ") {
-				id = strings.TrimPrefix(field, "id ")
-			}
-		}
 		extra, err := respond(request)
 		if err != nil {
 			return err
@@ -114,7 +109,7 @@ func newTestControl(t *testing.T, respond func(request recordedRequest) (extra s
 		if request.op == "snapshot" && !strings.Contains(extra, "epoch ") {
 			extra = "epoch test-broker-epoch\n" + extra
 		}
-		reply := "whalerein/1\nid " + id + "\nok\n" + extra
+		reply := "whalerein/1\nid " + request.id + "\nok\n" + extra
 		control.HandleMessage(broker.ControlReplyFilter, []byte(reply))
 		return nil
 	}

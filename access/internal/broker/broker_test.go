@@ -86,17 +86,6 @@ func TestTopicHelpersBuildAndParseValidTopics(t *testing.T) {
 	if PresenceTopic("h1") != "whalerein/v1/h/h1/presence" {
 		t.Fatalf("presence topic = %q", PresenceTopic("h1"))
 	}
-	if DeviceWillTopic("d1") != "whalerein/v1/presence/device/d1" || DeviceWillFilter != "whalerein/v1/presence/device/+" {
-		t.Fatalf("device will topics = %q %q", DeviceWillTopic("d1"), DeviceWillFilter)
-	}
-	if deviceID, ok := ParseDeviceWillTopic(DeviceWillTopic("d1")); !ok || deviceID != "d1" {
-		t.Fatalf("parse device will = %q %v", deviceID, ok)
-	}
-	for _, bad := range []string{"", DeviceWillFilter, "whalerein/v1/presence/device/", "whalerein/v1/presence/device/d1/x", "whalerein/v1/presence/device/#"} {
-		if _, ok := ParseDeviceWillTopic(bad); ok {
-			t.Fatalf("expected invalid device will topic %q", bad)
-		}
-	}
 	parsed, err := ParseTopic(PresenceTopic("h1"))
 	if err != nil || parsed.HostID != "h1" || parsed.Kind != KindPresence {
 		t.Fatalf("parse presence = %+v %v", parsed, err)
@@ -104,7 +93,9 @@ func TestTopicHelpersBuildAndParseValidTopics(t *testing.T) {
 }
 
 func newPresence() *Presence {
-	return NewPresence(50*time.Millisecond, diagnostics.NewMetrics(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p := NewPresence(50*time.Millisecond, diagnostics.NewMetrics(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p.SetBrokerEpoch("1111111111111111")
+	return p
 }
 
 func TestPresenceCacheTracksConnectionCountsAndExpiry(t *testing.T) {
@@ -256,11 +247,8 @@ func TestBrokerReconnectsAfterFailureAndStopsOnCancellation(t *testing.T) {
 	subscribed := append([]string(nil), session.subscribed...)
 	subscribedQoS := append([]byte(nil), session.subscribedQoS...)
 	session.mu.Unlock()
-	if len(subscribed) != 7 {
+	if len(subscribed) != 6 {
 		t.Fatalf("subscribed = %v", subscribed)
-	}
-	if subscribed[4] != DeviceWillFilter {
-		t.Fatalf("device will filter not subscribed: %v", subscribed)
 	}
 	if subscribed[2] != DeviceQueryFilter {
 		t.Fatalf("device query filter not subscribed: %v", subscribed)
@@ -1026,12 +1014,41 @@ func TestBrokerRoutesQueryAndCompletesOnlyThroughTheQueryHandler(t *testing.T) {
 	}
 }
 
+func TestNewBrokerEpochInvalidatesAdvertisementsBeforeConnectionNumberReuse(t *testing.T) {
+	service := testService(t, &fakeConnector{})
+	presence := service.Presence()
+	presence.SetBrokerEpoch("1111111111111111")
+	receivers := service.Receivers()
+	host := receiverRoute{kind: "host", hostID: "h1"}
+	install := func() bool {
+		receivers.NoteConnection(host, 7, "host-client", true)
+		return receivers.Register(host, 7, 1, config.DefaultTransportEffective())
+	}
+	if !install() {
+		t.Fatal("first advertisement was refused")
+	}
+	service.advertised["h1"] = "sent"
+	presence.SetBrokerEpoch("1111111111111111")
+	if _, ok := receivers.Lookup(RequestTopic("h1")); !ok || service.advertised["h1"] == "" {
+		t.Fatal("snapshot of the same epoch discarded the live advertisement")
+	}
+	presence.SetBrokerEpoch("2222222222222222")
+	if _, ok := receivers.Lookup(RequestTopic("h1")); ok || service.advertised["h1"] != "" {
+		t.Fatal("new broker inherited an obsolete receive budget")
+	}
+	if !install() {
+		t.Fatal("reused connection number was rejected in the new epoch")
+	}
+}
+
 func TestBrokerCancelsWaitersOnDeviceDisconnect(t *testing.T) {
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{newFakeSession()}})
 	handler := &fakeQueryHandler{}
 	service.SetQueryHandler(handler)
+	service.Presence().SetBrokerEpoch("0123456789abcdef")
+	service.handleNotification(&Notification{Sequence: 1, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 7, Epoch: "0123456789abcdef"})
 	service.handleNotification(&Notification{
-		Sequence: 1, Event: "disconnected", Kind: "device", DeviceID: "d1",
+		Sequence: 2, Event: "disconnected", Kind: "device", DeviceID: "d1",
 		ConnID: 7, Epoch: "0123456789abcdef",
 	})
 	if len(handler.canceled) != 1 || handler.canceled[0] != (ConnectionRef{Epoch: "0123456789abcdef", ID: 7}) {

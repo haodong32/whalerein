@@ -1,6 +1,6 @@
 {
   "schema": "whalerein/transport-profiles/v1",
-  "comment": "Single packaged transport profile vocabulary shared by Access, Host and Core. All byte limits are encoded bytes. packetBytes is the largest complete encoded MQTT PUBLISH accepted; envelopeBytes is the largest complete encoded message carried inline or by reference. brokerPacketLimitBytes is the deployment's checked broker PUBLISH ceiling: no profile may exceed it. A profile is validated before readiness; invalid relations fail startup or connection setup. Application protocol version stays 1 and the relay epoch stays 3.",
+  "comment": "Single packaged transport profile vocabulary shared by Access, Host and Core. All byte limits are encoded bytes. packetBytes is the largest complete encoded MQTT PUBLISH accepted; envelopeBytes is the largest complete encoded message carried inline or by reference. brokerPacketLimitBytes is the deployment's checked broker PUBLISH ceiling: no profile may exceed it. A profile is validated before readiness; invalid relations fail startup or connection setup. The wire protocol defines the relay epoch independently of these limits.",
   "defaultProfile": "default",
   "brokerPacketLimitBytes": 1048576,
   "profiles": {

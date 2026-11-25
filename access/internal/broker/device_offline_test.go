@@ -8,13 +8,13 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
 
 func offlineService(t *testing.T, hosts func(context.Context, string) ([]string, error)) (*Service, *fakeSession) {
 	t.Helper()
 	session := newFakeSession()
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{session}})
+	service.Presence().SetBrokerEpoch("0123456789abcdef")
 	service.deviceHosts = hosts
 	service.setSession(session, true)
 	return service, session
@@ -28,7 +28,7 @@ func TestDeviceOfflinePublishesHostScopedJsonToEveryAuthorizedHost(t *testing.T)
 		return []string{"h1", "h2"}, nil
 	})
 	observed := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
-	service.handleDeviceOffline("d1", PresenceSourceWill, observed, ConnectionRef{})
+	service.handleDeviceOffline("d1", PresenceSourceBroker, observed, ConnectionRef{})
 
 	session.mu.Lock()
 	defer session.mu.Unlock()
@@ -50,7 +50,7 @@ func TestDeviceOfflinePublishesHostScopedJsonToEveryAuthorizedHost(t *testing.T)
 	if err := json.Unmarshal(session.payloads[0], &event); err != nil {
 		t.Fatal(err)
 	}
-	if event.Event != "connection_closed" || event.DeviceID != "d1" || event.Reason != "will" {
+	if event.Event != "connection_closed" || event.DeviceID != "d1" || event.Reason != PresenceSourceBroker {
 		t.Fatalf("event = %+v", event)
 	}
 	if _, err := time.Parse(time.RFC3339Nano, event.ObservedAt); err != nil {
@@ -116,52 +116,13 @@ func TestDeviceOfflinePublishFailureIsCountedAndSkipsInvalidHosts(t *testing.T) 
 	}
 }
 
-func TestHandleMessageRoutesDeviceWillAndIgnoresHostPresence(t *testing.T) {
+func TestRetiredDeviceWillCannotPublishHostLifecycle(t *testing.T) {
 	service, session := offlineService(t, func(context.Context, string) ([]string, error) {
 		return []string{"h1"}, nil
 	})
-	var results, events int
-	service.SetResultHandler(func(context.Context, string, *whalereinv1.HostResult) error {
-		results++
-		return nil
-	})
-	service.SetEventHandler(func(context.Context, string, []byte) error {
-		events++
-		return nil
-	})
-
-	service.HandleMessage(Message{Topic: DeviceWillTopic("d1"), Payload: []byte(`{"event":"device_offline","device_id":"d1"}`)})
-	session.mu.Lock()
-	published := append([]string(nil), session.published...)
-	session.mu.Unlock()
-	if len(published) != 1 || published[0] != "whalerein/v1/h/h1/presence" {
-		t.Fatalf("published = %v", published)
-	}
-	if results != 0 || events != 0 {
-		t.Fatalf("presence entered result/event routing: results=%d events=%d", results, events)
-	}
-	// A host-scoped presence message is not a wire result/event and must be
-	// ignored even if an ACL change echoed it to Access.
-	service.HandleMessage(Message{Topic: PresenceTopic("h1"), Payload: []byte(`{"event":"device_offline"}`)})
-	if results != 0 || events != 0 {
-		t.Fatalf("presence topic entered routing: results=%d events=%d", results, events)
-	}
-}
-
-func TestRepeatedDeviceWillOnlyPublishesOnceUntilDeviceReconnects(t *testing.T) {
-	service, session := offlineService(t, func(context.Context, string) ([]string, error) {
-		return []string{"h1"}, nil
-	})
-	payload := []byte(`{"event":"device_offline","device_id":"d1"}`)
-	service.HandleMessage(Message{Topic: DeviceWillTopic("d1"), Payload: payload})
-	service.HandleMessage(Message{Topic: DeviceWillTopic("d1"), Payload: payload})
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if len(session.published) != 1 {
-		t.Fatalf("published = %v", session.published)
-	}
-	if got := testutil.ToFloat64(service.Presence().metrics.PresenceDuplicatesIgnored); got != 1 {
-		t.Fatalf("duplicate metric = %v", got)
+	service.HandleMessage(Message{Topic: "whalerein/v1/presence/device/d1"})
+	if len(session.published) != 0 {
+		t.Fatal("retired topic entered lifecycle routing")
 	}
 }
 

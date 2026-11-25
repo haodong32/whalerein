@@ -7,8 +7,7 @@ import (
 
 // MQTT topics and filters from proto/v1/WIRE.md.
 const (
-	topicRoot    = "whalerein/v1/h/"
-	presenceRoot = "whalerein/v1/presence/device/"
+	topicRoot = "whalerein/v1/h/"
 
 	// ResultFilter receives HostResult messages from every host.
 	ResultFilter = "whalerein/v1/h/+/result"
@@ -20,9 +19,6 @@ const (
 	// DeviceReadyFilter receives Device receive advertisements. Access is the
 	// only subscriber; a Device may publish only its own ready topic.
 	DeviceReadyFilter = "whalerein/v1/h/+/d/+/ready"
-	// DeviceWillFilter receives non-retained MQTT last wills published by the
-	// broker for disconnected device connections.
-	DeviceWillFilter = presenceRoot + "+"
 )
 
 // TopicKind is one of the complete-message wire topic shapes.
@@ -101,23 +97,6 @@ func DeviceReplyTopic(hostID, deviceID string) string {
 
 // PresenceTopic is the Access -> host device-presence topic.
 func PresenceTopic(hostID string) string { return topicRoot + hostID + "/presence" }
-
-// DeviceWillTopic is the device-scoped MQTT last-will topic. It carries no
-// host scope because one device may be authorized by more than one host.
-func DeviceWillTopic(deviceID string) string { return presenceRoot + deviceID }
-
-// ParseDeviceWillTopic parses a concrete device last-will topic. Broadcast
-// filters and wildcard characters are rejected.
-func ParseDeviceWillTopic(topic string) (string, bool) {
-	if !strings.HasPrefix(topic, presenceRoot) {
-		return "", false
-	}
-	deviceID := strings.TrimPrefix(topic, presenceRoot)
-	if !validID(deviceID) || strings.Contains(deviceID, "/") {
-		return "", false
-	}
-	return deviceID, true
-}
 
 // ParseTopic parses one concrete wire topic. Wildcards are rejected.
 func ParseTopic(topic string) (Topic, error) {

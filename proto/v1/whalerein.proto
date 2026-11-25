@@ -262,8 +262,8 @@ message RelayObjectReserveRequest {
   // Host authority only; Device callers authenticate with a bearer token.
   int64 signed_at_unix_ms = 11;
   bytes signature = 12;
-  // Query-lane binding: the original admitted request and its Broker-stamped
-  // connection scope. Empty for durable command objects and attachment parts.
+  // Parent request for a result. Transient query results also carry their
+  // Broker connection scope. Pre-admission request bodies have no parent.
   string request_id = 13;
   uint64 enrollment_generation = 14;
   string connection_ref = 15;

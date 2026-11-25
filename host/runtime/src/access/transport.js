@@ -420,9 +420,10 @@ export class RelayTransport {
       sessionId: typeof options.sessionId === 'string' ? options.sessionId : '',
       partId: typeof options.partId === 'string' ? options.partId : '',
       expiresAt,
-      requestId: typeof options.requestId === 'string' ? options.requestId : '',
-      connectionRef: typeof options.connectionRef === 'string' ? options.connectionRef : '',
-      enrollmentGeneration: Number.isSafeInteger(options.enrollmentGeneration)
+      // Access binds a result to its durable command or transient query.
+      requestId: options.requestId ?? '',
+      connectionRef: envelope.command_id ? '' : (options.connectionRef ?? ''),
+      enrollmentGeneration: !envelope.command_id && Number.isSafeInteger(options.enrollmentGeneration)
         ? options.enrollmentGeneration
         : 0,
     }

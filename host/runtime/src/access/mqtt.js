@@ -414,9 +414,9 @@ export class MqttAccess {
       }
       this.#onConnected(client, generation, connack)
     })
-    client.on('message', (topic, payload) => {
+    client.on('message', (topic, payload, packet) => {
       if (generation !== this.#generation) return
-      this.#onMessage(topic, payload)
+      this.#onMessage(topic, payload, packet?.properties)
     })
     client.on('error', (error) => {
       if (generation !== this.#generation) return
@@ -562,19 +562,28 @@ export class MqttAccess {
     await this.#publish(this.topics.result, result)
   }
 
-  #onMessage(topic, payload) {
+  #onMessage(topic, payload, properties) {
     if (topic === this.topics.presence) {
       let event
       try { event = JSON.parse(payload.toString('utf8')) } catch { return }
-      if (!['device_offline', 'request_stale'].includes(event?.event)) return
-      if (event.event === 'device_offline' && (typeof event?.device_id !== 'string' || !event.device_id)) return
+      if (!['connection_closed', 'request_stale'].includes(event?.event)) return
+      if (event.event === 'connection_closed' && (typeof event?.device_id !== 'string' || !event.device_id)) return
       if (event.event === 'request_stale' && (typeof event?.request_id !== 'string' || !event.request_id)) return
       try { this.#handlers.onPresence?.(event) } catch { /* presence must not break the MQTT loop */ }
       return
     }
     if (topic !== this.topics.request) return
+    const receivedAt = this.now()
     this.#transport.receiveComplete(topic, payload)
-      .then((request) => this.#dispatchRequest(request))
+      .then((request) => {
+        if (request.kind === 'REQUEST_KIND_QUERY' || request.kind === 'REQUEST_KIND_HANDSHAKE') {
+          const expiry = properties?.messageExpiryInterval
+          if (!Number.isSafeInteger(expiry) || expiry <= 0) return
+          request.replyDeadline = Math.min(Number(request.expires_at_unix_ms), receivedAt + expiry * 1000)
+          if (request.replyDeadline <= this.now()) return
+        }
+        return this.#dispatchRequest(request)
+      })
       .catch((error) => this.logger?.warn('transport_receive_failed', {
         code: typeof error?.code === 'string' ? error.code : 'invalid_argument',
         bytes: payload?.length ?? 0,

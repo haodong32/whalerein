@@ -161,7 +161,10 @@ the same request on the existing `.../request` topic with
 `HostRequest.connection_ref`, `grant_generation` and `enrollment_generation`
 filled, and keeps one in-memory waiter keyed by host, device, connection
 reference and request id with the immutable admitted scope. No durable request
-row is written.
+row is written. Once the caller and grant are verified, a known offline Host
+receives no dispatch. Access returns a correlated `host_offline` status to
+the requesting connection. An unreconciled presence view returns `unavailable`.
+A malformed or unauthorized request has no reply path.
 
 The Host replies on `.../result`. Access matches the result to the waiter,
 checks any referenced result object against the original scope and current
@@ -171,10 +174,21 @@ Expiry Interval and `whalerein-target` set to the admitted connection
 reference. Then it removes the waiter. `HANDSHAKE` and `QUERY` kinds are the only
 kinds admitted on this ingress; `COMMAND` keeps its durable HTTPS path.
 
+The object directory records the managed login session from the authenticated
+Broker connection at query admission. A standalone connection has an empty
+login-session binding. A durable result inherits this scope from its admitted
+command row. Reserve, finish, issue, fetch and the revocation sweep
+use that same binding. The DSH conversation ID stays in the encrypted query.
+
 Access restart drops every transient waiter. A Device sees no reply and may
 retry a safe read within its caller deadline. An object already issued before
 the restart remains fetchable through its durable reservation while the
-original deadline and current authorization still match.
+original deadline and current authorization still match. Broker sequence numbers
+and connection IDs are local to a process epoch. An epoch change invalidates
+the old registry before the first new snapshot. A connection closure releases
+only work bound to that reference, including when a sibling remains online.
+Snapshot reconciliation includes managed sessions and preserves closures newer
+than the snapshot boundary.
 
 ## Exact request liveness and cancellation
 

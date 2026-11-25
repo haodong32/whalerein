@@ -816,9 +816,17 @@ func (f *fakeAuth) AuthenticateRelayRequest(_ context.Context, purpose string, f
 }
 
 type fakeStore struct {
+	command  store.Request
 	objects  map[string]store.PayloadObject
 	grant    store.AdmissionGrant
 	grantErr error
+}
+
+func (f *fakeStore) GetRequest(_ context.Context, id string) (store.Request, error) {
+	if f.command.RequestID != id {
+		return store.Request{}, store.ErrNotFound
+	}
+	return f.command, nil
 }
 
 func (f *fakeStore) GetPayload(_ context.Context, objectID string) (store.PayloadObject, error) {

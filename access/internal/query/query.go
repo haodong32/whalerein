@@ -38,7 +38,6 @@ var (
 	ErrStaleConn     = errors.New("query: connection reference is not current")
 	ErrScope         = errors.New("query: request scope does not match its topic")
 	ErrGrant         = errors.New("query: grant is not active")
-	ErrHostOffline   = errors.New("query: host is not online")
 	ErrDuplicate     = errors.New("query: request id is already waiting")
 	ErrCapacity      = errors.New("query: waiter bound reached")
 	ErrProtocol      = errors.New("query: unsupported protocol or relay epoch")
@@ -56,12 +55,12 @@ type Store interface {
 // Connections reports the Broker-issued connection instances Access currently
 // observes. An old epoch or a replaced connection never satisfies a query.
 type Connections interface {
-	DeviceConnectionActive(deviceID string, ref broker.ConnectionRef) bool
+	DeviceConnectionSession(deviceID string, ref broker.ConnectionRef) (string, bool)
 }
 
 // Hosts reports Broker-derived Host presence.
 type Hosts interface {
-	IsHostOnline(ctx context.Context, hostID string) bool
+	HostPresence(hostID string) (online, known bool)
 }
 
 // Publisher publishes one complete MQTT 5 message.
@@ -80,14 +79,15 @@ type Config struct {
 // Scope is the immutable authorization captured at query admission. Host
 // cannot restamp it with a later grant, enrollment or connection.
 type Scope struct {
-	HostID    string
-	DeviceID  string
-	ChannelID string
-	RequestID string
-	Kind      whalereinv1.RequestKind
-	Conn      broker.ConnectionRef
-	Grant     store.AdmissionGrant
-	Deadline  time.Time
+	DeviceSessionID string
+	HostID          string
+	DeviceID        string
+	ChannelID       string
+	RequestID       string
+	Kind            whalereinv1.RequestKind
+	Conn            broker.ConnectionRef
+	Grant           store.AdmissionGrant
+	Deadline        time.Time
 	// Correlation is the exact Correlation Data the Device sent; the reply
 	// echoes it.
 	Correlation []byte
@@ -220,7 +220,11 @@ func (s *Service) Admit(ctx context.Context, message broker.Message) error {
 	// Access currently observes for this Device. A client-supplied or stale
 	// copy never matches.
 	ref, ok := broker.ParseConnectionRef(message.Properties.Get(broker.PropertyConnection))
-	if !ok || !s.connections.DeviceConnectionActive(parsed.DeviceID, ref) {
+	if !ok {
+		return ErrStaleConn
+	}
+	deviceSession, active := s.connections.DeviceConnectionSession(parsed.DeviceID, ref)
+	if !active {
 		return ErrStaleConn
 	}
 	grant, err := s.store.AdmissionGrantFor(ctx, parsed.HostID, parsed.DeviceID)
@@ -233,17 +237,26 @@ func (s *Service) Admit(ctx context.Context, message broker.Message) error {
 	if !grant.Active || grant.HostID != parsed.HostID || grant.DeviceID != parsed.DeviceID {
 		return ErrGrant
 	}
-	if s.hosts != nil && !s.hosts.IsHostOnline(ctx, parsed.HostID) {
-		return ErrHostOffline
-	}
 	request.HostId = parsed.HostID
 	request.DeviceId = parsed.DeviceID
 	scope := Scope{
-		HostID: parsed.HostID, DeviceID: parsed.DeviceID,
+		DeviceSessionID: deviceSession, HostID: parsed.HostID, DeviceID: parsed.DeviceID,
 		ChannelID: request.GetChannelId(), RequestID: request.GetRequestId(),
 		Kind: request.GetKind(), Conn: ref, Grant: grant, Deadline: deadline,
 		Correlation: append([]byte(nil), message.Properties.CorrelationData...),
 		ReplyTopic:  replyTopic,
+	}
+	if s.hosts != nil {
+		if online, known := s.hosts.HostPresence(scope.HostID); !online {
+			result := &whalereinv1.HostResult{
+				Status: whalereinv1.OnlineStatus_host_offline,
+			}
+			if !known {
+				result.Status = whalereinv1.OnlineStatus_failed
+				result.ErrorCode = whalereinv1.ErrorCode_unavailable
+			}
+			return s.publishReply(ctx, scope, result, message.Properties.MessageExpiry)
+		}
 	}
 	return s.registerAndForward(ctx, scope, &request, message.Properties.MessageExpiry)
 }
@@ -399,27 +412,32 @@ func (s *Service) Complete(ctx context.Context, hostID string, message broker.Me
 			return true
 		}
 	}
-	reply := proto.Clone(&result).(*whalereinv1.HostResult)
+	_ = s.publishReply(ctx, scope, &result, message.Properties.MessageExpiry)
+	return true
+}
+
+// publishReply sends a terminal result only to the admitted connection.
+func (s *Service) publishReply(ctx context.Context, scope Scope, reply *whalereinv1.HostResult, upstream *uint32) error {
 	reply.HostId = scope.HostID
 	reply.DeviceId = scope.DeviceID
 	reply.RequestId = scope.RequestID
+	reply.ChannelId = scope.ChannelID
 	reply.RelayVersion = broker.RelayEpoch
 	payload, err := proto.Marshal(reply)
 	if err != nil {
-		return true
+		return err
 	}
-	expiry := remainingExpiry(scope.Deadline, now, message.Properties.MessageExpiry)
+	expiry := remainingExpiry(scope.Deadline, s.now(), upstream)
 	if expiry == nil {
-		return true
+		return ErrExpired
 	}
 	properties := broker.MessageProperties{
-		CorrelationData: append([]byte(nil), scope.Correlation...),
+		CorrelationData: scope.Correlation,
 		MessageExpiry:   expiry,
 	}.WithUserProperty(broker.PropertyTarget, scope.Conn.String())
-	_ = s.publisher.PublishMessage(ctx, broker.Message{
+	return s.publisher.PublishMessage(ctx, broker.Message{
 		Topic: scope.ReplyTopic, Payload: payload, QoS: 1, Properties: properties,
 	})
-	return true
 }
 
 func sameGrant(left, right store.AdmissionGrant) bool {
@@ -452,7 +470,7 @@ func (s *Service) issueReference(ctx context.Context, scope Scope, grant store.A
 		return ErrObject
 	}
 	if object.HostID != scope.HostID || object.DeviceID != scope.DeviceID ||
-		object.ChannelID != scope.ChannelID || object.RequestID != scope.RequestID {
+		object.ChannelID != scope.ChannelID || object.RequestID != scope.RequestID || object.AppSession != scope.DeviceSessionID {
 		return ErrObject
 	}
 	switch object.Purpose {
@@ -481,7 +499,7 @@ func (s *Service) issueReference(ctx context.Context, scope Scope, grant store.A
 		ObjectID:                   object.ObjectID,
 		HostID:                     scope.HostID,
 		DeviceID:                   scope.DeviceID,
-		AppSession:                 object.AppSession,
+		AppSession:                 scope.DeviceSessionID,
 		ChannelID:                  scope.ChannelID,
 		RequestID:                  scope.RequestID,
 		ConnectionRef:              scope.Conn.String(),
@@ -502,36 +520,36 @@ func (s *Service) issueReference(ctx context.Context, scope Scope, grant store.A
 
 // AuthorizeObjectReserve checks that a query-scoped ciphertext reservation
 // still matches one live waiter. relay calls it before reserving bytes.
-func (s *Service) AuthorizeObjectReserve(ctx context.Context, hostID, deviceID, sessionID, channelID, requestID, connectionRef string, enrollment uint64, expiresAtUnixMs int64) error {
+func (s *Service) AuthorizeObjectReserve(ctx context.Context, hostID, deviceID, channelID, requestID, connectionRef string, enrollment uint64, expiresAtUnixMs int64) (string, error) {
 	if requestID == "" {
-		return ErrNoWaiter
+		return "", ErrNoWaiter
 	}
 	s.mu.Lock()
 	current := s.waiters[waiterKey(hostID, deviceID, requestID)]
 	s.mu.Unlock()
 	if current == nil {
-		return ErrNoWaiter
+		return "", ErrNoWaiter
 	}
 	scope := current.scope
 	if !s.now().Before(scope.Deadline) {
-		return ErrExpired
+		return "", ErrExpired
 	}
 	if scope.HostID != hostID || scope.DeviceID != deviceID ||
 		scope.ChannelID != channelID || scope.RequestID != requestID {
-		return ErrScope
+		return "", ErrScope
 	}
 	if connectionRef != scope.Conn.String() || enrollment != scope.Grant.EnrollmentGeneration {
-		return ErrScope
+		return "", ErrScope
 	}
 	// The object may not outlive the original admitted deadline.
 	if expiresAtUnixMs <= 0 || expiresAtUnixMs > scope.Deadline.UnixMilli() {
-		return ErrExpired
+		return "", ErrExpired
 	}
 	grant, err := s.store.AdmissionGrantFor(ctx, hostID, deviceID)
 	if err != nil || !grant.Active || !sameGrant(grant, scope.Grant) {
-		return ErrGrant
+		return "", ErrGrant
 	}
-	return nil
+	return scope.DeviceSessionID, nil
 }
 
 // CancelConnection drops every waiter owned by one Broker connection.

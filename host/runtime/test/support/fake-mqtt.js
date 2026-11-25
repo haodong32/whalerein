@@ -97,10 +97,10 @@ export class FakeBroker {
   }
 
   /** Deliver one simulated out-of-band (HTTPS-resolved) payload to subscribers. */
-  deliverDirect(topic, payload) {
+  deliverDirect(topic, payload, properties) {
     const bytes = Buffer.from(payload)
     for (const client of this.#topics.get(topic) ?? []) {
-      if (!client.closed) queueMicrotask(() => client.emit('message', topic, bytes))
+      if (!client.closed) queueMicrotask(() => client.emit('message', topic, bytes, { properties }))
     }
   }
 

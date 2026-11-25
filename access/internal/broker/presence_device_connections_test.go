@@ -8,12 +8,13 @@ import (
 type deviceOfflineEdge struct {
 	deviceID string
 	source   string
+	ref      ConnectionRef
 }
 
 func newDeviceOfflineRecorder(p *Presence) *[]deviceOfflineEdge {
 	edges := &[]deviceOfflineEdge{}
-	p.SetDeviceOfflineHandler(func(deviceID, source string, _ time.Time, _ ConnectionRef) {
-		*edges = append(*edges, deviceOfflineEdge{deviceID: deviceID, source: source})
+	p.SetConnectionClosedHandler(func(deviceID, source string, _ time.Time, ref ConnectionRef) {
+		*edges = append(*edges, deviceOfflineEdge{deviceID: deviceID, source: source, ref: ref})
 	})
 	return edges
 }
@@ -31,8 +32,8 @@ func TestDevicePresenceKeepsOnlineWhileASiblingConnectionRemains(t *testing.T) {
 
 	// Disconnecting the older connection must not remove the newer live one.
 	p.HandleNotification(&Notification{Sequence: 3, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 10, AtUnixMilli: 3000})
-	if len(*edges) != 0 {
-		t.Fatalf("sibling disconnect emitted offline: %+v", *edges)
+	if len(*edges) != 1 || (*edges)[0].ref.ID != 10 {
+		t.Fatalf("missing exact sibling close: %+v", *edges)
 	}
 	entry := p.devices["d1"]
 	if !entry.online || entry.connID != 11 || len(entry.connections) != 1 {
@@ -44,7 +45,7 @@ func TestDevicePresenceKeepsOnlineWhileASiblingConnectionRemains(t *testing.T) {
 
 	// The final connection is the only offline edge.
 	p.HandleNotification(&Notification{Sequence: 4, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 11, AtUnixMilli: 4000})
-	if len(*edges) != 1 || (*edges)[0].deviceID != "d1" || (*edges)[0].source != PresenceSourceBroker {
+	if len(*edges) != 2 || (*edges)[1].ref.ID != 11 || (*edges)[0].deviceID != "d1" || (*edges)[0].source != PresenceSourceBroker {
 		t.Fatalf("final disconnect edges = %+v", *edges)
 	}
 	if p.devices["d1"].online || len(p.devices["d1"].connections) != 0 {
@@ -78,8 +79,8 @@ func TestShortLivedSiblingConnectionDoesNotRemoveALongLivedWatch(t *testing.T) {
 	p.HandleNotification(&Notification{Sequence: 1, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 20, AtUnixMilli: 1000})
 	p.HandleNotification(&Notification{Sequence: 2, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 21, AtUnixMilli: 2000})
 	p.HandleNotification(&Notification{Sequence: 3, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 21, AtUnixMilli: 3000})
-	if len(*edges) != 0 {
-		t.Fatalf("short-lived sibling emitted offline: %+v", *edges)
+	if len(*edges) != 1 || (*edges)[0].ref.ID != 21 {
+		t.Fatalf("short-lived sibling close: %+v", *edges)
 	}
 	if !p.devices["d1"].online || p.devices["d1"].connID != 20 {
 		t.Fatalf("watch connection = %+v", p.devices["d1"])
@@ -105,33 +106,12 @@ func TestDeviceSnapshotAccumulatesEveryConnectedClient(t *testing.T) {
 	}
 
 	p.HandleNotification(&Notification{Sequence: 11, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 3, AtUnixMilli: 3000})
-	if len(*edges) != 0 || !p.devices["d1"].online {
+	if len(*edges) != 1 || (*edges)[0].ref.ID != 3 || !p.devices["d1"].online {
 		t.Fatalf("snapshot sibling disconnect = edges %+v entry %+v", *edges, p.devices["d1"])
 	}
 	p.HandleNotification(&Notification{Sequence: 12, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 4, AtUnixMilli: 4000})
-	if len(*edges) != 1 {
+	if len(*edges) != 2 || (*edges)[1].ref.ID != 4 {
 		t.Fatalf("snapshot last disconnect edges = %+v", *edges)
-	}
-}
-
-func TestDeviceWillFromASiblingCannotRemoveALiveConnection(t *testing.T) {
-	p := newPresence()
-	p.ApplySnapshot(nil, 0)
-	edges := newDeviceOfflineRecorder(p)
-	p.HandleNotification(&Notification{Sequence: 1, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 30, AtUnixMilli: 1000})
-	p.HandleNotification(&Notification{Sequence: 2, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 31, AtUnixMilli: 2000})
-
-	p.HandleDeviceWill(DeviceWillTopic("d1"), []byte(`{"event":"device_offline","device_id":"d1"}`))
-	if len(*edges) != 0 || !p.devices["d1"].online {
-		t.Fatalf("sibling will changed presence: edges %+v entry %+v", *edges, p.devices["d1"])
-	}
-	p.HandleNotification(&Notification{Sequence: 3, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 30, AtUnixMilli: 3000})
-	if len(*edges) != 0 {
-		t.Fatalf("sibling disconnect after will edges = %+v", *edges)
-	}
-	p.HandleNotification(&Notification{Sequence: 4, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 31, AtUnixMilli: 4000})
-	if len(*edges) != 1 {
-		t.Fatalf("last disconnect after will edges = %+v", *edges)
 	}
 }
 
@@ -156,12 +136,12 @@ func TestSupersededDeviceDisconnectKeepsTimestampAndSequenceFencing(t *testing.T
 	}
 	// Disconnecting the newer connection leaves the older live sibling online.
 	p.HandleNotification(&Notification{Sequence: 4, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 2, AtUnixMilli: 4000})
-	if len(*edges) != 0 || !p.devices["d1"].online {
+	if len(*edges) != 1 || (*edges)[0].ref.ID != 2 || !p.devices["d1"].online {
 		t.Fatalf("newer disconnect with a sibling = edges %+v entry %+v", *edges, p.devices["d1"])
 	}
 	// The last tracked connection produces the only offline edge.
 	p.HandleNotification(&Notification{Sequence: 5, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 1, AtUnixMilli: 5000})
-	if len(*edges) != 1 {
+	if len(*edges) != 2 || (*edges)[1].ref.ID != 1 {
 		t.Fatalf("last connection edges = %+v", *edges)
 	}
 }

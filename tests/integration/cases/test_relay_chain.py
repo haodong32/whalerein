@@ -90,6 +90,13 @@ def test_ac01_above_result_uses_the_access_directory(scenario, paired_device):
         "WHERE purpose='PAYLOAD_PURPOSE_RESULT'",
     )
     assert int(objects) >= 1, "the Host must have uploaded the result ciphertext"
+    incorrectly_scoped = psql(
+        scenario.schema,
+        f"SELECT count(*) FROM {scenario.schema}.temporary_ciphertext_objects "
+        "WHERE purpose='PAYLOAD_PURPOSE_RESULT' AND app_session_id <> ''",
+    )
+    assert int(incorrectly_scoped) == 0, "a standalone result acquired a managed login session"
+
 
 
 @pytest.mark.relay_directory

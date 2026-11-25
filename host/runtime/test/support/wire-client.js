@@ -160,14 +160,18 @@ export class FakeAccessSimulator {
 
   async send(request) {
     await this.ready
+    const properties = request.kind === 'REQUEST_KIND_QUERY' || request.kind === 'REQUEST_KIND_HANDSHAKE'
+      ? { correlationData: Buffer.from(request.request_id), responseTopic: this.resultTopic,
+          messageExpiryInterval: Math.max(1, Math.ceil((Number(request.expires_at_unix_ms) - Date.now()) / 1000)) }
+      : undefined
     const bytes = this.codec.encode('whalerein.v1.HostRequest', { relay_version: 5, ...request })
     // The simulated Device -> Access hop may deliver an oversized complete
     // request out of band; real Access would resolve it from HTTPS.
     if (this.broker.maxPacketBytes !== Infinity && bytes.length > this.broker.maxPacketBytes) {
-      this.broker.deliverDirect(this.requestTopic, bytes)
+      this.broker.deliverDirect(this.requestTopic, bytes, properties)
       return
     }
-    await new Promise((resolve, reject) => this.client.publish(this.requestTopic, bytes, { qos: 1 }, error => error ? reject(error) : resolve()))
+    await new Promise((resolve, reject) => this.client.publish(this.requestTopic, bytes, { qos: 1, properties }, error => error ? reject(error) : resolve()))
   }
 
   /** Queue revocation batches to replay on the next HostReady. */

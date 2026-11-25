@@ -142,6 +142,22 @@ struct QueryWaiter {
     sender: oneshot::Sender<CoreResult<HostResult>>,
 }
 
+// Also unregister when an outer deadline or a dropped caller cancels the future.
+struct QueryRegistration<'a> {
+    waiters: &'a QueryWaiters,
+    id: u64,
+}
+
+impl Drop for QueryRegistration<'_> {
+    fn drop(&mut self) {
+        self.waiters
+            .entries
+            .lock()
+            .expect("query waiters")
+            .remove(&self.id);
+    }
+}
+
 /// Per-connection-generation registry of pending query replies.
 #[derive(Default)]
 struct QueryWaiters {
@@ -156,7 +172,10 @@ impl QueryWaiters {
         device_id: &str,
         generation: u64,
         request: &HostRequest,
-    ) -> (u64, oneshot::Receiver<CoreResult<HostResult>>) {
+    ) -> (
+        QueryRegistration<'_>,
+        oneshot::Receiver<CoreResult<HostResult>>,
+    ) {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
         self.entries.lock().expect("query waiters").insert(
@@ -171,11 +190,7 @@ impl QueryWaiters {
                 sender,
             },
         );
-        (id, receiver)
-    }
-
-    fn remove(&self, id: u64) {
-        self.entries.lock().expect("query waiters").remove(&id);
+        (QueryRegistration { waiters: self, id }, receiver)
     }
 
     /// Complete the exact waiter. A reply only completes a waiter from the
@@ -348,7 +363,6 @@ pub(crate) struct HostConnection {
     host_id: String,
     device_id: String,
     runtime: Arc<Runtime>,
-    snapshot: Arc<Mutex<ConnectionSnapshot>>,
     changes: watch::Sender<ConnectionSnapshot>,
     global: broadcast::Sender<ConnectionSnapshot>,
     subscribers: Arc<Mutex<Vec<Subscriber>>>,
@@ -359,7 +373,7 @@ pub(crate) struct HostConnection {
     /// Broker session generation. It advances on every CONNACK and fences
     /// waiters created under an older session.
     generation: AtomicU64,
-    queries: Arc<QueryWaiters>,
+    queries: QueryWaiters,
     notices: Arc<NoticeWaiters>,
     publisher: Arc<PublisherSlot>,
     /// The target connection stamp observed for the current generation. Core
@@ -371,12 +385,11 @@ pub(crate) struct HostConnection {
 impl HostConnection {
     fn start(input: ConnectionInput, global: broadcast::Sender<ConnectionSnapshot>) -> Arc<Self> {
         let initial = ConnectionSnapshot::new(&input.host_id, ConnectionState::Connecting);
-        let (changes, _) = watch::channel(initial.clone());
+        let (changes, _) = watch::channel(initial);
         let connection = Arc::new(Self {
             host_id: input.host_id.clone(),
             device_id: input.device_id.clone(),
             runtime: input.runtime.clone(),
-            snapshot: Arc::new(Mutex::new(initial)),
             changes,
             global,
             subscribers: Arc::new(Mutex::new(Vec::new())),
@@ -385,7 +398,7 @@ impl HostConnection {
             running: Arc::new(AtomicBool::new(true)),
             queue_bytes: input.queue_bytes,
             generation: AtomicU64::new(0),
-            queries: Arc::new(QueryWaiters::default()),
+            queries: QueryWaiters::default(),
             notices: Arc::new(NoticeWaiters::default()),
             publisher: Arc::new(PublisherSlot::default()),
             target: Mutex::new(None),
@@ -397,7 +410,7 @@ impl HostConnection {
     }
 
     pub(crate) fn snapshot(&self) -> ConnectionSnapshot {
-        self.snapshot.lock().expect("connection snapshot").clone()
+        self.changes.borrow().clone()
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -437,45 +450,36 @@ impl HostConnection {
                 "query identity does not match this host connection".into(),
             ));
         }
-        self.wait_ready(cancellation).await?;
-        let publisher = self
-            .publisher
-            .get()
-            .ok_or_else(|| CoreError::Unavailable("MQTT query lane is not ready".into()))?;
-        let generation = self.generation();
-        if generation == 0 {
-            return Err(CoreError::Unavailable(
-                "MQTT query lane is not ready".into(),
-            ));
-        }
-        if crate::util::now_unix_ms() >= request.expires_at_unix_ms {
+        let remaining = request
+            .expires_at_unix_ms
+            .saturating_sub(crate::util::now_unix_ms());
+        if remaining <= 0 {
             return Err(CoreError::Timeout);
         }
-        let (id, receiver) =
-            self.queries
-                .register(&self.host_id, &self.device_id, generation, request);
-        if let Err(error) = publisher.publish(request).await {
-            self.queries.remove(id);
-            return Err(CoreError::from(error));
-        }
-        let remaining = Duration::from_millis(
-            (request.expires_at_unix_ms - crate::util::now_unix_ms()).max(0) as u64,
-        );
+        let exchange = async {
+            self.wait_ready(cancellation).await?;
+            let publisher = self
+                .publisher
+                .get()
+                .ok_or_else(|| CoreError::Unavailable("MQTT query lane is not ready".into()))?;
+            let generation = self.generation();
+            if generation == 0 {
+                return Err(CoreError::Unavailable(
+                    "MQTT query lane is not ready".into(),
+                ));
+            }
+            let (_registration, receiver) =
+                self.queries
+                    .register(&self.host_id, &self.device_id, generation, request);
+            publisher.publish(request).await.map_err(CoreError::from)?;
+            receiver
+                .await
+                .map_err(|_| CoreError::Unavailable("device connection was interrupted".into()))?
+        };
         let result = tokio::select! {
-            reply = receiver => match reply {
-                Ok(result) => result,
-                Err(_) => Err(CoreError::Unavailable(
-                    "device connection was interrupted".into(),
-                )),
-            },
-            _ = cancellation.cancelled() => {
-                self.queries.remove(id);
-                Err(CoreError::Unavailable("query was cancelled".into()))
-            }
-            _ = tokio::time::sleep(remaining) => {
-                self.queries.remove(id);
-                Err(CoreError::Timeout)
-            }
+            result = exchange => result,
+            _ = cancellation.cancelled() => Err(CoreError::Cancelled),
+            _ = tokio::time::sleep(Duration::from_millis(remaining as u64)) => Err(CoreError::Timeout),
         };
         // The application deadline is authoritative even when the broker
         // delivered the reply late.
@@ -517,24 +521,20 @@ impl HostConnection {
         };
         {
             let mut observed = self.target.lock().expect("query target");
-            match observed.as_ref() {
-                Some((generation, expected)) if *generation == reply.connection_generation => {
-                    if expected != target {
-                        return true;
-                    }
-                }
-                _ => {
-                    *observed = Some((reply.connection_generation, target.to_owned()));
-                }
+            if observed.as_ref().is_some_and(|(generation, expected)| {
+                *generation == reply.connection_generation && expected != target
+            }) {
+                return true;
+            }
+            if self.queries.dispatch(&reply) {
+                *observed = Some((reply.connection_generation, target.to_owned()));
             }
         }
-        self.queries.dispatch(&reply);
         true
     }
 
     fn update(&self, next: ConnectionSnapshot) {
-        *self.snapshot.lock().expect("connection snapshot") = next.clone();
-        let _ = self.changes.send(next.clone());
+        self.changes.send_replace(next.clone());
         let _ = self.global.send(next);
     }
 
@@ -551,13 +551,13 @@ impl HostConnection {
             let snapshot = changes.borrow_and_update().clone();
             match snapshot.state {
                 ConnectionState::Connected => return Ok(()),
-                ConnectionState::Offline => {
+                ConnectionState::Offline | ConnectionState::Disconnected => {
                     return Err(terminal_error(snapshot.code.as_deref()));
                 }
                 _ => {}
             }
             tokio::select! {
-                _ = cancellation.cancelled() => return Ok(()),
+                _ = cancellation.cancelled() => return Err(CoreError::Cancelled),
                 changed = changes.changed() => {
                     if changed.is_err() {
                         return Err(terminal_error(None));
@@ -856,7 +856,6 @@ impl HostConnections {
         }
         connection.running.store(false, Ordering::SeqCst);
         let snapshot = ConnectionSnapshot::new(host_id, ConnectionState::Disconnected);
-        *connection.snapshot.lock().expect("connection snapshot") = snapshot.clone();
-        let _ = self.changes.send(snapshot);
+        connection.update(snapshot);
     }
 }

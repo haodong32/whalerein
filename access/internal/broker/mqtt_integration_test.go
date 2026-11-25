@@ -297,7 +297,7 @@ func integrationCallback(w http.ResponseWriter, r *http.Request, token string) {
 	case username == "host:h-e2e" && password == integrationHostPassword:
 		writeIntegrationPolicy(w, integrationHostPolicy("h-e2e"))
 	case username == "device:transport-device" && password == integrationDevicePassword:
-		if will != "" && will != DeviceWillTopic("transport-device") {
+		if will != "" {
 			writeIntegrationPolicy(w, "whalerein/1\ndeny will_not_authorized\n")
 			return
 		}
@@ -334,7 +334,6 @@ func integrationDevicePolicy(hostID, deviceID string) string {
 	var builder strings.Builder
 	builder.WriteString("whalerein/1\nok\nkind device\n")
 	fmt.Fprintf(&builder, "device %s\nrevision 1\nready 1\n", deviceID)
-	fmt.Fprintf(&builder, "will %s\n", DeviceWillTopic(deviceID))
 	fmt.Fprintf(&builder, "acl subscribe 1 %s %s\n", hostID, DeviceEventTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceEventTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl subscribe 1 %s %s\n", hostID, DeviceNoticeTopic(hostID, deviceID))
@@ -345,7 +344,6 @@ func integrationDevicePolicy(hostID, deviceID string) string {
 	fmt.Fprintf(&builder, "acl read 1 %s %s\n", hostID, DeviceReplyTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl write 1 %s %s\n", hostID, DeviceQueryTopic(hostID, deviceID))
 	fmt.Fprintf(&builder, "acl write 1 %s %s\n", hostID, DeviceReadyTopic(hostID, deviceID))
-	fmt.Fprintf(&builder, "acl write 1 - %s\n", DeviceWillTopic(deviceID))
 	return builder.String()
 }
 

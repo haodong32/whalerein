@@ -113,7 +113,7 @@ func TestBrokerPolicyBuildsDeviceGrantsAndHostPreviewScope(t *testing.T) {
 	if device.Kind != policy.KindDevice || device.DeviceID != "d1" || device.Will != "" {
 		t.Fatalf("device policy = %+v", device)
 	}
-	if len(device.Entries) != 11 { // ten topic entries for h1 plus the will.
+	if len(device.Entries) != 10 { // Exact epoch-5 entries for h1.
 		t.Fatalf("device entries = %+v", device.Entries)
 	}
 	for _, entry := range device.Entries {

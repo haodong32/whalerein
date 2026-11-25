@@ -628,6 +628,7 @@ static void publish_event_locked(uint64_t seq, const char *type, struct wclient 
 			       "kind %s\n"
 			       "host %s\n"
 			       "device %s\n"
+			       "session %s\n"
 			       "conn %llu\n"
 			       "ref %s\n"
 			       "at %lld\n"
@@ -637,6 +638,7 @@ static void publish_event_locked(uint64_t seq, const char *type, struct wclient 
 			       kind ? kind : "",
 			       host_id ? host_id : "",
 			       device_id ? device_id : "",
+			       client ? client->session_id : "",
 			       (unsigned long long)conn_id, ref,
 			       (long long)now_ms(), reason);
 	}
@@ -1852,6 +1854,24 @@ static enum principal_kind kind_from_username(const char *username)
 	return KIND_NONE;
 }
 
+static const struct {
+	int access;
+	const char *filter;
+} access_acls[] = {
+	{ACL_WRITE, "whalerein/v1/h/+/request"},
+	{ACL_WRITE, "whalerein/v1/h/+/d/+/event"},
+	{ACL_WRITE, "whalerein/v1/h/+/d/+/notice"},
+	{ACL_WRITE, "whalerein/v1/h/+/d/+/reply"},
+	{ACL_WRITE, "whalerein/v1/h/+/presence"},
+	{ACL_WRITE, "$CONTROL/whalerein/v1"},
+	{ACL_READ, "whalerein/v1/h/+/result"},
+	{ACL_READ, "whalerein/v1/h/+/event"},
+	{ACL_READ, "whalerein/v1/h/+/d/+/query"},
+	{ACL_READ, "whalerein/v1/h/+/d/+/ready"},
+	{ACL_READ, "whalerein/v1/control/reply"},
+	{ACL_READ, "whalerein/v1/control/events"},
+};
+
 static int basic_auth_callback(int event, void *event_data, void *userdata)
 {
 	struct mosquitto_evt_basic_auth *ed = event_data;
@@ -1880,24 +1900,7 @@ static int basic_auth_callback(int event, void *event_data, void *userdata)
 		struct auth_result *result;
 		struct acl_entry acls[16];
 		size_t acl_count = 0;
-		static const struct {
-			int access;
-			const char *filter;
-		} access_acls[] = {
-			{ACL_WRITE, "whalerein/v1/h/+/request"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/event"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/notice"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/reply"},
-			{ACL_WRITE, "whalerein/v1/h/+/presence"},
-			{ACL_WRITE, "$CONTROL/whalerein/v1"},
-			{ACL_READ, "whalerein/v1/h/+/result"},
-			{ACL_READ, "whalerein/v1/h/+/event"},
-			{ACL_READ, "whalerein/v1/h/+/d/+/query"},
-			{ACL_READ, "whalerein/v1/h/+/d/+/ready"},
-			{ACL_READ, "whalerein/v1/presence/device/+"},
-			{ACL_READ, "whalerein/v1/control/reply"},
-			{ACL_READ, "whalerein/v1/control/events"},
-		};
+
 		size_t i;
 
 		if (!cfg.access_password || !password || strcmp(password, cfg.access_password) != 0) {
@@ -2187,24 +2190,7 @@ static int acl_check_callback(int event, void *event_data, void *userdata)
 	client = client_find_locked(client_id);
 	if (!client && username && cfg.access_username && strcmp(username, cfg.access_username) == 0) {
 		/* Access identity policy is fixed and does not need CONNECT state. */
-		static const struct {
-			int access;
-			const char *filter;
-		} access_acls[] = {
-			{ACL_WRITE, "whalerein/v1/h/+/request"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/event"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/notice"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/reply"},
-			{ACL_WRITE, "whalerein/v1/h/+/presence"},
-			{ACL_WRITE, "$CONTROL/whalerein/v1"},
-			{ACL_READ, "whalerein/v1/h/+/result"},
-			{ACL_READ, "whalerein/v1/h/+/event"},
-			{ACL_READ, "whalerein/v1/h/+/d/+/query"},
-			{ACL_READ, "whalerein/v1/h/+/d/+/ready"},
-			{ACL_READ, "whalerein/v1/presence/device/+"},
-			{ACL_READ, "whalerein/v1/control/reply"},
-			{ACL_READ, "whalerein/v1/control/events"},
-		};
+
 		size_t i;
 
 		rc = MOSQ_ERR_ACL_DENIED;

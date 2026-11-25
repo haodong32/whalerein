@@ -1434,16 +1434,27 @@ impl Core {
         })
     }
 
-    /// Renew one observation's authority lease. A typed authority close is
-    /// terminal; transport failures are left to the observation's normal retry
-    /// so a network blip does not end a healthy watch.
-    #[allow(dead_code)]
-    pub(crate) async fn check_host_authority(&self, host_id: &str) -> CoreResult<()> {
-        let access = self.access_client().await?;
-        access
-            .host_authority(host_id)
-            .await
-            .map_err(CoreError::from)
+    /// A broker can refuse a connection while its Access policy source is
+    /// unreachable. Resolve a refusal against the authority that owns the grant.
+    pub(crate) async fn wait_host_transport(
+        &self,
+        host_id: &str,
+        connection: &crate::connection::HostConnection,
+        cancellation: &Cancellation,
+    ) -> CoreResult<()> {
+        match connection.wait_ready(cancellation).await {
+            Err(CoreError::Unauthorized) => {
+                self.access_client()
+                    .await?
+                    .host_authority(host_id)
+                    .await
+                    .map_err(CoreError::from)?;
+                Err(CoreError::Unavailable(
+                    "broker has not admitted the authorized Device".into(),
+                ))
+            }
+            result => result,
+        }
     }
 
     pub(crate) async fn ensure_channel(
@@ -1451,8 +1462,7 @@ impl Core {
         host_id: &str,
         force_new: bool,
     ) -> CoreResult<crate::security::SecureChannel> {
-        self.ensure_channel_inner(host_id, force_new, None, None)
-            .await
+        self.ensure_channel_inner(host_id, force_new, None).await
     }
 
     async fn ensure_channel_after(
@@ -1460,18 +1470,7 @@ impl Core {
         host_id: &str,
         stale_channel_id: &str,
     ) -> CoreResult<crate::security::SecureChannel> {
-        self.ensure_channel_inner(host_id, true, Some(stale_channel_id), None)
-            .await
-    }
-
-    async fn ensure_wait_channel(
-        &self,
-        host_id: &str,
-        force_new: bool,
-        stale_channel_id: Option<&str>,
-        transport: Arc<crate::access::http::TransportObservation>,
-    ) -> CoreResult<crate::security::SecureChannel> {
-        self.ensure_channel_inner(host_id, force_new, stale_channel_id, Some(transport))
+        self.ensure_channel_inner(host_id, true, Some(stale_channel_id))
             .await
     }
 
@@ -1480,7 +1479,6 @@ impl Core {
         host_id: &str,
         force_new: bool,
         stale_channel_id: Option<&str>,
-        transport: Option<Arc<crate::access::http::TransportObservation>>,
     ) -> CoreResult<crate::security::SecureChannel> {
         self.diagnostics
             .record_stage("core", "handshake", "started", "none");
@@ -1504,22 +1502,16 @@ impl Core {
             )
             .await;
         }
-        let opened = async {
+        let handshake = async {
             let config = self.require_config()?;
             let identity = self.device_identity()?;
             let access = self.access_client().await?;
-            let access = if let Some(transport) = transport {
-                access.with_transport_observation(transport)
-            } else {
-                access
-            };
             let expected = self.confirmed_host_fingerprint(host_id)?;
             // Ordering: the authorized MQTT subscription and receive-budget
             // readiness come first; pinned Noise then travels on the same
             // connection's query/reply lane.
             let connection = self.host_connection(host_id).await?;
-            connection
-                .wait_ready(&Cancellation::new())
+            self.wait_host_transport(host_id, &connection, &Cancellation::new())
                 .await
                 .inspect_err(|error| {
                     self.diagnostics.record_stage(
@@ -1554,8 +1546,18 @@ impl Core {
                 )
                 .await
             }
-        }
-        .await;
+        };
+        let opened = match tokio::time::timeout(
+            Duration::from_millis(crate::runtime::channel::HANDSHAKE_TIMEOUT_MS as u64),
+            handshake,
+        )
+        .await
+        {
+            Err(_) | Ok(Err(CoreError::Timeout)) => Err(CoreError::Unavailable(
+                "Host channel establishment timed out".into(),
+            )),
+            Ok(result) => result,
+        };
         self.diagnostics.record_stage(
             opened
                 .as_ref()
@@ -2299,7 +2301,7 @@ impl Core {
         // Host simply keeps its current state; the connection keeps trying.
         match tokio::time::timeout(
             Duration::from_secs(5),
-            connection.wait_ready(&Cancellation::new()),
+            self.wait_host_transport(host_id, &connection, &Cancellation::new()),
         )
         .await
         {

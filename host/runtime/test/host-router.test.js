@@ -643,7 +643,7 @@ test('wait state rejects an oversized encrypted HostResult for a valid request',
       assert.ok(typeof scoped.requestId === 'string' && scoped.requestId !== '', 'query result keeps its request id')
       assert.equal(scoped.connectionRef, channel.connectionRef, 'query result keeps its admitted connection')
       assert.equal(scoped.enrollmentGeneration, 1, 'query result keeps its enrollment generation')
-      assert.ok(scoped.sessionId, 'query result keeps its application session')
+      assert.equal(scoped.sessionId, undefined, 'DSH session identity stays in the encrypted payload')
       const recovered = await query(2, waiting)
       assert.equal(recovered.result.status, 'succeeded')
       assert.ok(recovered.result.result_body?.length)

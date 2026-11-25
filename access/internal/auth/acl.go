@@ -21,10 +21,9 @@ const (
 	accessEvent       = "whalerein/v1/h/+/event"
 	accessDeviceQuery = "whalerein/v1/h/+/d/+/query"
 	accessDeviceReady = "whalerein/v1/h/+/d/+/ready"
-	accessDeviceWill  = "whalerein/v1/presence/device/+"
-	deviceWillPrefix  = "whalerein/v1/presence/device/"
-	sysConnected      = "$SYS/brokers/+/clients/+/connected"
-	sysDisconnected   = "$SYS/brokers/+/clients/+/disconnected"
+
+	sysConnected    = "$SYS/brokers/+/clients/+/connected"
+	sysDisconnected = "$SYS/brokers/+/clients/+/disconnected"
 )
 
 // AuthorizeACL evaluates the exact topic rules for the authenticated broker
@@ -51,13 +50,13 @@ func (s *Service) authorizeAccessACL(action ACLAction, topic string) bool {
 	switch action {
 	case ActionSubscribe:
 		// Access needs results, control events, device queries, device
-		// advertisements, device last wills and broker presence system topics.
+		// advertisements and broker presence system topics.
 		// Previews now travel directly from the Host, so Access no longer reads
 		// h/{host}/live. There is no device ACK subscription.
 		return topic == accessResult || topic == accessEvent ||
 			topic == accessDeviceQuery ||
 			topic == sysConnected || topic == sysDisconnected ||
-			topic == accessDeviceWill || topic == accessDeviceReady
+			topic == accessDeviceReady
 	case ActionPublish:
 		parsed, ok := parseTopic(topic)
 		if !ok {
@@ -95,13 +94,6 @@ func (s *Service) authorizeHostACL(identity BrokerIdentity, action ACLAction, to
 func (s *Service) authorizeDeviceACL(ctx context.Context, identity BrokerIdentity, action ACLAction, topic string) (bool, error) {
 	if strings.ContainsAny(topic, "+#") {
 		return false, nil
-	}
-	// A device may publish only its own non-retained last will. This does not
-	// depend on a grant: the event cannot name another device or host.
-	if action == ActionPublish {
-		if deviceID, ok := parseDeviceWillTopic(topic); ok {
-			return identity.DeviceID != "" && deviceID == identity.DeviceID, nil
-		}
 	}
 	parsed, ok := parseTopic(topic)
 	if !ok {
@@ -186,18 +178,4 @@ func parseTopic(topic string) (parsedTopic, bool) {
 	default:
 		return parsedTopic{}, false
 	}
-}
-
-// parseDeviceWillTopic parses the device-scoped last-will topic:
-//
-//	whalerein/v1/presence/device/{device_id}
-func parseDeviceWillTopic(topic string) (string, bool) {
-	if !strings.HasPrefix(topic, deviceWillPrefix) {
-		return "", false
-	}
-	deviceID := strings.TrimPrefix(topic, deviceWillPrefix)
-	if deviceID == "" || strings.ContainsAny(deviceID, "/+#") {
-		return "", false
-	}
-	return deviceID, true
 }

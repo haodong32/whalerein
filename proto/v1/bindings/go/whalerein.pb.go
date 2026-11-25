@@ -2072,8 +2072,8 @@ type RelayObjectReserveRequest struct {
 	// Host authority only; Device callers authenticate with a bearer token.
 	SignedAtUnixMs int64  `protobuf:"varint,11,opt,name=signed_at_unix_ms,json=signedAtUnixMs,proto3" json:"signed_at_unix_ms,omitempty"`
 	Signature      []byte `protobuf:"bytes,12,opt,name=signature,proto3" json:"signature,omitempty"`
-	// Query-lane binding: the original admitted request and its Broker-stamped
-	// connection scope. Empty for durable command objects and attachment parts.
+	// Parent request for a result. Transient query results also carry their
+	// Broker connection scope. Pre-admission request bodies have no parent.
 	RequestId            string `protobuf:"bytes,13,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	EnrollmentGeneration uint64 `protobuf:"varint,14,opt,name=enrollment_generation,json=enrollmentGeneration,proto3" json:"enrollment_generation,omitempty"`
 	ConnectionRef        string `protobuf:"bytes,15,opt,name=connection_ref,json=connectionRef,proto3" json:"connection_ref,omitempty"`

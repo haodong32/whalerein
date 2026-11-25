@@ -1,6 +1,7 @@
 package query
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
@@ -64,14 +65,15 @@ func (f *fakeStore) MarkPayloadIssued(_ context.Context, scope store.PayloadIssu
 }
 
 type fakeConnections struct {
-	mu   sync.Mutex
-	refs map[string]map[broker.ConnectionRef]bool
+	sessionID string
+	mu        sync.Mutex
+	refs      map[string]map[broker.ConnectionRef]bool
 }
 
-func (f *fakeConnections) DeviceConnectionActive(deviceID string, ref broker.ConnectionRef) bool {
+func (f *fakeConnections) DeviceConnectionSession(deviceID string, ref broker.ConnectionRef) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.refs[deviceID][ref]
+	return f.sessionID, f.refs[deviceID][ref]
 }
 
 func newFakeConnections() *fakeConnections {
@@ -81,10 +83,11 @@ func newFakeConnections() *fakeConnections {
 }
 
 type fakeHosts struct {
-	online bool
+	online  bool
+	unknown bool
 }
 
-func (f *fakeHosts) IsHostOnline(context.Context, string) bool { return f.online }
+func (f *fakeHosts) HostPresence(string) (bool, bool) { return f.online, !f.unknown }
 
 type fakePublisher struct {
 	mu       sync.Mutex
@@ -344,13 +347,6 @@ func TestQueryRejectsForgedStampAndForeignReplyTopic(t *testing.T) {
 			},
 			want: ErrGrant,
 		},
-		{
-			name: "offline host",
-			setup: func(h *harness) {
-				h.hosts.online = false
-			},
-			want: ErrHostOffline,
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -366,6 +362,31 @@ func TestQueryRejectsForgedStampAndForeignReplyTopic(t *testing.T) {
 				t.Fatal("rejected query registered a waiter or was forwarded")
 			}
 		})
+	}
+}
+
+func TestQueryPresenceRepliesOnlyToAdmittedDevice(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		h := newHarness(t)
+		h.hosts.online, h.hosts.unknown = false, unknown
+		message := h.queryMessage(t, nil)
+		if err := h.service.Admit(context.Background(), message); err != nil {
+			t.Fatal(err)
+		}
+		messages := h.publisher.snapshot()
+		if h.service.WaiterCount() != 0 || len(messages) != 1 || messages[0].Topic != message.Properties.ResponseTopic ||
+			messages[0].Properties.Get(broker.PropertyTarget) != testRef.String() ||
+			!bytes.Equal(messages[0].Properties.CorrelationData, message.Properties.CorrelationData) {
+			t.Fatal("presence refusal must resolve only its original caller")
+		}
+		var result whalereinv1.HostResult
+		if err := proto.Unmarshal(messages[0].Payload, &result); err != nil {
+			t.Fatal(err)
+		}
+		if (!unknown && result.Status != whalereinv1.OnlineStatus_host_offline) ||
+			(unknown && result.ErrorCode != whalereinv1.ErrorCode_unavailable) {
+			t.Fatal("presence refusal did not distinguish offline from unknown")
+		}
 	}
 }
 
@@ -629,23 +650,24 @@ func TestQueryDuplicateAndSecondConnectionRejected(t *testing.T) {
 
 func TestQueryAuthorizeObjectReserveChecksTheLiveWaiter(t *testing.T) {
 	h := newHarness(t)
+	h.connections.sessionID = "managed-login"
 	if err := h.service.Admit(context.Background(), h.queryMessage(t, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "", "channel-1", "request-1", testRef.String(), 3, h.now.Add(20*time.Second).UnixMilli()); err != nil {
-		t.Fatalf("live waiter rejected: %v", err)
+	if session, err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "channel-1", "request-1", testRef.String(), 3, h.now.Add(20*time.Second).UnixMilli()); err != nil || session != "managed-login" {
+		t.Fatalf("wrong admitted session or query error: %v", err)
 	}
-	if err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "", "channel-1", "request-9", testRef.String(), 3, h.now.Add(20*time.Second).UnixMilli()); !errors.Is(err, ErrNoWaiter) {
+	if _, err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "channel-1", "request-9", testRef.String(), 3, h.now.Add(20*time.Second).UnixMilli()); !errors.Is(err, ErrNoWaiter) {
 		t.Fatalf("unknown request = %v", err)
 	}
-	if err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "", "channel-1", "request-1", "ffffffffffffffff:1", 3, h.now.Add(20*time.Second).UnixMilli()); !errors.Is(err, ErrScope) {
+	if _, err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "channel-1", "request-1", "ffffffffffffffff:1", 3, h.now.Add(20*time.Second).UnixMilli()); !errors.Is(err, ErrScope) {
 		t.Fatalf("foreign connection = %v", err)
 	}
-	if err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "", "channel-1", "request-1", testRef.String(), 9, h.now.Add(20*time.Second).UnixMilli()); !errors.Is(err, ErrScope) {
+	if _, err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "channel-1", "request-1", testRef.String(), 9, h.now.Add(20*time.Second).UnixMilli()); !errors.Is(err, ErrScope) {
 		t.Fatalf("foreign enrollment = %v", err)
 	}
 	h.now = h.now.Add(31 * time.Second)
-	if err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "", "channel-1", "request-1", testRef.String(), 3, h.now.Add(20*time.Second).UnixMilli()); !errors.Is(err, ErrExpired) {
+	if _, err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "channel-1", "request-1", testRef.String(), 3, h.now.Add(20*time.Second).UnixMilli()); !errors.Is(err, ErrExpired) {
 		t.Fatalf("expired waiter = %v", err)
 	}
 }

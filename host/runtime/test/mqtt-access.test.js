@@ -82,7 +82,7 @@ function request(overrides = {}) {
 async function publishRequest(broker, bytes) {
   const publisher = broker.connectFn()('mqtts://access.test', { clientId: 'access' })
   await new Promise((resolve) => publisher.subscribe(REQUEST_TOPIC, { qos: 1 }, resolve))
-  await new Promise((resolve) => publisher.publish(REQUEST_TOPIC, bytes, { qos: 1 }, resolve))
+  await new Promise((resolve) => publisher.publish(REQUEST_TOPIC, bytes, { qos: 1, properties: {messageExpiryInterval: 2} }, resolve))
 }
 
 test('only an mqtts URL on port 443 offers the MQTT ALPN protocol', () => {
@@ -171,6 +171,7 @@ test('when MQTT connects, Access uses MQTT 5 identity, subscribes to its request
   await waitFor(() => calls.requests.length === 1)
   assert.equal(calls.requests[0].request_id, 'r1')
   assert.equal(calls.requests[0].relay_version, 5)
+  assert.ok(calls.requests[0].replyDeadline <= Date.now() + 2000)
 
   await access.stop()
   assert.equal(access.connected, false)
@@ -489,16 +490,16 @@ test('missing broker PUBACK is bounded and interrupts only the MQTT link', async
   }
 })
 
-test('when a device_offline presence event arrives, Access dispatches it without treating it as a request', async () => {
+test('when a connection_closed presence event arrives, Access dispatches it without treating it as a request', async () => {
   const { broker, access } = makeAccess()
   const seen = []
   access.start({ onPresence: (event) => seen.push(event) })
   await access.waitForConnected(2000)
   const publisher = broker.connectFn()('mqtts://access.test', { clientId: 'access' })
   await new Promise((resolve) => publisher.subscribe('whalerein/v1/h/host-1/presence', { qos: 1 }, resolve))
-  await new Promise((resolve) => publisher.publish('whalerein/v1/h/host-1/presence', JSON.stringify({ event: 'device_offline', device_id: 'd1', reason: 'will' }), { qos: 1 }, resolve))
+  await new Promise((resolve) => publisher.publish('whalerein/v1/h/host-1/presence', JSON.stringify({ event: 'connection_closed', device_id: 'd1', connection_ref: '0123456789abcdef:7', reason: 'broker' }), { qos: 1 }, resolve))
   await waitFor(() => seen.length === 1)
-  assert.deepEqual(seen[0], { event: 'device_offline', device_id: 'd1', reason: 'will' })
+  assert.deepEqual(seen[0], { event: 'connection_closed', device_id: 'd1', connection_ref: '0123456789abcdef:7', reason: 'broker' })
   await access.stop()
 })
 

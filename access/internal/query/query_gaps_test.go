@@ -255,16 +255,16 @@ func TestQueryAuthorizeObjectReserveRejectsChangedAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	deadline := h.now.Add(20 * time.Second).UnixMilli()
-	if err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "", "channel-2", "request-1", testRef.String(), 3, deadline); !errors.Is(err, ErrScope) {
+	if _, err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "channel-2", "request-1", testRef.String(), 3, deadline); !errors.Is(err, ErrScope) {
 		t.Fatalf("foreign channel = %v", err)
 	}
-	if err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "", "channel-1", "request-1", testRef.String(), 3, h.now.Add(time.Hour).UnixMilli()); !errors.Is(err, ErrExpired) {
+	if _, err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "channel-1", "request-1", testRef.String(), 3, h.now.Add(time.Hour).UnixMilli()); !errors.Is(err, ErrExpired) {
 		t.Fatalf("object beyond the waiter deadline = %v", err)
 	}
 	grant := h.store.grants[testHost+"\x00"+testDevice]
 	grant.GrantGeneration++
 	h.store.grants[testHost+"\x00"+testDevice] = grant
-	if err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "", "channel-1", "request-1", testRef.String(), 3, deadline); !errors.Is(err, ErrGrant) {
+	if _, err := h.service.AuthorizeObjectReserve(context.Background(), testHost, testDevice, "channel-1", "request-1", testRef.String(), 3, deadline); !errors.Is(err, ErrGrant) {
 		t.Fatalf("changed grant = %v", err)
 	}
 }

@@ -386,7 +386,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	queryService, err := query.New(query.Dependencies{
 		Store:       db,
 		Connections: presence,
-		Hosts:       service,
+		Hosts:       presence,
 		Publisher:   service,
 		Config: query.Config{
 			MaxTTL: cfg.Requests.MaxTTL.D(),

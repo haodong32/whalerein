@@ -643,6 +643,15 @@ impl DeviceMqttClient {
                     subscribed = false;
                     pending_subscriptions = 0;
                     on_state(MqttConnectionEvent::Disconnected);
+                    if matches!(error, ConnectionError::ConnectionRefused(
+                        rumqttc::v5::mqttbytes::v5::ConnectReturnCode::NotAuthorized
+                        | rumqttc::v5::mqttbytes::v5::ConnectReturnCode::BadUserNamePassword
+                    )) {
+                        return Err(AccessError {
+                            code: Some(whalerein_proto::ErrorCode::Unauthorized),
+                            ..AccessError::protocol("broker rejected the Device credential")
+                        });
+                    }
                     let delay = if should_stop() {
                         None
                     } else {

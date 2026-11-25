@@ -1,4 +1,4 @@
-//! Test-only Core driver for bounded delivery acceptance without command-line payloads.
+//! Test driver for encrypted command admission, size limits and recovery.
 use std::path::PathBuf;
 use std::sync::Arc;
 use whalerein_core::api::KeyringSecretStore;
@@ -11,7 +11,7 @@ async fn main() {
     if args.len() != 5 && args.len() != 6 {
         std::process::exit(2);
     }
-    let size: usize = args[4].parse().expect("fixture size");
+
     let core = Core::open(
         &PathBuf::from(&args[1]),
         Arc::new(KeyringSecretStore::new("whalerein")),
@@ -21,7 +21,16 @@ async fn main() {
         println!("{{\"error\":\"{}\"}}", error.code());
         std::process::exit(1);
     }
-    let text = "x".repeat(size);
+    let text = if args[4] == "--read-after-ready" {
+        use std::io::Write;
+        println!("ready");
+        std::io::stdout().flush().expect("signal ready");
+        let mut text = String::new();
+        assert!(std::io::stdin().read_line(&mut text).expect("read fixture") > 0);
+        text.trim_end().to_owned()
+    } else {
+        "x".repeat(args[4].parse().expect("fixture size"))
+    };
     let key = SessionKey {
         host_id: args[2].clone(),
         session_id: args[3].clone(),
@@ -50,12 +59,18 @@ async fn send(core: &Core, target: &SessionKey, text: &str) -> Result<CommandHan
     let operation = core
         .submit_message_operation(&operation_id, target, text, DeliveryMode::EnqueueAfterRun)
         .await?;
-    let receipt = operation.receipt.ok_or(CoreError::UnknownResult)?;
-    if receipt.status.is_terminal() {
-        return Ok(receipt);
-    }
-    core.recover_send_operation(&operation_id)
-        .await?
-        .receipt
-        .ok_or(CoreError::UnknownResult)
+    let mut receipt = operation.receipt.ok_or(CoreError::UnknownResult)?;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !receipt.status.is_terminal() {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            receipt = core
+                .recover_send_operation(&operation_id)
+                .await?
+                .receipt
+                .ok_or(CoreError::UnknownResult)?;
+        }
+        Ok(receipt)
+    })
+    .await
+    .map_err(|_| CoreError::Timeout)?
 }

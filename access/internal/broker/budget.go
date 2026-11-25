@@ -250,6 +250,14 @@ func NewReceiverBudgets() *ReceiverBudgets {
 	}
 }
 
+// A broker process assigns connection IDs from a new sequence on startup.
+func (b *ReceiverBudgets) reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	clear(b.entries)
+	clear(b.current)
+}
+
 // NoteConnection records one broker-derived receiver connection. A newer
 // connection is tracked beside every other live sibling; only an offline event
 // for the same connection invalidates its advertisement.

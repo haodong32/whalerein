@@ -50,7 +50,7 @@ func TestBuildHostPolicyEmitsGrantScopedDirectPreviewWrites(t *testing.T) {
 	}
 }
 
-func TestBuildDevicePolicyUsesOnlyActiveGrantsAndSetsTheWill(t *testing.T) {
+func TestBuildDevicePolicyContainsOnlyActiveGrantTopics(t *testing.T) {
 	connection := Build(KindDevice, "", "d1", []store.AdmissionGrant{
 		{HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 1},
 		{HostID: "h2", DeviceID: "d1", Active: false, GrantGeneration: 2},
@@ -69,7 +69,6 @@ func TestBuildDevicePolicyUsesOnlyActiveGrantsAndSetsTheWill(t *testing.T) {
 		{Access: "subscribe", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/live"},
 		{Access: "subscribe", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/notice"},
 		{Access: "subscribe", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/reply"},
-		{Access: "write", Revision: 1, Filter: "whalerein/v1/presence/device/d1"},
 		{Access: "write", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/query"},
 		{Access: "write", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/ready"},
 	}
@@ -78,14 +77,10 @@ func TestBuildDevicePolicyUsesOnlyActiveGrantsAndSetsTheWill(t *testing.T) {
 	}
 }
 
-func TestBuildDevicePolicyWithoutGrantsStillAllowsItsOwnWill(t *testing.T) {
+func TestDeviceWithoutGrantsHasNoTopicAccess(t *testing.T) {
 	connection := Build(KindDevice, "", "d1", nil)
-	if connection.Revision != 0 || len(connection.Entries) != 1 {
-		t.Fatalf("connection = %+v", connection)
-	}
-	want := Entry{Access: "write", Filter: "whalerein/v1/presence/device/d1"}
-	if connection.Entries[0] != want {
-		t.Fatalf("entries = %+v", connection.Entries)
+	if connection.Revision != 0 || len(connection.Entries) != 0 {
+		t.Fatal("device has topic access without a grant")
 	}
 }
 
@@ -153,7 +148,6 @@ func TestFormatRendersTheVersionedHostAndDevicePolicy(t *testing.T) {
 				"acl subscribe 1 h1 whalerein/v1/h/h1/d/d1/live\n" +
 				"acl subscribe 1 h1 whalerein/v1/h/h1/d/d1/notice\n" +
 				"acl subscribe 1 h1 whalerein/v1/h/h1/d/d1/reply\n" +
-				"acl write 1 - whalerein/v1/presence/device/d1\n" +
 				"acl write 1 h1 whalerein/v1/h/h1/d/d1/query\n" +
 				"acl write 1 h1 whalerein/v1/h/h1/d/d1/ready\n",
 		},
@@ -205,7 +199,6 @@ func TestControlMessagesRenderTheSetRequest(t *testing.T) {
 		"acl subscribe 2 h1 whalerein/v1/h/h1/d/d1/live",
 		"acl subscribe 2 h1 whalerein/v1/h/h1/d/d1/notice",
 		"acl subscribe 2 h1 whalerein/v1/h/h1/d/d1/reply",
-		"acl write 2 - whalerein/v1/presence/device/d1",
 		"acl write 2 h1 whalerein/v1/h/h1/d/d1/query",
 		"acl write 2 h1 whalerein/v1/h/h1/d/d1/ready",
 	}

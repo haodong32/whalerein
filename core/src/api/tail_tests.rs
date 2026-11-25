@@ -1362,14 +1362,19 @@ async fn a_transient_channel_path_failure_reconnects_the_watch_and_keeps_output(
     let peer_core = core.clone();
     let (gap_tx, gap_rx) = oneshot::channel();
     let mut gap_tx = Some(gap_tx);
+    let (reattached_tx, reattached_rx) = oneshot::channel();
+    let mut reattached_tx = Some(reattached_tx);
     let peer = tokio::spawn(async move {
         let mut stream = subscribe(&listener).await;
-        let baseline = host_state.lock().unwrap().query_attempts;
         let _ = gap_rx.await;
         // A gap forces a history read; make that read fail the way a channel
         // path change does, then let the retry succeed. The Host connection is
         // shared, so the retry reuses this broker session.
-        host_state.lock().unwrap().query_error = Some(whalerein_proto::ErrorCode::Internal);
+        let baseline = {
+            let mut host = host_state.lock().unwrap();
+            host.query_error = Some(whalerein_proto::ErrorCode::Internal);
+            host.query_attempts
+        };
         publish_control(
             &mut stream,
             history_event(
@@ -1383,31 +1388,28 @@ async fn a_transient_channel_path_failure_reconnects_the_watch_and_keeps_output(
             ),
         )
         .await;
-        let mut b = [0; 16];
-        let _ = stream.read(&mut b).await;
-        host_state.lock().unwrap().query_error = None;
-        let _ = baseline;
-        for _ in 0..80 {
-            publish(
-                &mut stream,
-                live_frame_event(&peer_core, "session-1", "watch-1", 2, "x"),
-            )
-            .await;
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        while host_state.lock().unwrap().query_attempts == baseline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        host_state.lock().unwrap().query_error = None;
+        let _ = reattached_rx.await;
+        publish(
+            &mut stream,
+            live_frame_event(&peer_core, "session-1", "watch-1", 2, "x"),
+        )
+        .await;
+        let mut b = [0; 16];
         let _ = stream.read(&mut b).await;
     });
     let key = core.session_key("session-1").await.unwrap();
     let mut previews = 0;
-    let mut armed = true;
     let count = core
         .watch_session(&key, Some(Duration::from_secs(12)), |update| {
             if let ViewUpdate::State(_) = update {
-                if armed {
-                    armed = false;
-                    if let Some(sender) = gap_tx.take() {
-                        let _ = sender.send(());
-                    }
+                if let Some(sender) = gap_tx.take() {
+                    let _ = sender.send(());
+                } else if let Some(sender) = reattached_tx.take() {
+                    let _ = sender.send(());
                 }
             }
             if matches!(update, ViewUpdate::Preview { .. }) {

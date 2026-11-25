@@ -22,8 +22,8 @@ const (
 
 // Topic grammar shared with the wire contract.
 const (
-	topicRoot     = "whalerein/v1/h/"
-	presenceRoot  = "whalerein/v1/presence/device/"
+	topicRoot = "whalerein/v1/h/"
+
 	controlPrefix = "$CONTROL/whalerein/v1"
 )
 
@@ -125,8 +125,6 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 				connection.Revision = revision
 			}
 		}
-		connection.Entries = append(connection.Entries,
-			Entry{Access: "write", Revision: connection.Revision, Filter: presenceRoot + deviceID})
 	case KindProbe:
 		// Probe clients prove credential acceptance only and receive no topic.
 	case KindAccess:

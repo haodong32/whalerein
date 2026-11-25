@@ -160,7 +160,13 @@ func New(deps Dependencies) (*Service, error) {
 	}
 	service.control = control
 	control.SetNotification(service.handleNotification)
-	deps.Presence.SetDeviceOfflineHandler(service.handleDeviceOffline)
+	deps.Presence.onEpochChange = func() {
+		service.receivers.reset()
+		service.advertisedMu.Lock()
+		clear(service.advertised)
+		service.advertisedMu.Unlock()
+	}
+	deps.Presence.SetConnectionClosedHandler(service.handleDeviceOffline)
 	return service, nil
 }
 
@@ -231,15 +237,7 @@ func (s *Service) handleNotification(notification *Notification) {
 		if notification.DeviceID != "" {
 			s.receivers.NoteConnection(receiverRoute{kind: "device", deviceID: notification.DeviceID}, notification.ConnID, notification.ClientID, online)
 		}
-		if !online {
-			ref := ConnectionRef{Epoch: notification.Epoch, ID: notification.ConnID}
-			s.handlersMu.RLock()
-			query := s.queryHandler
-			s.handlersMu.RUnlock()
-			if query != nil && ref.Valid() {
-				query.CancelConnection(ref)
-			}
-		}
+
 	}
 }
 
@@ -313,7 +311,7 @@ func (s *Service) Run(ctx context.Context) error {
 		subscribeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err = session.Subscribe(subscribeCtx, []string{
 			ResultFilter, EventFilter, DeviceQueryFilter, DeviceReadyFilter,
-			DeviceWillFilter, ControlReplyFilter, ControlEventFilter,
+			ControlReplyFilter, ControlEventFilter,
 		}, 1)
 		cancel()
 		if err != nil {
@@ -407,10 +405,6 @@ func (s *Service) baseContext() context.Context {
 // bounded handler calls.
 func (s *Service) HandleMessage(message Message) {
 	if s.control != nil && s.control.HandleMessage(message.Topic, message.Payload) {
-		return
-	}
-	if _, ok := ParseDeviceWillTopic(message.Topic); ok {
-		s.presence.HandleDeviceWill(message.Topic, message.Payload)
 		return
 	}
 	parsed, err := ParseTopic(message.Topic)
@@ -694,6 +688,11 @@ func (s *Service) publishAccessReady(hostID string, advertisement *whalereinv1.R
 		ctx, cancel := context.WithTimeout(s.baseContext(), 10*time.Second)
 		defer cancel()
 		if err := s.PublishRequest(ctx, hostID, request); err != nil {
+			s.advertisedMu.Lock()
+			if s.advertised[hostID] == fingerprint {
+				delete(s.advertised, hostID)
+			}
+			s.advertisedMu.Unlock()
 			s.metrics.TransportRejected(transportCodeOf(err), 0, 0)
 			s.logger.Warn("access receive advertisement publish failed",
 				"host", s.masker.Host(hostID), "code", transportCodeOf(err))
@@ -947,13 +946,19 @@ type deviceOfflineEvent struct {
 	BrokerEpoch   string `json:"broker_epoch,omitempty"`
 }
 
-// handleDeviceOffline publishes one device_offline JSON event to each host
+// handleDeviceOffline publishes an exact connection closure to each host
 // holding a live grant for the device. Hosts are resolved through the store
 // callback; the client id never implies a host.
 func (s *Service) handleDeviceOffline(deviceID, reason string, observedAt time.Time, ref ConnectionRef) {
 	if !validID(deviceID) {
 		s.metrics.PresenceInvalid()
 		return
+	}
+	s.handlersMu.RLock()
+	query := s.queryHandler
+	s.handlersMu.RUnlock()
+	if query != nil && ref.Valid() {
+		query.CancelConnection(ref)
 	}
 	if s.deviceHosts == nil {
 		s.metrics.DeviceOfflinePublishFailed()

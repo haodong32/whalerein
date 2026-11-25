@@ -111,8 +111,9 @@ type AuthService interface {
 	AuthenticateRelayRequest(ctx context.Context, purpose string, fields auth.RelayFields, signature []byte) error
 }
 
-// Store supplies the two durable reads the relay needs.
+// Store supplies the durable authority and metadata used by the relay.
 type Store interface {
+	GetRequest(context.Context, string) (store.Request, error)
 	GetPayload(ctx context.Context, objectID string) (store.PayloadObject, error)
 	AdmissionGrantFor(ctx context.Context, hostID, deviceID string) (store.AdmissionGrant, error)
 }
@@ -131,7 +132,7 @@ type Payloads interface {
 // query waiter. It is optional: a disabled or command-only directory never
 // consults it.
 type QueryScopes interface {
-	AuthorizeObjectReserve(ctx context.Context, hostID, deviceID, sessionID, channelID, requestID, connectionRef string, enrollment uint64, expiresAtUnixMs int64) error
+	AuthorizeObjectReserve(ctx context.Context, hostID, deviceID, channelID, requestID, connectionRef string, enrollment uint64, expiresAtUnixMs int64) (string, error)
 }
 
 // Dependencies wires the relay service.
@@ -301,33 +302,29 @@ func (s *Service) Reserve(ctx context.Context, req ReserveRequest) (Reservation,
 	if err != nil {
 		return Reservation{}, err
 	}
-	if err := s.authorizeQueryScope(ctx, req, grant); err != nil {
+	sessionID, err := s.reservationSession(ctx, req, grant)
+	if err != nil {
 		return Reservation{}, err
 	}
 	objectID, err := newObjectID()
 	if err != nil {
 		return Reservation{}, err
 	}
-	// A query-scoped object records the admitted request and Broker connection
-	// as its parent identity. A durable command object keeps the opaque object
-	// id as its parent identity because the wire request carries no request
-	// identity for it.
-	messageID, requestID := objectID, ""
-	enrollment := int64Ptr(grant.EnrollmentGeneration)
-	connectionRef := ""
+	// Result objects have an admitted parent. A pre-admission command body or
+	// attachment part is identified by its own opaque message id.
+	messageID := objectID
+	var enrollment *int64
 	if req.RequestID != "" {
-		messageID, requestID = "", req.RequestID
-		connectionRef = req.ConnectionRef
-	} else {
-		enrollment = nil
+		messageID = ""
+		enrollment = int64Ptr(grant.EnrollmentGeneration)
 	}
 	object, err := s.payloads.Reserve(ctx, payload.ReserveInput{
 		ObjectID:                   objectID,
 		HostID:                     req.HostID,
 		DeviceID:                   req.DeviceID,
-		AppSession:                 req.SessionID,
+		AppSession:                 sessionID,
 		ChannelID:                  req.ChannelID,
-		RequestID:                  requestID,
+		RequestID:                  req.RequestID,
 		MessageID:                  messageID,
 		Purpose:                    purposeName(req.Purpose),
 		PartID:                     req.PartID,
@@ -338,7 +335,7 @@ func (s *Service) Reserve(ctx context.Context, req ReserveRequest) (Reservation,
 		RevocationGeneration:       int64Ptr(grant.RevocationGeneration),
 		DeviceRevocationGeneration: int64Ptr(grant.DeviceRevocationGeneration),
 		EnrollmentGeneration:       enrollment,
-		ConnectionRef:              connectionRef,
+		ConnectionRef:              req.ConnectionRef,
 	})
 	if err != nil {
 		return Reservation{}, translate(err)
@@ -438,40 +435,58 @@ func (s *Service) authorizeReserve(ctx context.Context, req ReserveRequest) (sto
 	return s.activeGrant(ctx, req.HostID, req.DeviceID)
 }
 
-// authorizeQueryScope binds a query-scoped reservation to one live transient
-// waiter and the current enrollment. Command and attachment reservations carry
-// no request id and keep their existing behavior.
-func (s *Service) authorizeQueryScope(ctx context.Context, req ReserveRequest, grant store.AdmissionGrant) error {
+// reservationSession derives the stored login-session scope from the verified
+// Device identity or the original Broker connection of a Host result.
+func (s *Service) reservationSession(ctx context.Context, req ReserveRequest, grant store.AdmissionGrant) (string, error) {
 	if req.RequestID == "" {
 		if req.ConnectionRef != "" || req.EnrollmentGeneration != 0 {
-			return fmt.Errorf("%w: connection scope requires a request id", ErrInvalid)
+			return "", fmt.Errorf("%w: connection scope requires a request id", ErrInvalid)
 		}
-		return nil
+		return req.SessionID, nil
 	}
 	if req.Purpose != whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT &&
 		req.Purpose != whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_HISTORY_PAGE {
-		return fmt.Errorf("%w: query scope is only valid for result ciphertext", ErrInvalid)
+		return "", fmt.Errorf("%w: query scope is only valid for result ciphertext", ErrInvalid)
 	}
 	if err := validUTF8Component("request id", req.RequestID, 512); err != nil {
-		return err
+		return "", err
 	}
 	if err := validUTF8Component("connection ref", req.ConnectionRef, 128); err != nil {
-		return err
+		return "", err
 	}
-	if req.ConnectionRef == "" || !validConnectionRef(req.ConnectionRef) {
-		return fmt.Errorf("%w: connection ref is invalid", ErrInvalid)
+	if req.ConnectionRef == "" {
+		// Durable result objects belong to the command admitted by Access.
+		row, err := s.store.GetRequest(ctx, req.RequestID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return "", ErrForbidden
+			}
+			return "", err
+		}
+		if row.Kind != whalereinv1.RequestKind_REQUEST_KIND_COMMAND || row.HostID != req.HostID ||
+			row.DeviceID != req.DeviceID || row.ChannelID != req.ChannelID || row.Stamp == nil ||
+			row.Stamp.GrantGeneration != grant.GrantGeneration || row.Stamp.RevocationGeneration != grant.RevocationGeneration ||
+			row.Stamp.DeviceRevocationGeneration != grant.DeviceRevocationGeneration ||
+			req.ExpiresAtUnixMs > row.ExpiresAt.UnixMilli() || (req.SessionID != "" && req.SessionID != row.DeviceSessionID) {
+			return "", ErrForbidden
+		}
+		return row.DeviceSessionID, nil
+	}
+	if !validConnectionRef(req.ConnectionRef) {
+		return "", fmt.Errorf("%w: connection ref is invalid", ErrInvalid)
 	}
 	if req.EnrollmentGeneration != grant.EnrollmentGeneration {
-		return ErrForbidden
+		return "", ErrForbidden
 	}
 	if s.queryScopes == nil {
-		return ErrForbidden
+		return "", ErrForbidden
 	}
-	if err := s.queryScopes.AuthorizeObjectReserve(ctx, req.HostID, req.DeviceID, req.SessionID,
-		req.ChannelID, req.RequestID, req.ConnectionRef, req.EnrollmentGeneration, req.ExpiresAtUnixMs); err != nil {
-		return ErrForbidden
+	sessionID, err := s.queryScopes.AuthorizeObjectReserve(ctx, req.HostID, req.DeviceID, req.ChannelID,
+		req.RequestID, req.ConnectionRef, req.EnrollmentGeneration, req.ExpiresAtUnixMs)
+	if err != nil || (req.SessionID != "" && req.SessionID != sessionID) {
+		return "", ErrForbidden
 	}
-	return nil
+	return sessionID, nil
 }
 
 // validConnectionRef checks the Broker-issued <epoch>:<connection> shape.
@@ -493,21 +508,31 @@ func validConnectionRef(value string) bool {
 	return true
 }
 
-// checkQueryScope reauthorizes one already-reserved query object against its
-// original live waiter before finish or issue.
-func (s *Service) checkQueryScope(ctx context.Context, object store.PayloadObject) error {
-	if object.RequestID == "" {
+// checkResultParent repeats the parent authority check using the binding
+// stored at reservation. A missing waiter or command cannot publish bytes.
+func (s *Service) checkResultParent(ctx context.Context, object store.PayloadObject) error {
+	if object.RequestID == "" && object.ConnectionRef == "" {
 		return nil
 	}
-	if object.EnrollmentGeneration == nil || object.ConnectionRef == "" || s.queryScopes == nil {
+	if object.RequestID == "" || object.EnrollmentGeneration == nil || *object.EnrollmentGeneration < 0 ||
+		object.GrantGeneration == nil || object.RevocationGeneration == nil || object.DeviceRevocationGeneration == nil {
 		return ErrForbidden
 	}
-	if *object.EnrollmentGeneration < 0 {
-		return ErrForbidden
+	binding := ReserveRequest{
+		HostID: object.HostID, DeviceID: object.DeviceID, SessionID: object.AppSession,
+		ChannelID: object.ChannelID, RequestID: object.RequestID, ConnectionRef: object.ConnectionRef,
+		Purpose:              whalereinv1.PayloadPurpose(whalereinv1.PayloadPurpose_value[object.Purpose]),
+		EnrollmentGeneration: uint64(*object.EnrollmentGeneration), ExpiresAtUnixMs: object.ExpiresAt.UnixMilli(),
 	}
-	if err := s.queryScopes.AuthorizeObjectReserve(ctx, object.HostID, object.DeviceID,
-		object.AppSession, object.ChannelID, object.RequestID, object.ConnectionRef,
-		uint64(*object.EnrollmentGeneration), object.ExpiresAt.UnixMilli()); err != nil {
+	grant := store.AdmissionGrant{
+		GrantGeneration: uint64(*object.GrantGeneration), RevocationGeneration: uint64(*object.RevocationGeneration),
+		DeviceRevocationGeneration: uint64(*object.DeviceRevocationGeneration), EnrollmentGeneration: binding.EnrollmentGeneration,
+	}
+	session, err := s.reservationSession(ctx, binding, grant)
+	if err != nil {
+		return err
+	}
+	if session != object.AppSession {
 		return ErrForbidden
 	}
 	return nil
@@ -566,7 +591,7 @@ func (s *Service) Finish(ctx context.Context, req FinishRequest) (Object, error)
 	if err != nil {
 		return Object{}, err
 	}
-	if err := s.checkQueryScope(ctx, object); err != nil {
+	if err := s.checkResultParent(ctx, object); err != nil {
 		return Object{}, err
 	}
 	if req.CiphertextBytes != uint64(object.Length) {
@@ -724,12 +749,7 @@ func (s *Service) checkDeviceScope(ctx context.Context, identity auth.Identity, 
 	if object.DeviceID == "" || identity.DeviceID != object.DeviceID {
 		return ErrForbidden
 	}
-	// A Host-originated object carries no Access-managed App session and is
-	// bound by Host, Device, channel, grant and the sealed Noise channel. A
-	// session-bound reader of the same Device therefore cannot be denied here
-	// for that empty field, and still cannot decrypt another channel's
-	// ciphertext. An object reserved under a concrete session must match it.
-	if object.RequestID == "" && object.AppSession != "" && identity.SessionID != object.AppSession {
+	if (object.RequestID != "" || object.AppSession != "") && identity.SessionID != object.AppSession {
 		return ErrForbidden
 	}
 	if err := s.auth.AuthorizeHost(ctx, identity, object.HostID); err != nil {

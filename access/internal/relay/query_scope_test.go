@@ -7,21 +7,24 @@ import (
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/auth"
+	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
 
 type fakeQueryScopes struct {
-	calls []string
-	err   error
+	sessionID string
+	calls     []string
+	err       error
 }
 
-func (f *fakeQueryScopes) AuthorizeObjectReserve(_ context.Context, hostID, deviceID, sessionID, channelID, requestID, connectionRef string, enrollment uint64, expiresAtUnixMs int64) error {
+func (f *fakeQueryScopes) AuthorizeObjectReserve(_ context.Context, hostID, deviceID, channelID, requestID, connectionRef string, enrollment uint64, expiresAtUnixMs int64) (string, error) {
 	f.calls = append(f.calls, requestID+"\x00"+connectionRef)
-	return f.err
+	return f.sessionID, f.err
 }
 
 func queryReserveRequest() ReserveRequest {
 	request := validReserveRequest()
+	request.SessionID = ""
 	request.RequestID = "request-1"
 	request.ConnectionRef = "0123456789abcdef:7"
 	request.EnrollmentGeneration = 0
@@ -31,7 +34,7 @@ func queryReserveRequest() ReserveRequest {
 func TestRelayQueryReserveBindsTheAdmittedRequestAndConnection(t *testing.T) {
 	service, _, metadata, payloads := newTestService(t, true)
 	metadata.grant = testGrant()
-	scopes := &fakeQueryScopes{}
+	scopes := &fakeQueryScopes{sessionID: "login-session"}
 	service.SetQueryScopes(scopes)
 
 	reservation, err := service.Reserve(context.Background(), queryReserveRequest())
@@ -45,11 +48,30 @@ func TestRelayQueryReserveBindsTheAdmittedRequestAndConnection(t *testing.T) {
 	if input.RequestID != "request-1" || input.MessageID != "" {
 		t.Fatalf("query parent identity = request %q message %q", input.RequestID, input.MessageID)
 	}
-	if input.ConnectionRef != "0123456789abcdef:7" {
+	if input.AppSession != "login-session" || input.ConnectionRef != "0123456789abcdef:7" {
 		t.Fatalf("connection ref = %q", input.ConnectionRef)
 	}
 	if input.EnrollmentGeneration == nil || *input.EnrollmentGeneration != 0 {
 		t.Fatal("enrollment generation was not bound")
+	}
+}
+
+func TestDurableCommandResultInheritsLoginFromCommand(t *testing.T) {
+	service, _, metadata, payloads := newTestService(t, true)
+	metadata.grant = testGrant()
+	req := queryReserveRequest()
+	req.ConnectionRef = ""
+	grant := metadata.grant
+	metadata.command = store.Request{RequestID: req.RequestID, Kind: whalereinv1.RequestKind_REQUEST_KIND_COMMAND,
+		HostID: req.HostID, DeviceID: req.DeviceID, ChannelID: req.ChannelID, DeviceSessionID: "command-login",
+		ExpiresAt: time.UnixMilli(req.ExpiresAtUnixMs), Stamp: &store.GrantStamp{GrantGeneration: grant.GrantGeneration,
+			RevocationGeneration: grant.RevocationGeneration, DeviceRevocationGeneration: grant.DeviceRevocationGeneration}}
+	if _, err := service.Reserve(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	input := payloads.reserved[0]
+	if input.AppSession != "command-login" || input.RequestID != req.RequestID || input.ConnectionRef != "" {
+		t.Fatal("command parent scope was lost")
 	}
 }
 
@@ -75,12 +97,12 @@ func TestRelayQueryReserveRejectsForeignScope(t *testing.T) {
 			want:   ErrForbidden,
 		},
 		{
-			name: "missing connection ref",
+			name: "no admitted command for an unscoped result",
 			mutate: func(request *ReserveRequest) {
 				request.ConnectionRef = ""
 			},
 			scopes: &fakeQueryScopes{},
-			want:   ErrInvalid,
+			want:   ErrForbidden,
 		},
 		{
 			name: "invalid connection ref",
@@ -156,7 +178,7 @@ func TestRelayDeviceFetchRequiresItsOwnIssuedObject(t *testing.T) {
 	object.RequestID = "request-1"
 	object.MessageID = ""
 	object.ConnectionRef = "0123456789abcdef:7"
-	object.AppSession = "application-session"
+	object.AppSession = "managed-login"
 	issuedAt := testNow.Add(-time.Second)
 	object.IssuedAt = &issuedAt
 	metadata.objects[object.ObjectID] = object
@@ -173,7 +195,7 @@ func TestRelayDeviceFetchRequiresItsOwnIssuedObject(t *testing.T) {
 	unissued := object
 	unissued.IssuedAt = nil
 	metadata.objects[object.ObjectID] = unissued
-	authority.identity = auth.Identity{DeviceID: "device-1"}
+	authority.identity = auth.Identity{DeviceID: "device-1", SessionID: object.AppSession}
 	if _, err := service.Fetch(context.Background(), ObjectRequest{
 		ObjectID: object.ObjectID, RelayVersion: Epoch, BearerToken: "token",
 	}); !errors.Is(err, ErrForbidden) {

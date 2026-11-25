@@ -3,7 +3,7 @@
 //! All bodies use the proto3 JSON encoding of `proto/v1`. The client never
 //! exposes these DTOs outside Core.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -117,23 +117,6 @@ impl std::fmt::Display for AccessError {
 
 impl std::error::Error for AccessError {}
 
-/// Latest observed transport state of one in-flight read-only request.
-/// A successful HTTP exchange clears an earlier transient error.
-#[derive(Default)]
-pub(crate) struct TransportObservation(Mutex<Option<AccessError>>);
-
-impl TransportObservation {
-    pub(crate) fn recovered(&self) {
-        *self.0.lock().expect("transport observation") = None;
-    }
-    pub(crate) fn failed(&self, error: &AccessError) {
-        *self.0.lock().expect("transport observation") = Some(error.clone());
-    }
-    pub(crate) fn latest_error(&self) -> Option<AccessError> {
-        self.0.lock().expect("transport observation").clone()
-    }
-}
-
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum CloudPairingState {
@@ -153,7 +136,6 @@ pub struct AccessClient {
     transport: TransportBudget,
     response_limit: usize,
     pub(crate) diagnostics: Arc<Diagnostics>,
-    transport_observation: Option<Arc<TransportObservation>>,
     cloud_session: Option<(String, Arc<dyn crate::security::SecretStore>)>,
 }
 
@@ -209,7 +191,6 @@ impl AccessClient {
             transport,
             response_limit: https_body_limit(transport.envelope_bytes),
             diagnostics,
-            transport_observation: None,
             cloud_session: None,
         })
     }
@@ -230,14 +211,6 @@ impl AccessClient {
 
     pub(crate) fn transport_budget(&self) -> TransportBudget {
         self.transport
-    }
-
-    pub(crate) fn with_transport_observation(
-        mut self,
-        observation: Arc<TransportObservation>,
-    ) -> Self {
-        self.transport_observation = Some(observation);
-        self
     }
 
     pub(crate) fn with_cloud_session(
@@ -400,26 +373,16 @@ impl AccessClient {
                         elapsed_ms: started.elapsed().as_millis() as u64,
                     });
             }
-            let error = if error.is_connect() || error.is_builder() {
+            if error.is_connect() || error.is_builder() {
                 AccessError::not_sent()
             } else {
                 AccessError::transport("Access request failed")
-            };
-            if let Some(observation) = &self.transport_observation {
-                observation.failed(&error);
             }
-            error
         })?;
         let status = response.status().as_u16();
         observe_headers(response.headers());
         let result = parse_response(response, limit).await;
         self.check_cloud_session()?;
-        if let Some(observation) = &self.transport_observation {
-            match &result {
-                Err(error) if error.is_retryable_transport() => observation.failed(error),
-                _ => observation.recovered(),
-            }
-        }
         if log_exchange {
             self.diagnostics.record(DiagnosticKind::HttpCompleted {
                 status,
@@ -776,17 +739,6 @@ impl AccessClient {
         request: &HostRequest,
         allow_host_accepted: bool,
     ) -> CoreResult<RequestState> {
-        self.wait_for_request_observed(request, allow_host_accepted, None)
-            .await
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn wait_for_request_observed(
-        &self,
-        request: &HostRequest,
-        allow_host_accepted: bool,
-        observation: Option<&TransportObservation>,
-    ) -> CoreResult<RequestState> {
         let deadline = now_unix_ms() + self.request_timeout.as_millis() as i64;
         let started = std::time::Instant::now();
         let logged_request_id = request_id_for_log(&request.request_id);
@@ -804,9 +756,6 @@ impl AccessClient {
             match self.read_request(&request.request_id, false, limit).await {
                 Ok(state) => {
                     self.validate_request_state(request, &state)?;
-                    if let Some(observation) = observation {
-                        observation.recovered();
-                    }
                     if transport_failed {
                         transport_failed = false;
                         self.diagnostics
@@ -823,9 +772,6 @@ impl AccessClient {
                     }
                 }
                 Err(error) if error.is_retryable_transport() => {
-                    if let Some(observation) = observation {
-                        observation.failed(&error);
-                    }
                     if !transport_failed {
                         transport_failed = true;
                         self.diagnostics
@@ -1470,7 +1416,7 @@ mod transport_tests {
     }
 
     #[tokio::test]
-    async fn wait_transport_observation_clears_only_after_a_successful_poll() {
+    async fn poll_diagnostics_report_recovery_only_after_a_successful_response() {
         let calls = Arc::new(Mutex::new(0u32));
         let seen = calls.clone();
         let server = MockServer::start(Arc::new(move |_| {
@@ -1503,15 +1449,13 @@ mod transport_tests {
         )
         .unwrap();
         client.set_poll_timing(Duration::from_secs(5), Duration::from_millis(5));
-        let observation = TransportObservation::default();
         let result = tokio::time::timeout(
             Duration::from_millis(100),
-            client.wait_for_request_observed(&poll_request(), false, Some(&observation)),
+            client.wait_for_request(&poll_request(), false),
         )
         .await;
         assert!(result.is_err());
         assert!(*calls.lock().unwrap() >= 2);
-        assert!(observation.latest_error().is_none());
         {
             let mut events = sink.0.lock().unwrap();
             assert_eq!(events.len(), 2);
@@ -1537,16 +1481,12 @@ mod transport_tests {
         )
         .unwrap();
         client.set_poll_timing(Duration::from_secs(5), Duration::from_millis(5));
-        let observation = TransportObservation::default();
         assert!(tokio::time::timeout(
             Duration::from_millis(100),
-            client.wait_for_request_observed(&poll_request(), false, Some(&observation))
+            client.wait_for_request(&poll_request(), false)
         )
         .await
         .is_err());
-        assert!(observation
-            .latest_error()
-            .is_some_and(|error| error.is_retryable_transport()));
         let events = sink.0.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event"], "access_request_poll_failed");

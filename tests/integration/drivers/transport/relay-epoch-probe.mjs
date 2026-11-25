@@ -241,8 +241,11 @@ async function caseLegacy() {
       assert.equal(delivered, 0, 'a legacy epoch must not reach the Host business handler')
       await publisher.publishAsync(requestTopic, proto.encode('whalerein.v1.HostRequest', {
         request_id: validId, host_id: hostId, kind: 'REQUEST_KIND_QUERY', relay_version: 5,
-        body: Buffer.from('valid'), protocol_version: 1,
-      }), { qos: 1 })
+        body: Buffer.from('valid'), protocol_version: 1, expires_at_unix_ms: Date.now() + 30000,
+      }), { qos: 1, properties: {
+        messageExpiryInterval: 30, correlationData: Buffer.from(validId),
+        responseTopic: `whalerein/v1/h/${hostId}/result`,
+      } })
       const deadline = Date.now() + 2000
       while (delivered === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
       assert.equal(delivered, 1, 'a current epoch request still reaches the handler')

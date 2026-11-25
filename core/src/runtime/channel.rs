@@ -480,6 +480,13 @@ async fn send_handshake(
         Some(OnlineStatus::Succeeded) => Ok(result.result_body),
         Some(OnlineStatus::HostOffline) => Err(CoreError::HostOffline),
         Some(OnlineStatus::Rejected) => Err(CoreError::HostRejected),
+        Some(OnlineStatus::Failed)
+            if result.error_code == whalerein_proto::ErrorCode::Unavailable as i32 =>
+        {
+            Err(CoreError::Unavailable(
+                "Host presence is unavailable".into(),
+            ))
+        }
         Some(OnlineStatus::Failed) | Some(OnlineStatus::Unknown) => Err(CoreError::UnknownResult),
         _ => Err(CoreError::Internal("handshake did not complete".into())),
     }

@@ -912,14 +912,14 @@ async fn wait_reports_persistent_transport_failure_during_recovery_handshake() {
         host.fail_handshake_polls_after_replacement = true;
     }
     let started = tokio::time::Instant::now();
-    let outcome = core
+    let error = core
         .wait_session(&key("host-1", "session-1"), 1500)
         .await
-        .unwrap();
-    // The caller's bounded wait deadline is authoritative when recovery cannot
-    // establish a new channel in time; it reports a timeout observation rather
-    // than a fabricated result.
-    assert_eq!(outcome.reason, crate::api::WaitReason::Timeout);
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CoreError::Timeout | CoreError::Unavailable(_)
+    ));
     assert!(started.elapsed() < Duration::from_secs(2));
     assert!(access.host.lock().unwrap().wait_queries >= 1);
     assert!(core.is_paired());

@@ -30,9 +30,11 @@ def test_wait_deadline_replacement_does_not_reset_total(scenario, paired_device,
     started = time.monotonic()
     try:
         wait(lambda: any(row["status"] == "active" for row in read_records(records)), timeout=5)
+        first_observed = time.monotonic()
         first = read_records(records)[0]["timeoutMs"]
         while time.monotonic() - started < 6.3:
             time.sleep(0.02)
+        remaining_at_close = 8 - (time.monotonic() - first_observed)
         (records.parent / "test-wait-close-channel").touch()
         wait(lambda: any(row["status"] == "aborted" for row in read_records(records))
              and any(row["status"] == "active" for row in read_records(records)), timeout=2)
@@ -46,7 +48,8 @@ def test_wait_deadline_replacement_does_not_reset_total(scenario, paired_device,
         Path("/reports/wait-near-deadline.json").write_text(json.dumps(evidence))
         assert process.returncode == 0 and result["data"]["reason"] == "timeout"
         assert 7.4 <= elapsed <= 9.0
-        assert min(active) + 2000 < first
+        assert 0 < min(active) < first
+        assert min(active) <= remaining_at_close * 1000
         assert not any(event["type"] == "session/interrupted" for event in scenario.dsh.snapshot(session_id)["events"])
     finally:
         if process.poll() is None:

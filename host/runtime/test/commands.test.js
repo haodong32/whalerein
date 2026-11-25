@@ -77,6 +77,27 @@ function makeService(options = {}) {
   }
 }
 
+test('closing the observation connection preserves an admitted command until its native receipt', async () => {
+  const {service, adapter, store} = makeService()
+  const request = makeRequest()
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const execute = adapter.execute.bind(adapter)
+  adapter.execute = async (session, operation, context) => {
+    entered.resolve(context.signal)
+    await release.promise
+    return execute(session, operation, context)
+  }
+  const result = service.handle({request, payload:{send_message:{session_id:'s1', text:'fixture'}}})
+  const signal = await entered.promise
+  service.cancelChannel(request.device_id, request.channel_id, 'connection_closed')
+  const interrupted = signal.aborted
+  release.resolve()
+  assert.equal((await result).status, 'succeeded')
+  assert.equal(interrupted, false)
+  assert.equal(store.getCommand(request.device_id, request.command_id).status, 'succeeded')
+})
+
 test('when a control command is valid, the host acknowledges it before execution and stores its terminal payload', async () => {
   const { service, store, order } = makeService()
   const request = makeRequest()
@@ -710,7 +731,9 @@ test('wait queries enforce capability and lifetime before invoking the source', 
   assert.equal(actualTimeout, 8000)
   assert.equal(result.response.session_wait_result.reason, 'WAIT_IDLE')
   assert.equal(result.response.session_wait_result.wait_id, 'w1')
-  assert.equal((await service.handle({ request: { ...request, expires_at_unix_ms: 1500 }, payload })).errorCode, 'expired')
+  await service.handle({ request: { ...request, expires_at_unix_ms: 1500 }, payload })
+  assert.equal(actualTimeout, 400)
+  assert.equal((await service.handle({ request: { ...request, expires_at_unix_ms: 1000 }, payload })).errorCode, 'expired')
   assert.equal((await service.handle({ request, payload: { wait_session: { ...payload.wait_session, timeout_ms: 0 } } })).errorCode, 'invalid_argument')
   assert.equal((await service.handle({ request, payload: { wait_session: { ...payload.wait_session, timeout_ms: 2147483648 } } })).errorCode, 'invalid_argument')
   assert.equal(service.waits.size, 0)
