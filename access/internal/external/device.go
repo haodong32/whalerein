@@ -22,13 +22,14 @@ type DevicePairing interface {
 // DeviceGrantStore observes and revokes one Cloud-scoped regional grant.
 type DeviceGrantStore interface {
 	CloudDeviceGrantStatus(context.Context, string, string, string) (string, error)
-	BeginCloudDeviceRevocation(context.Context, string, string, string, time.Time) (bool, error)
-	CompleteCloudDeviceRevocation(context.Context, string, string, time.Time) error
+	BeginCloudDeviceRevocation(context.Context, string, string, string, time.Time) (store.CloudDeviceRevocation, error)
+	CompleteCloudDeviceRevocationAt(context.Context, string, string, int64, *store.ConnectionRef, time.Time) error
 }
 
-// DeviceGrantEnforcer applies the durable grant revocation to live clients.
+// DeviceGrantEnforcer applies one frozen grant revocation scope to live
+// clients and reports the connection instances the Broker confirmed.
 type DeviceGrantEnforcer interface {
-	RevokeHostGrant(context.Context, string, string) error
+	EnforceRevocationScope(context.Context, store.RevocationScope) (store.EnforcementReceipt, error)
 }
 
 // WithDeviceGrants wires the pairing and grant lifecycle services.
@@ -124,18 +125,27 @@ func (s *Service) DeviceGrantStatus(ctx context.Context, workspaceID, hostID, de
 }
 
 // RevokeDeviceGrant leaves a pending fence if live enforcement is unavailable.
+// The receipt freezes the grant and enrollment generations, so a retry never
+// revokes a newer grant and records enforced_at only after the Broker confirms
+// the frozen scope. An absent or already replaced connection counts as
+// enforced for the old scope.
 func (s *Service) RevokeDeviceGrant(ctx context.Context, workspaceID, hostID, deviceID string) error {
 	if s.deviceGrants == nil || s.deviceEnforcer == nil {
 		return ErrEnforcementUnavailable
 	}
-	hasGrant, err := s.deviceGrants.BeginCloudDeviceRevocation(ctx, workspaceID, hostID, deviceID, s.now())
+	frozen, err := s.deviceGrants.BeginCloudDeviceRevocation(ctx, workspaceID, hostID, deviceID, s.now())
 	if err != nil {
 		return err
 	}
-	if hasGrant {
-		if err := s.deviceEnforcer.RevokeHostGrant(ctx, hostID, deviceID); err != nil {
-			return fmt.Errorf("%w: %v", ErrEnforcementUnavailable, err)
-		}
+	if frozen.Enforced {
+		return nil
 	}
-	return s.deviceGrants.CompleteCloudDeviceRevocation(ctx, hostID, deviceID, s.now())
+	if !frozen.Exists {
+		return s.deviceGrants.CompleteCloudDeviceRevocationAt(ctx, hostID, deviceID, frozen.EnrollmentGeneration, nil, s.now())
+	}
+	receipt, err := s.deviceEnforcer.EnforceRevocationScope(ctx, frozen.Scope())
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrEnforcementUnavailable, err)
+	}
+	return s.deviceGrants.CompleteCloudDeviceRevocationAt(ctx, hostID, deviceID, frozen.EnrollmentGeneration, receipt.Primary(), s.now())
 }

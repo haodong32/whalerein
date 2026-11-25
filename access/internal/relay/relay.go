@@ -34,7 +34,7 @@ import (
 
 // Epoch is the only relay contract this build serves. Every request must carry
 // it or fails with ErrEpoch (protocol_version_incompatible).
-const Epoch uint32 = 4
+const Epoch uint32 = 5
 
 // Terminal relay errors. The HTTP layer maps each to the stable wire status and
 // error code from proto/v1/WIRE.md.
@@ -111,8 +111,9 @@ type AuthService interface {
 	AuthenticateRelayRequest(ctx context.Context, purpose string, fields auth.RelayFields, signature []byte) error
 }
 
-// Store supplies the two durable reads the relay needs.
+// Store supplies the durable authority and metadata used by the relay.
 type Store interface {
+	GetRequest(context.Context, string) (store.Request, error)
 	GetPayload(ctx context.Context, objectID string) (store.PayloadObject, error)
 	AdmissionGrantFor(ctx context.Context, hostID, deviceID string) (store.AdmissionGrant, error)
 }
@@ -127,22 +128,31 @@ type Payloads interface {
 	Cancel(ctx context.Context, ref payload.Ref) error
 }
 
+// QueryScopes authorizes a ciphertext reservation against one live transient
+// query waiter. It is optional: a disabled or command-only directory never
+// consults it.
+type QueryScopes interface {
+	AuthorizeObjectReserve(ctx context.Context, hostID, deviceID, channelID, requestID, connectionRef string, enrollment uint64, expiresAtUnixMs int64) (string, error)
+}
+
 // Dependencies wires the relay service.
 type Dependencies struct {
-	Auth     AuthService
-	Store    Store
-	Payloads Payloads
-	Config   Config
-	Now      func() time.Time
+	Auth        AuthService
+	Store       Store
+	Payloads    Payloads
+	QueryScopes QueryScopes
+	Config      Config
+	Now         func() time.Time
 }
 
 // Service implements the scoped ciphertext directory policy.
 type Service struct {
-	auth     AuthService
-	store    Store
-	payloads Payloads
-	config   Config
-	now      func() time.Time
+	auth        AuthService
+	store       Store
+	payloads    Payloads
+	queryScopes QueryScopes
+	config      Config
+	now         func() time.Time
 }
 
 // New validates the seams. A disabled directory still returns a service so the
@@ -163,16 +173,25 @@ func New(deps Dependencies) (*Service, error) {
 		}
 	}
 	return &Service{
-		auth:     deps.Auth,
-		store:    deps.Store,
-		payloads: deps.Payloads,
-		config:   deps.Config,
-		now:      deps.Now,
+		auth:        deps.Auth,
+		store:       deps.Store,
+		payloads:    deps.Payloads,
+		queryScopes: deps.QueryScopes,
+		config:      deps.Config,
+		now:         deps.Now,
 	}, nil
 }
 
 // Enabled reports whether the directory may reserve or release objects.
 func (s *Service) Enabled() bool { return s != nil && s.config.Enabled }
+
+// SetQueryScopes installs the transient query waiter authority. It is called
+// once during wiring, after the query service exists.
+func (s *Service) SetQueryScopes(scopes QueryScopes) {
+	if s != nil {
+		s.queryScopes = scopes
+	}
+}
 
 // ReserveRequest is one decoded reservation body plus the transport
 // credentials. Host callers sign the body; Device callers send a bearer token.
@@ -191,6 +210,12 @@ type ReserveRequest struct {
 	Signature       []byte
 	BearerToken     string
 	OwnerNode       string
+	// Query-lane binding. RequestID, ConnectionRef and EnrollmentGeneration
+	// are set only for a result reserved under a live transient query waiter.
+	// Durable command objects and attachment parts keep them empty/zero.
+	RequestID            string
+	ConnectionRef        string
+	EnrollmentGeneration uint64
 }
 
 // Reservation is the accepted reservation returned to the caller.
@@ -277,20 +302,30 @@ func (s *Service) Reserve(ctx context.Context, req ReserveRequest) (Reservation,
 	if err != nil {
 		return Reservation{}, err
 	}
+	sessionID, err := s.reservationSession(ctx, req, grant)
+	if err != nil {
+		return Reservation{}, err
+	}
 	objectID, err := newObjectID()
 	if err != nil {
 		return Reservation{}, err
 	}
+	// Result objects have an admitted parent. A pre-admission command body or
+	// attachment part is identified by its own opaque message id.
+	messageID := objectID
+	var enrollment *int64
+	if req.RequestID != "" {
+		messageID = ""
+		enrollment = int64Ptr(grant.EnrollmentGeneration)
+	}
 	object, err := s.payloads.Reserve(ctx, payload.ReserveInput{
-		ObjectID:   objectID,
-		HostID:     req.HostID,
-		DeviceID:   req.DeviceID,
-		AppSession: req.SessionID,
-		ChannelID:  req.ChannelID,
-		// The relay wire request carries no request/message/event identity.
-		// The opaque object id is the only correlation available, so it is
-		// recorded as the parent identity; it confers no authority.
-		MessageID:                  objectID,
+		ObjectID:                   objectID,
+		HostID:                     req.HostID,
+		DeviceID:                   req.DeviceID,
+		AppSession:                 sessionID,
+		ChannelID:                  req.ChannelID,
+		RequestID:                  req.RequestID,
+		MessageID:                  messageID,
 		Purpose:                    purposeName(req.Purpose),
 		PartID:                     req.PartID,
 		Length:                     int64(req.CiphertextBytes),
@@ -299,6 +334,8 @@ func (s *Service) Reserve(ctx context.Context, req ReserveRequest) (Reservation,
 		GrantGeneration:            int64Ptr(grant.GrantGeneration),
 		RevocationGeneration:       int64Ptr(grant.RevocationGeneration),
 		DeviceRevocationGeneration: int64Ptr(grant.DeviceRevocationGeneration),
+		EnrollmentGeneration:       enrollment,
+		ConnectionRef:              req.ConnectionRef,
 	})
 	if err != nil {
 		return Reservation{}, translate(err)
@@ -398,6 +435,109 @@ func (s *Service) authorizeReserve(ctx context.Context, req ReserveRequest) (sto
 	return s.activeGrant(ctx, req.HostID, req.DeviceID)
 }
 
+// reservationSession derives the stored login-session scope from the verified
+// Device identity or the original Broker connection of a Host result.
+func (s *Service) reservationSession(ctx context.Context, req ReserveRequest, grant store.AdmissionGrant) (string, error) {
+	if req.RequestID == "" {
+		if req.ConnectionRef != "" || req.EnrollmentGeneration != 0 {
+			return "", fmt.Errorf("%w: connection scope requires a request id", ErrInvalid)
+		}
+		return req.SessionID, nil
+	}
+	if req.Purpose != whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_RESULT &&
+		req.Purpose != whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_HISTORY_PAGE {
+		return "", fmt.Errorf("%w: query scope is only valid for result ciphertext", ErrInvalid)
+	}
+	if err := validUTF8Component("request id", req.RequestID, 512); err != nil {
+		return "", err
+	}
+	if err := validUTF8Component("connection ref", req.ConnectionRef, 128); err != nil {
+		return "", err
+	}
+	if req.ConnectionRef == "" {
+		// Durable result objects belong to the command admitted by Access.
+		row, err := s.store.GetRequest(ctx, req.RequestID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return "", ErrForbidden
+			}
+			return "", err
+		}
+		if row.Kind != whalereinv1.RequestKind_REQUEST_KIND_COMMAND || row.HostID != req.HostID ||
+			row.DeviceID != req.DeviceID || row.ChannelID != req.ChannelID || row.Stamp == nil ||
+			row.Stamp.GrantGeneration != grant.GrantGeneration || row.Stamp.RevocationGeneration != grant.RevocationGeneration ||
+			row.Stamp.DeviceRevocationGeneration != grant.DeviceRevocationGeneration ||
+			req.ExpiresAtUnixMs > row.ExpiresAt.UnixMilli() || (req.SessionID != "" && req.SessionID != row.DeviceSessionID) {
+			return "", ErrForbidden
+		}
+		return row.DeviceSessionID, nil
+	}
+	if !validConnectionRef(req.ConnectionRef) {
+		return "", fmt.Errorf("%w: connection ref is invalid", ErrInvalid)
+	}
+	if req.EnrollmentGeneration != grant.EnrollmentGeneration {
+		return "", ErrForbidden
+	}
+	if s.queryScopes == nil {
+		return "", ErrForbidden
+	}
+	sessionID, err := s.queryScopes.AuthorizeObjectReserve(ctx, req.HostID, req.DeviceID, req.ChannelID,
+		req.RequestID, req.ConnectionRef, req.EnrollmentGeneration, req.ExpiresAtUnixMs)
+	if err != nil || (req.SessionID != "" && req.SessionID != sessionID) {
+		return "", ErrForbidden
+	}
+	return sessionID, nil
+}
+
+// validConnectionRef checks the Broker-issued <epoch>:<connection> shape.
+func validConnectionRef(value string) bool {
+	epoch, instance, ok := strings.Cut(value, ":")
+	if !ok || epoch == "" || instance == "" {
+		return false
+	}
+	for _, r := range epoch {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	for _, r := range instance {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// checkResultParent repeats the parent authority check using the binding
+// stored at reservation. A missing waiter or command cannot publish bytes.
+func (s *Service) checkResultParent(ctx context.Context, object store.PayloadObject) error {
+	if object.RequestID == "" && object.ConnectionRef == "" {
+		return nil
+	}
+	if object.RequestID == "" || object.EnrollmentGeneration == nil || *object.EnrollmentGeneration < 0 ||
+		object.GrantGeneration == nil || object.RevocationGeneration == nil || object.DeviceRevocationGeneration == nil {
+		return ErrForbidden
+	}
+	binding := ReserveRequest{
+		HostID: object.HostID, DeviceID: object.DeviceID, SessionID: object.AppSession,
+		ChannelID: object.ChannelID, RequestID: object.RequestID, ConnectionRef: object.ConnectionRef,
+		Purpose:              whalereinv1.PayloadPurpose(whalereinv1.PayloadPurpose_value[object.Purpose]),
+		EnrollmentGeneration: uint64(*object.EnrollmentGeneration), ExpiresAtUnixMs: object.ExpiresAt.UnixMilli(),
+	}
+	grant := store.AdmissionGrant{
+		GrantGeneration: uint64(*object.GrantGeneration), RevocationGeneration: uint64(*object.RevocationGeneration),
+		DeviceRevocationGeneration: uint64(*object.DeviceRevocationGeneration), EnrollmentGeneration: binding.EnrollmentGeneration,
+	}
+	session, err := s.reservationSession(ctx, binding, grant)
+	if err != nil {
+		return err
+	}
+	if session != object.AppSession {
+		return ErrForbidden
+	}
+	return nil
+}
+
 // PrepareUpload authorizes one exact-length upload before the HTTP layer reads
 // a single body byte. The returned target carries the reserved scope.
 func (s *Service) PrepareUpload(ctx context.Context, req UploadRequest) (UploadTarget, error) {
@@ -451,6 +591,9 @@ func (s *Service) Finish(ctx context.Context, req FinishRequest) (Object, error)
 	if err != nil {
 		return Object{}, err
 	}
+	if err := s.checkResultParent(ctx, object); err != nil {
+		return Object{}, err
+	}
 	if req.CiphertextBytes != uint64(object.Length) {
 		return Object{}, fmt.Errorf("%w: finish length does not match the reservation", ErrConflict)
 	}
@@ -477,6 +620,10 @@ func (s *Service) Fetch(ctx context.Context, req ObjectRequest) (FetchResult, er
 	}, true)
 	if err != nil {
 		return FetchResult{}, err
+	}
+	// A query-scoped object is releasable only after its reply was issued.
+	if object.RequestID != "" && object.ConnectionRef != "" && object.IssuedAt == nil {
+		return FetchResult{}, ErrForbidden
 	}
 	reader, opened, err := s.payloads.Open(ctx, refFor(object))
 	if err != nil {
@@ -602,12 +749,7 @@ func (s *Service) checkDeviceScope(ctx context.Context, identity auth.Identity, 
 	if object.DeviceID == "" || identity.DeviceID != object.DeviceID {
 		return ErrForbidden
 	}
-	// A Host-originated object carries no Access-managed App session and is
-	// bound by Host, Device, channel, grant and the sealed Noise channel. A
-	// session-bound reader of the same Device therefore cannot be denied here
-	// for that empty field, and still cannot decrypt another channel's
-	// ciphertext. An object reserved under a concrete session must match it.
-	if object.AppSession != "" && identity.SessionID != object.AppSession {
+	if (object.RequestID != "" || object.AppSession != "") && identity.SessionID != object.AppSession {
 		return ErrForbidden
 	}
 	if err := s.auth.AuthorizeHost(ctx, identity, object.HostID); err != nil {
@@ -653,6 +795,10 @@ func (s *Service) checkGrant(ctx context.Context, object store.PayloadObject) er
 		grant.GrantGeneration != uint64(*object.GrantGeneration) ||
 		grant.RevocationGeneration != uint64(*object.RevocationGeneration) ||
 		grant.DeviceRevocationGeneration != uint64(*object.DeviceRevocationGeneration) {
+		return ErrForbidden
+	}
+	if object.EnrollmentGeneration != nil &&
+		(*object.EnrollmentGeneration < 0 || uint64(*object.EnrollmentGeneration) != grant.EnrollmentGeneration) {
 		return ErrForbidden
 	}
 	return nil

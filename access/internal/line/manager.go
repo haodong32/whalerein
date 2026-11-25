@@ -124,6 +124,10 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	if m.sessionPolicy != nil && snapshot.Fields["session_capability"] != "1" {
 		return errors.New("line: broker does not support managed device sessions")
 	}
+	if snapshot.Epoch == "" {
+		return errors.New("line: broker does not report a process epoch")
+	}
+	m.presence.SetBrokerEpoch(snapshot.Epoch)
 	m.presence.ApplySnapshot(snapshot.Clients, snapshot.Sequence)
 
 	/* Only live broker connections need a policy projection. Historical or
@@ -290,80 +294,143 @@ func (m *Manager) applyDevicePolicy(deviceID string) {
 	m.recordApplied(deviceID, connection.Revision)
 }
 
-// RevokeGrant fences the Host/device scope on the broker and closes the
-// superseded connection.
-func (m *Manager) RevokeGrant(ctx context.Context, hostID, deviceID string) error {
-	grant, err := m.store.AdmissionGrantFor(ctx, hostID, deviceID)
-	if err != nil {
-		return fmt.Errorf("line: read revoked grant: %w", err)
-	}
-	m.forget(deviceID)
-	if _, err := m.request(ctx, "deny",
-		"device "+deviceID,
-		fmt.Sprintf("generation %d", policy.Revision(grant)),
-		"host "+hostID,
-		"kick 1",
-	); err != nil {
-		return fmt.Errorf("line: deny grant: %w", err)
-	}
-	return nil
+// RevokeGrant fences exactly one frozen Host/device grant scope and closes
+// only the admitted connections that carried it. A delayed retry re-issues the
+// stored generations, so a newer grant or a same-id replacement is untouched.
+func (m *Manager) RevokeGrant(ctx context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	return m.enforce(ctx, scope)
 }
 
-// RevokeDevice fences every Host scope of a device-wide revocation and closes
-// the device connection.
-func (m *Manager) RevokeDevice(ctx context.Context, deviceID string) error {
-	m.forget(deviceID)
-	grants, err := m.store.ListDeviceGrants(ctx, deviceID)
-	if err != nil {
-		return fmt.Errorf("line: read device grants: %w", err)
-	}
-	for _, revoked := range grants {
-		hostID := revoked.HostID
-		grant, err := m.store.AdmissionGrantFor(ctx, hostID, deviceID)
-		if err != nil {
-			return fmt.Errorf("line: read revoked grant: %w", err)
-		}
-		if _, err := m.request(ctx, "deny",
-			"device "+deviceID,
-			fmt.Sprintf("generation %d", policy.Revision(grant)),
-			"host "+hostID,
-			"kick 0",
-		); err != nil {
-			return fmt.Errorf("line: deny device grant: %w", err)
-		}
-	}
-	if _, err := m.request(ctx, "kick", "username device:"+deviceID); err != nil {
-		return fmt.Errorf("line: disconnect device: %w", err)
-	}
-	return nil
+// RevokeDevice fences every frozen Host scope of a device-wide revocation and
+// closes only the admitted device connections observed for that scope.
+func (m *Manager) RevokeDevice(ctx context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	return m.enforce(ctx, scope)
 }
 
-// RevokeHost denies every revoked grant incarnation of one disabled Host and
-// closes its live broker session. It is idempotent: an already closed session
-// is not an error, and an empty revocation set still closes the Host.
-func (m *Manager) RevokeHost(ctx context.Context, hostID string, grantGenerations map[string]uint64) error {
-	deviceIDs := make([]string, 0, len(grantGenerations))
-	for deviceID := range grantGenerations {
-		deviceIDs = append(deviceIDs, deviceID)
-	}
-	// Map iteration is unordered; sort so a retry issues the same control
-	// operations in the same order.
-	sort.Strings(deviceIDs)
-	for _, deviceID := range deviceIDs {
+// RevokeHost denies every frozen grant incarnation of one disabled Host and
+// closes its admitted Host connection. It is idempotent: an already closed
+// session is not an error, and an empty revocation set still fences the scope.
+func (m *Manager) RevokeHost(ctx context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	return m.enforce(ctx, scope)
+}
+
+// enforce applies one frozen revocation scope. The base deny installs the
+// generation fence even when every frozen connection is already gone; the
+// conn-scoped deny closes the exact admitted instance. An absent or replaced
+// connection returns ok/absent and counts as enforced for the old scope.
+func (m *Manager) enforce(ctx context.Context, frozen store.RevocationScope) (store.EnforcementReceipt, error) {
+	scope := frozen.Frozen()
+	receipt := store.EnforcementReceipt{Scope: scope}
+	grants := append([]store.ScopeGrant(nil), scope.Grants...)
+	sort.SliceStable(grants, func(i, j int) bool {
+		if grants[i].HostID != grants[j].HostID {
+			return grants[i].HostID < grants[j].HostID
+		}
+		if grants[i].DeviceID != grants[j].DeviceID {
+			return grants[i].DeviceID < grants[j].DeviceID
+		}
+		return grants[i].GrantGeneration < grants[j].GrantGeneration
+	})
+	for _, grant := range grants {
+		deviceID := grant.DeviceID
+		if deviceID == "" {
+			deviceID = scope.DeviceID
+		}
+		if grant.HostID == "" || deviceID == "" {
+			continue
+		}
 		m.forget(deviceID)
-		if _, err := m.request(ctx, "deny",
-			"device "+deviceID,
-			fmt.Sprintf("generation %d", grantGenerations[deviceID]),
-			"host "+hostID,
-			"kick 1",
-		); err != nil && !isNotConnected(err) {
-			return fmt.Errorf("line: deny disabled host grant: %w", err)
+		// A device-wide revocation has no surviving Host scope on that
+		// connection, so it must close at the Broker and let the client
+		// observe an authoritative refusal. A single-grant revocation keeps
+		// the connection when another Host's authority remains.
+		kick := "0"
+		if scope.DeviceWide {
+			kick = "1"
+		}
+		base := []string{
+			"device " + deviceID,
+			fmt.Sprintf("generation %d", grant.Revision()),
+			"host " + grant.HostID,
+			"kick " + kick,
+		}
+		if _, err := m.request(ctx, "deny", base...); err != nil && !isNotConnected(err) {
+			return receipt, fmt.Errorf("line: fence revoked grant: %w", err)
+		}
+		for _, connection := range m.currentConnections(grant.Connections) {
+			reply, err := m.request(ctx, "deny",
+				"device "+deviceID,
+				fmt.Sprintf("generation %d", grant.Revision()),
+				"host "+grant.HostID,
+				fmt.Sprintf("conn %d", connection.Ref.ID),
+				"kick 1",
+			)
+			if err != nil {
+				if isNotConnected(err) {
+					continue
+				}
+				return receipt, fmt.Errorf("line: deny revoked grant: %w", err)
+			}
+			if reply.Fields["matched"] != "0" {
+				receipt.Applied = appendScopeConnection(receipt.Applied, connection)
+			}
 		}
 	}
-	if _, err := m.request(ctx, "kick", "username host:"+hostID); err != nil && !isNotConnected(err) {
-		return fmt.Errorf("line: close disabled host session: %w", err)
+	if scope.HostConnection != nil && scope.HostConnection.Valid() {
+		host := scope.HostConnection
+		reply, err := m.request(ctx, "remove",
+			"client "+host.ClientID,
+			fmt.Sprintf("conn %d", host.Ref.ID),
+			"kick 1",
+		)
+		if err != nil {
+			if !isNotConnected(err) {
+				return receipt, fmt.Errorf("line: close disabled host session: %w", err)
+			}
+		} else if reply.Fields["absent"] != "1" {
+			receipt.Applied = appendScopeConnection(receipt.Applied, *host)
+		}
 	}
-	return nil
+	receipt.Absent = len(receipt.Applied) == 0
+	return receipt, nil
+}
+
+// currentConnections drops frozen references that belong to a previous broker
+// epoch. Connection ids are scoped to one broker process, so a delayed
+// enforcement must never target the same numeric id in a later epoch.
+func (m *Manager) currentConnections(frozen []store.ScopeConnection) []store.ScopeConnection {
+	epoch := m.presence.BrokerEpoch()
+	out := make([]store.ScopeConnection, 0, len(frozen))
+	seen := map[store.ScopeConnection]struct{}{}
+	for _, connection := range frozen {
+		if !connection.Valid() {
+			continue
+		}
+		if epoch != "" && connection.Ref.Epoch != epoch {
+			continue
+		}
+		if _, ok := seen[connection]; ok {
+			continue
+		}
+		seen[connection] = struct{}{}
+		out = append(out, connection)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ClientID != out[j].ClientID {
+			return out[i].ClientID < out[j].ClientID
+		}
+		return out[i].Ref.ID < out[j].Ref.ID
+	})
+	return out
+}
+
+func appendScopeConnection(list []store.ScopeConnection, connection store.ScopeConnection) []store.ScopeConnection {
+	for _, existing := range list {
+		if existing == connection {
+			return list
+		}
+	}
+	return append(list, connection)
 }
 
 func isNotConnected(err error) bool {

@@ -100,22 +100,41 @@ func TestCloudDeviceRevocationRecordsFenceUnderHostLock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var locked, checked, recorded bool
 			tx := &scriptedTx{
-				queryRowFn: func(_ context.Context, _ string, args ...any) pgx.Row {
-					if !locked || !slices.Equal(args, []any{"workspace", "host", "device"}) {
-						t.Fatal("scope was checked without its Host lock")
+				queryRowFn: func(_ context.Context, statement string, _ ...any) pgx.Row {
+					switch {
+					case strings.Contains(statement, "SELECT generation FROM external_enrollments"):
+						if !locked {
+							t.Fatal("enrollment scope was read without its Host lock")
+						}
+						checked = true
+						return syntheticRow{err: tc.scope, fill: func(dest ...any) {
+							*dest[0].(*int64) = 3
+						}}
+					case strings.Contains(statement, "FROM external_device_revocations"):
+						if !recorded {
+							t.Fatal("frozen revocation was read before it was recorded")
+						}
+						return syntheticRow{fill: func(dest ...any) {
+							*dest[0].(*string) = "host"
+							*dest[1].(*string) = "device"
+							*dest[2].(*int64) = 3
+							*dest[3].(*uint64) = 5
+							*dest[4].(*uint64) = 2
+							*dest[5].(*uint64) = 1
+							*dest[9].(*bool) = tc.grant
+						}}
+					default:
+						t.Fatalf("unexpected query %q", statement)
+						return syntheticRow{err: errStoreUnit}
 					}
-					checked = true
-					return syntheticRow{err: tc.scope, fill: func(dest ...any) {
-						*dest[0].(*bool) = tc.grant
-					}}
 				},
 				execFn: func(_ context.Context, statement string, args ...any) (pgconn.CommandTag, error) {
 					if strings.Contains(statement, "pg_advisory_xact_lock") {
 						locked = true
 						return pgconn.CommandTag{}, tc.lock
 					}
-					if !checked || !slices.Equal(args, []any{"host", "device", now}) {
-						t.Fatal("revocation record lost its scope or ordering")
+					if !checked || !slices.Equal(args, []any{"host", "device", int64(3), now}) {
+						t.Fatalf("revocation record lost its frozen scope: %v", args)
 					}
 					recorded = true
 					return pgconn.CommandTag{}, tc.record
@@ -123,9 +142,11 @@ func TestCloudDeviceRevocationRecordsFenceUnderHostLock(t *testing.T) {
 			}
 			database := &fakeDB{t: t, beginFn: func(context.Context) (pgx.Tx, error) { return tx, tc.begin }}
 			grant, err := newStore(database).BeginCloudDeviceRevocation(context.Background(), "workspace", "host", "device", now)
-			if !errors.Is(err, tc.expected) || tx.committed != tc.committed ||
-				(tc.committed && (!recorded || grant != tc.grant)) {
-				t.Fatalf("grant = %v, error = %v, committed = %v", grant, err, tx.committed)
+			if !errors.Is(err, tc.expected) || tx.committed != tc.committed {
+				t.Fatalf("grant = %+v, error = %v, committed = %v", grant, err, tx.committed)
+			}
+			if tc.committed && (grant.EnrollmentGeneration != 3 || grant.GrantGeneration != 5 || grant.Exists != tc.grant) {
+				t.Fatalf("frozen receipt = %+v", grant)
 			}
 		})
 	}

@@ -22,7 +22,7 @@ async fn main() {
         client.run(
             || false,
             |event| {
-                assert_eq!(event.relay_version, 4);
+                assert_eq!(event.relay_version, 5);
                 let inline = !event.ciphertext.is_empty();
                 let referenced = event.payload_reference.is_some();
                 assert!(inline != referenced);
@@ -33,11 +33,13 @@ async fn main() {
             // derived state and never the committed message it waits for.
             |_| true,
             |_| true,
+            |_| true,
             |state| {
-                if state == MqttConnectionEvent::Subscribed {
+                if matches!(state, MqttConnectionEvent::Subscribed { .. }) {
                     println!("transport-device-ready");
                 }
             },
+            None,
         ),
     )
     .await

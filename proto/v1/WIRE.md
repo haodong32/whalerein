@@ -19,16 +19,16 @@ fails a build that removes a field, reuses a tag number, changes a type or
 JSON name, changes oneof membership, or reuses an enum number.
 
 The MQTT relay carries a separate, required `relay_version` whose only
-supported value is **4** (`RELAY_EPOCH_V4`). It is independent of the
+supported value is **5** (`RELAY_EPOCH_V5`). It is independent of the
 application protocol version, which stays 1. `relay_version` appears on
 `HostRequest`, `HostResult`, `EventEnvelope`, `HostReady`,
 `ReceiveAdvertisement`, `RelayObjectReserveRequest`,
 `RelayObjectFinishRequest`, `RequestStateNotice` and the relay
-`application/json` error surface. A peer that does not advertise epoch 4 is
+`application/json` error surface. A peer that does not advertise epoch 5 is
 rejected explicitly with `protocol_version_incompatible`; there is no
 unframed v2 acceptance, no fragment fallback and no mixed-epoch route.
-Epoch 3 is retired: its number is reserved, it is never accepted and no
-compatibility value or fallback exists for it.
+Epochs 3 and 4 are retired: their numbers are reserved, they are never
+accepted and no compatibility value or fallback exists for either.
 
 This revision is the single revised conversation and transport contract inside
 version 1. It intentionally replaces the earlier text-only live frame, flattened
@@ -50,9 +50,13 @@ The immutable protobuf baseline records this hard cut through the repository
 compatibility path (`--update-baseline --rationale`) because fields and message
 shapes are replaced, not added. The same cut removes `TransportFrame`, the
 `WRMQTT2` prefix, fragment geometry and every receipt/acknowledgement topic and
-replaces them with one inline-or-reference relay epoch. Epoch 4 keeps that
-inline-or-reference control relay and adds a second, lossy delivery class for
-live previews. Keys, pins, grants,
+replaces them with one inline-or-reference relay epoch. Epoch 5 hard-cuts epoch
+4 and keeps the inline-or-reference control relay. It moves post-pairing Noise
+establishment and session queries onto the MQTT 5 request/reply query lane,
+routes previews directly from the Host as QoS 0, retires the Host `.../live`
+relay topic, and replaces watch renewal with a read-only version check. The
+durable command lane keeps its HTTPS admission, exact heartbeat and result
+read. Keys, pins, grants,
 Source sessions, pager keys and durable command recovery identities are
 retained. Content positions,
 cursors and receipt namespaces are bound to a projection identity: Core fences
@@ -150,48 +154,55 @@ the result body; callers must not infer business failure from that absence.
 whalerein/v1/h/{host_id}/request
 whalerein/v1/h/{host_id}/result
 whalerein/v1/h/{host_id}/event
-whalerein/v1/h/{host_id}/live
 whalerein/v1/h/{host_id}/d/{device_id}/event
 whalerein/v1/h/{host_id}/d/{device_id}/notice
 whalerein/v1/h/{host_id}/d/{device_id}/ready
+whalerein/v1/h/{host_id}/d/{device_id}/query
+whalerein/v1/h/{host_id}/d/{device_id}/reply
 whalerein/v1/h/{host_id}/d/{device_id}/live
 ```
 
 Every topic carries exactly one complete message per MQTT PUBLISH. There is no
 device acknowledgement topic, receipt topic or fragment topic.
 
-The relay has two logical delivery classes on the same authenticated broker
-connection. The class is selected by topic and QoS, never by a second
-connection or a second publish path:
+The relay has three logical uses of the same authenticated broker connection.
+The class is selected by topic, QoS and the operation that admitted the message,
+never by a second connection or a second publish path:
 
 | Class | Topics | QoS | Semantics |
 |---|---|---|---|
 | control | `.../request`, `.../result`, `.../event`, `.../d/{device_id}/event`, `.../d/{device_id}/notice`, `.../d/{device_id}/ready` | 1 | Ordered, acknowledged and durable intent. Every control message is submitted in order and retried from the same complete-message identity. |
-| live | `.../live`, `.../d/{device_id}/live` | 0 | Fire-and-forget derived state. A live preview may drop, coalesce or be repaired; it never enters an outbox or receipt, never uses the HTTPS reference carrier, and the final committed message supersedes it. |
+| query | `.../d/{device_id}/query`, `.../d/{device_id}/reply`, and the existing `.../request` / `.../result` topics while a query is admitted | 1 | Deadline-bound MQTT 5 request/reply for post-pairing Noise and session queries. Access holds one transient waiter; there is no durable request row, outbox or application acknowledgement. |
+| live | `.../d/{device_id}/live` | 0 | Fire-and-forget derived state published by the Host directly to the granted Device. A live preview may drop, coalesce or be repaired; it never enters an outbox or receipt, never uses the HTTPS reference carrier, and the final committed message supersedes it. |
 
-Live is never used for control intent. Control is never carried on a live
-topic. Both classes use the same authenticated broker connection and the same
-encrypted `EventEnvelope` body.
+Live is never used for control or query intent. Control and query are never
+carried on a live topic. All classes use the same authenticated broker
+connection and the same sealed body encoding. The former Host `.../live` topic
+is retired in epoch 5 and no longer appears in the topic list.
 
 | Topic | Publisher | Subscriber | Payload |
 |---|---|---|---|
-| `.../request` | Access | that Host | `HostRequest`, including `REQUEST_KIND_ACCESS_READY` |
-| `.../result` | Host | Access | `HostResult`, including `HostReady` |
+| `.../request` | Access | that Host | `HostRequest`, including `REQUEST_KIND_ACCESS_READY` and admitted queries |
+| `.../result` | Host | Access | `HostResult`, including `HostReady` and query results |
 | `.../event` | Host | Access | `EventEnvelope` (control class) |
-| `.../live` | Host | Access | `EventEnvelope` (live class, QoS 0) |
 | `.../d/{device_id}/event` | Access | that Device | `EventEnvelope` (control class) |
 | `.../d/{device_id}/notice` | Access | that Device | `RequestStateNotice` |
 | `.../d/{device_id}/ready` | that Device | Access | `ReceiveAdvertisement` |
-| `.../d/{device_id}/live` | Access | that Device | `EventEnvelope` (live class, QoS 0) |
+| `.../d/{device_id}/query` | that Device | Access | `HostRequest` (`HANDSHAKE` or `QUERY`) on the query lane, QoS 1 |
+| `.../d/{device_id}/reply` | Access | that Device | `HostResult` for the admitted query, QoS 1 |
+| `.../d/{device_id}/live` | Host | that Device | `EventEnvelope` (live class, QoS 0) |
 
-Access publishes only `request`, the Device control topics and the Device live
-topic; a Host publishes only its own `result`, `event` and `live`; a Device
-publishes only its own `ready` topic. The host subscribes only to its own
-`request`. A device subscribes only to its own event, notice and live topics
-and publishes only to its own ready topic. Access republishes a control event to
-`.../d/{device_id}/event` and the same opaque live `EventEnvelope` to
-`.../d/{device_id}/live`, using only the authenticated outer `device_id`.
-Cross-host wildcard subscriptions are denied by broker ACL.
+Access publishes only `request`, the Device control topics and the Device reply
+topic; a Host publishes only its own `result`, `event` and direct Device `live`
+topics; a Device publishes only its own `ready` and `query` topics. The Host
+subscribes only to its own `request`. A Device subscribes only to its own event,
+notice, reply and live topics and publishes only to its own ready and query
+topics. Access publishes a control event to `.../d/{device_id}/event` using only
+the authenticated outer `device_id`. It does not subscribe to or republish
+previews. Cross-host wildcard subscriptions are denied by broker ACL. The Host
+publishes a preview directly to the granted Device's
+`.../d/{device_id}/live`; the Broker policy re-checks the publisher's Host
+identity, the exact Host/Device topic and the current grant before delivery.
 
 Live publication never waits for an acknowledgement and never uses the ordered
 control queue. A live preview that is lost, duplicated or coalesced leaves
@@ -346,7 +357,9 @@ After pairing, both sides run Noise XX with prologue:
 whalerein/v1/channel|{host_id}|{device_id}|{channel_id}
 ```
 
-A channel handshake is two `HostRequest{kind=HANDSHAKE}` calls:
+A channel handshake is two `HostRequest{kind=HANDSHAKE}` calls on the MQTT query
+lane, after the authorized subscription and readiness exist on the admitted
+Broker connection:
 
 1. `body = msg1`. Host replies `HostResult{status=succeeded,
    result_body=msg2}` after checking the device has an active grant and has
@@ -356,7 +369,7 @@ A channel handshake is two `HostRequest{kind=HANDSHAKE}` calls:
 
 Noise payloads are `ChannelHello` / `ChannelReady`; they carry the negotiated
 application protocol version, capabilities and the endpoint's
-`ReceiveAdvertisement` (including its own `relay_version`, which must be 4).
+`ReceiveAdvertisement` (including its own `relay_version`, which must be 5).
 `ChannelHello.receive` is the Device receive budget the Host uses for preview
 splitting; `ChannelReady.receive` is the Host budget the Device uses. A
 version or relay-epoch mismatch rejects the handshake with
@@ -396,10 +409,12 @@ history intervals and live Attempt sequences. None is a nonce.
 ## Requests and results
 
 `POST /v1/hosts/{host_id}/requests` accepts a `HostRequest` from an authorized
-device. Every request validates the application `protocol_version` (1) and
-`relay_version` (4). A non-matching relay epoch is rejected with
-`protocol_version_incompatible` before admission; Access never accepts a v2
-frame in place of a `HostRequest`. Access:
+device for the durable command lane. Every request validates the application
+`protocol_version` (1) and `relay_version` (5). A non-matching relay epoch is
+rejected with `protocol_version_incompatible` before admission; Access never
+accepts a v2 frame in place of a `HostRequest`. The retired post-pairing HTTPS
+handshake and session-query path is not an alternative ingress: `HANDSHAKE` and
+`QUERY` on this route fail before forwarding. Access:
 
 1. authenticates the device transport token and an active grant;
 2. checks `expires_at`, `protocol_version` and `relay_version`;
@@ -425,12 +440,13 @@ always validates and dispatches the same complete message; it never sees a
 fragment and cannot tell which hop changed representation except from the
 carrier fields.
 
-`GET /v1/requests/{request_id}` returns the status copy. There is no HTTP route
-for sessions, messages, interrupts or approvals. When the complete result body
+`GET /v1/requests/{request_id}` returns the status copy for a durable command.
+There is no HTTP route for sessions, messages, interrupts or approvals, and an
+admitted query has no durable row to read. When the complete result body
 was stored rather than inlined, `RequestState.result_reference` locates it.
 
-`HostResult` from the host conditionally updates the same row. It carries the
-same required `relay_version=4`. Allowed transitions:
+`HostResult` from the host conditionally updates the same command row. It
+carries the same required `relay_version=5`. Allowed transitions:
 
 ```text
 received      -> host_offline, rejected, host_accepted, succeeded, failed, unknown
@@ -464,15 +480,16 @@ connection is therefore opened by the client, may outlive any watch, and
 reports `connecting`, `connected`, `reconnecting` or a terminal `offline` with
 a code. A session ending never implies the Host is offline.
 
-Results are read only by `request_id`. The result body stays encrypted for the
-channel that produced it; after a reconnect the client reuses the same
-`command_id` (host dedupe) or queries `GetCommandResult` to obtain the terminal
-payload over the new channel.
+Durable command results are read only by `request_id`. A query result instead
+returns on the correlated `.../d/{device_id}/reply` topic. The result body stays
+encrypted for the channel that produced it; after a reconnect the client reuses
+the same `command_id` (host dedupe) or queries `GetCommandResult` to obtain the
+terminal payload over the new channel.
 
 ### Access receive advertisement
 
 `HostReady` (Host to Access) carries the Host receive budget for the
-Access-to-Host `request` hop. After Access registers a valid epoch-4
+Access-to-Host `request` hop. After Access registers a valid epoch-5
 `HostReady`, it publishes one `HostRequest{kind=REQUEST_KIND_ACCESS_READY}` on
 `.../request` whose inline `body` is Access's own `ReceiveAdvertisement`. The
 Host records it as the Access receive budget for the Host-to-Access
@@ -509,6 +526,89 @@ control message or an authoritative read repairs it. A stale notice never
 reopens expired content, a revoked scope or a closed execution. No new plaintext
 content is added to MQTT; previews remain sealed, notices carry metadata only,
 and complete bodies travel inline when they fit or through the HTTPS directory.
+
+## Query lane
+
+Post-pairing Noise establishment and session queries use one MQTT 5
+request/reply lane. It reuses the existing Host `request`/`result` topics and
+adds one Device ingress and one Device reply topic. The command lane is
+unchanged: durable command admission, exact heartbeat and authoritative result
+read stay on HTTPS.
+
+1. **Device to Access.** The Device publishes one binary `HostRequest` with
+   `kind=QUERY` or `kind=HANDSHAKE` and a non-zero `expires_at_unix_ms` on
+   `whalerein/v1/h/{host}/d/{device}/query` at QoS 1. A QUERY carries exactly
+   one of `body` and `body_reference`; a HANDSHAKE carries inline `body` only.
+   MQTT 5 properties:
+   Correlation Data is the UTF-8 `request_id`; Response Topic is exactly
+   `whalerein/v1/h/{host}/d/{device}/reply`; Message Expiry Interval is the
+   positive ceiling of the remaining deadline in whole seconds, or the
+   publication is skipped. The Broker stamps `whalerein-connection` on the
+   external ingress.
+2. **Access admission.** Access rejects a wrong relay epoch, a topic/body scope
+   mismatch, a missing or foreign Response Topic, a missing or mismatched
+   Correlation Data, an elapsed deadline, or a stale connection/grant/enrollment
+   scope. It keeps one transient waiter keyed by
+   `(host, device, connection_ref, request_id)` with the immutable admitted
+   scope and the original deadline. It creates no durable request row and no
+   body object for an ordinary query.
+3. **Access to Host.** Access publishes the same `HostRequest` on the existing
+   `whalerein/v1/h/{host}/request` at QoS 1 with `connection_ref`,
+   `grant_generation` and `enrollment_generation` filled from the admitted
+   scope. Properties mirror step 1 with Response Topic
+   `whalerein/v1/h/{host}/result` and the remaining Message Expiry Interval.
+4. **Host to Access.** The Host publishes `HostResult` with the same
+   host/device/request identity on the existing
+   `whalerein/v1/h/{host}/result` at QoS 1. Correlation Data is the request id,
+   there is no Response Topic, and Message Expiry Interval carries the remaining
+   deadline. A result whose deadline elapsed before publication is dropped.
+5. **Access reply.** If the result carries `result_reference`, Access verifies
+   that the object is ready, still bound to the original waiter scope and the
+   current grant, and marks the reference issued before publishing it. Access
+   publishes the `HostResult` on
+   `whalerein/v1/h/{host}/d/{device}/reply` at QoS 1 with Correlation Data equal
+   to the request id, `whalerein-target=<waiter connection_ref>`, and the
+   remaining Message Expiry Interval, then removes the waiter.
+6. **Core waiter registry.** Core keeps a per-connection waiter registry keyed
+   by request id and connection generation. It subscribes to `.../reply` before
+   publishing a query. A reply for another request, device, Host or connection
+   generation never completes a waiter. Reconnect fails admittees with a
+   retryable transport error; a safe read is reissued within the remaining
+   caller deadline.
+7. **Command boundary.** `kind=COMMAND` is not admitted by the query ingress.
+   Command submission, `POST /v1/requests/{request_id}/heartbeat` and the
+   authoritative command result read keep their HTTPS contract.
+
+Access restart drops transient waiters. A Device then sees no reply and may
+retry the safe read. An object that was already issued remains fetchable within
+its original deadline and current grant.
+
+### Query-lane MQTT 5 properties
+
+| Property | Set by | Rule |
+|---|---|---|
+| `whalerein-connection` | Broker | Reserved User Property stamped on every external ingress PUBLISH as `<broker-epoch>:<connection-id>`. A client-supplied copy is rejected. Access reads the stamp at admission and fills `HostRequest.connection_ref`; a trusted Access publication never forwards a Device stamp. |
+| `whalerein-target` | Access | Reserved User Property naming the admitted Device connection reference. Access sets it on a query reply. The Broker checks it against the receiving connection's current `<broker-epoch>:<connection-id>` at final delivery, including queued bytes. A client-supplied copy is rejected. |
+| Correlation Data | Device / Host / Access | UTF-8 `request_id` on both request and reply. It must match the admitted waiter. |
+| Response Topic | Device / Access | Must equal the fixed topic of the lane: `.../d/{device_id}/reply` on the Device request and `.../result` on the Access-to-Host hop. A missing or different value is rejected. |
+| Message Expiry Interval | Device / Access / Host | Required on every deadline-bound query-lane PUBLISH in both directions. Positive whole seconds, rounded up, capped by any shorter upstream value, and omitted with no publication when the remaining time has elapsed. |
+
+The pinned Broker owns Message Expiry Interval as its own MQTT 5 behavior. It
+stores the property separately and consumes it before plugin callbacks, so the
+plugin cannot read or enforce it at ingress; the Broker discards a queued copy
+whose delivery has not begun by then. Access, Host and Core therefore enforce
+the original application deadline from `HostRequest.expires_at_unix_ms`
+independently, including packets already in flight and the subsecond rounding
+window. A shorter Broker expiry never extends the application deadline.
+
+`HostRequest.transport.enrollment_generation` records the managed enrollment
+generation captured at submission. The epoch-5 top-level `HostRequest` fields
+`connection_ref = 17`, `grant_generation = 18` and `enrollment_generation = 19`
+carry the admitted query scope to the Host. They are Access-filled; a Device
+cannot set them because a Device never publishes on the Access-to-Host lane.
+The Host binds observation ownership, channel admission and reply affinity to
+that exact scope. A re-added Host or re-paired client with a newer generation
+cannot attach to an older query.
 
 ## Pairing and revocation replay
 
@@ -588,8 +688,11 @@ authenticated connection is observed.
 report state, bindings and revisions. Neither ever returns a credential.
 
 The admin enrollment response includes `WhaleRein-Host-Presence` with
-`online`, `offline`, or `unavailable`. This is the current broker observation.
-An older Access without this header leaves live presence unknown.
+`online`, `offline`, or `unavailable`. This is the Broker-derived observation,
+repaired by ordered lifecycle events and a sequence-bounded snapshot. It is not
+derived from a Device Will, and a device-only network loss does not change the
+Host directory presence. An older Access without this header leaves live
+presence unknown.
 
 `GET /v1/enrollments/hosts/{host_id}/clients` requires an admin bearer and the
 `workspaceId` and `enrollmentRevision` query parameters. It returns
@@ -672,7 +775,7 @@ the sealed ciphertext.
 | `DELETE /v1/relay/objects/{object_id}` | no body | `RelayObjectDeleteResult` | Bounded cancel and release |
 
 Every request carries the relay epoch. `POST`/`finish` carry it in the JSON
-body; `PUT`/`GET`/`DELETE` require `WhaleRein-Relay-Epoch: 4`. A missing or
+body; `PUT`/`GET`/`DELETE` require `WhaleRein-Relay-Epoch: 5`. A missing or
 different value is `protocol_version_incompatible`.
 
 Authentication is one of:
@@ -707,8 +810,12 @@ complete history page). A fetch for a different purpose is denied.
 The reservation binds the object to `host_id`, `device_id`, `session_id`,
 `channel_id`, `purpose`, `part_id`, `ciphertext_bytes`, `sha256`, the fixed
 `expires_at_unix_ms`, `owner_node_id`, the original `grant_generation` and
-`revocation_generation`, and a single reserved upload. `sha256` and
-`ciphertext_bytes` describe the ciphertext, never plaintext. `finish` requires
+`revocation_generation`, and a single reserved upload. A query-scoped
+reservation additionally carries `request_id = 13`, `enrollment_generation =
+14` and `connection_ref = 15`; these bind a referenced query result to the
+original admitted waiter and Broker connection. They are empty for durable
+command objects and attachment parts. `sha256` and `ciphertext_bytes` describe
+the ciphertext, never plaintext. `finish` requires
 the uploaded bytes to equal the reserved length and digest. On every ciphertext
 release Access rechecks the active grant, both stored revisions and the exact
 scope. A re-grant or revocation leaves an old reference fenced; an independently
@@ -781,11 +888,14 @@ authority reason: terminal, no reconnect. The Host also writes the close to the
 device outbox so a disconnected client receives it on reconnect; a stale
 `watch_id` is ignored by a later observation.
 
-`GET /v1/hosts/{host_id}/authority` is the observation lease renewal. A live
-grant, session and enrollment answer `204`; an ended authority answers the
-documented `403`/`503` with `reason`. The encrypted observation stream is
-end-to-end between Host and Device, so Access cannot author a close frame in
-it; the lease renewal is the authoritative lifetime signal.
+`GET /v1/hosts/{host_id}/authority` is the authoritative authority check for a
+live observation. A live grant, session and enrollment answer `204`; an ended
+authority answers the documented `403`/`503` with `reason`. It remains part of
+the public surface and is still called by Core. It does not renew a watch lease
+and does not extend observation ownership; `CheckVersions` is likewise
+read-only. The encrypted observation stream is end-to-end between Host and
+Device, so Access cannot author a close frame in it; this check is the
+authoritative lifetime signal.
 
 ## CLI exit codes
 
@@ -976,30 +1086,41 @@ invalidates its continuation explicitly. `HistoryBatch.projection_id` and
 content projection.
 
 Core subscribes MQTT before WatchSession and baseline synchronization. Watch IDs
-are channel-scoped; leases last 30 seconds. RefreshWatches every five seconds
-renews the lease and answers with `WatchLease`: transition markers
-(`revision`, `run_phase`, `live_epoch`, `history_head`, `projection_id`) and the
-question descriptor, never `SessionState`. The marker read is authoritative, so a
-lost last notification is still repaired, but the periodic message cannot grow
-with the transcript. Content travels only on the event stream and the paged
-history read. A structural marker change re-attaches for a fresh baseline; a
-moved history head repairs the transcript through paged reads; a newer revision
-rebuilds state from markers plus the approvals query. A lease answer never
-carries content, so a renewal cannot fail for size reasons and be mistaken for a
-connection problem. Deterministic refusals (`payload_too_large`,
-`invalid_argument`) end the observation with their own code instead of reconnecting;
-transient ones leave the stream untouched until the next tick. Unwatch is best
-effort; channel cleanup/lease expiry bounds abandoned resources. Current Core
-admits one active watch per instance so device MQTT client identities cannot
-compete internally.
+are channel-scoped and bound to the authenticated Broker connection reference
+and observation generation that admitted the channel. There is no lease
+renewal and no `RefreshWatches`, `WatchLease` or `WatchStates` operation.
+
+Core issues `CheckVersions{session_id}` on the query lane every five seconds as
+one bounded read-only check per actively observed Host, with at most one check
+in flight. `CheckVersions` never renews or extends ownership. Host coalesces
+overlapping checks for the same session and facet and returns `VersionChecks`
+with one `VersionCheck` per active watch: `watch_id`, `revision`, `run_phase`,
+`live_epoch`, `history_head`, `projection_id` and the question descriptor,
+never `SessionState` or content. Each requester still checks its own
+authorization and observation generation before using a shared read. A
+conversation-only check does not read the questions facet, and a Questions-only
+check does not read the conversation facet.
+
+The marker read is authoritative, so a lost last notification is still
+repaired, but the periodic message cannot grow with the transcript. Content
+travels only on the event stream and the paged history read. A structural marker
+change re-attaches for a fresh baseline; a moved history head repairs the
+transcript through paged reads; a newer revision rebuilds state from markers
+plus the approvals query. Deterministic refusals (`payload_too_large`,
+`invalid_argument`, or an authoritative denial) end the affected observation
+with their own code; transient failures leave the affected state stale until
+the next check. Unwatch is best effort. Explicit close, ordered disconnect,
+snapshot repair or a Broker epoch change closes only that connection instance's
+observations. Current Core admits one active watch per instance so device MQTT
+client identities cannot compete internally.
 
 Approvals and runtime state are current-state projections outside history cursor
 arithmetic. `SessionState` is a bounded transition summary (session, epoch,
 revision, history head, run phase, projection identity and question descriptor):
 pending approvals are content and travel only through the bounded `ApprovalList`
-query, so neither a baseline, a state update nor a lease can grow with the
-pending approval set. Approval execution always revalidates the native pending
-action.
+query, so neither a baseline, a state update nor a version check can grow with
+the pending approval set. Approval execution always revalidates the native
+pending action.
 The complete schema and Source invariants are in
 [the Harness contract](../../docs/architecture/harness-contract.md).
 
@@ -1091,7 +1212,7 @@ or late resolve returns `approval_expired`, `approval_version_mismatch` or
 
 ## Logical MQTT transport
 
-One coordinated relay epoch (`relay_version=4`) replaces transport v2. On the
+One coordinated relay epoch (`relay_version=5`) replaces the retired epoch-4 relay and transport v2. On the
 control class a complete application message travels in exactly one MQTT
 PUBLISH. Each hop picks the representation for its own outgoing packet:
 
@@ -1201,25 +1322,23 @@ failure is a drop, not a retry. Control messages are never queued behind a live
 preview.
 
 **Host live publication.** The Host publishes each packet-sized preview as one
-QoS 0 `EventEnvelope` on `whalerein/v1/h/{host_id}/live`. The existing
-packet-fit and UTF-8-safe split rules still apply, so a preview above the route
-packet budget is split into ordered pieces before publication; a live preview
-never becomes a reference. There is no ACK wait and no per-watch or per-topic
-live serialization chain: QoS 0 preserves per-client order and has nothing to
-acknowledge. A bounded per-connection live queue (for example 256 KiB or 64
-packets) protects memory; when it is full the Host drops the oldest pending
-preview or coalesces text and never blocks or displaces a control message. If
-the connection or broker is not ready, the preview is dropped. Previews are
-never published on the control `event` topic.
+QoS 0 `EventEnvelope` directly on the granted Device's
+`whalerein/v1/h/{host_id}/d/{device_id}/live` topic. Access neither subscribes
+to nor republishes it. The packet-fit and UTF-8-safe split rules still apply, so
+a preview above the route packet budget is split into ordered pieces before
+publication; a live preview never becomes a reference. There is no ACK wait and
+no per-watch or per-topic live serialization chain: QoS 0 preserves per-client
+order and has nothing to acknowledge. A bounded per-connection live queue (for
+example 256 KiB or 64 packets) protects memory; when it is full the Host drops
+the oldest pending preview or coalesces text and never blocks or displaces a
+control or query message. If the connection or broker is not ready, the preview
+is dropped. Previews are never published on the control `event` topic.
 
-**Access live routing.** Access subscribes to the Host live topic at QoS 0,
-authenticates the actual publisher as it does for the control topics, and
-requires an active grant. It republishes the same opaque `EventEnvelope` to the
-authenticated Device live topic `.../d/{device_id}/live` at QoS 0, using only
-the authenticated outer `device_id`. Access adds no durable row, outbox entry,
-receipt or notice for a live preview. On local backpressure Access drops the
-preview instead of blocking or queuing it durably. Control paths
-(`request`/`result`/`event`) are unchanged.
+The Broker delivery policy for that topic requires an authenticated Host
+publisher, the exact Host/Device topic and a current grant for the receiving
+Device connection. A preview that would outlive a grant is fenced or dropped
+rather than delivered under a newer grant. Access adds no durable row, outbox
+entry, receipt or notice for a live preview.
 
 **Core live reception.** Core subscribes to its Device live topic at QoS 0 in
 addition to the control event topic and delivers live frames to the same
@@ -1283,7 +1402,7 @@ artifact.
 
 `ReceiveAdvertisement` is the only exchange of receive limits. It carries a
 named `profile`, the validated `budget`, an authenticated
-`connection_generation` and the required `relay_version=4`. A generation is
+`connection_generation` and the required `relay_version=5`. A generation is
 scoped to the leg that carries the advertisement; generations from different
 legs are never compared. A delayed or replayed advertisement cannot update a
 newer connection, and a peer cannot raise another peer's limit.
@@ -1310,12 +1429,20 @@ publication. Reconnect binds a fresh advertisement to the new generation.
 Access registers only receive information across these seams; it never lets a
 Device, Host or stored reference raise a local or broker limit.
 
-`HostRequest.transport` still binds three request-scoped values at submission:
+`HostRequest.transport` binds four request-scoped values at submission:
 `result_max_bytes` is the device's validated HTTPS result bound, while
-`grant_generation` and `revocation_generation` are the two durable Access
-revisions for the `(host_id, device_id)` grant. Access captures both revisions
-from its durable grant row when it admits the request and keeps all three
-values attached to the exact durable request across restarts.
+`grant_generation`, `revocation_generation` and `enrollment_generation` are the
+durable Access revisions for the `(host_id, device_id)` grant and its managed
+enrollment. Access captures them from durable state when it admits the request
+and keeps all four values attached to the exact durable command request across
+restarts.
+
+For a query-lane request, Access additionally fills the top-level
+`HostRequest.connection_ref`, `HostRequest.grant_generation` and
+`HostRequest.enrollment_generation` from the admitted Broker connection and
+current authority. Those fields are immutable for the life of the transient
+waiter; Host binds observation ownership and reply affinity to them and rejects
+a query or handshake that lacks them.
 
 At ciphertext release Access requires exact equality of both revisions against
 the current durable grant row, and the grant must still be active. It applies
@@ -1355,43 +1482,51 @@ has been verified.
 
 ## Relay cutover
 
-The cutover is one coordinated hard cut to epoch 4:
+The cutover is one coordinated hard cut to epoch 5:
 
-- **One required epoch.** `relay_version=4` is the only accepted MQTT relay.
-  Epoch 3 is removed, its enum number is reserved, and it is rejected with
-  `protocol_version_incompatible`. There is no v2 acceptance, no unframed
-  fallback, no `WRMQTT2` prefix, no dual epoch and no compatibility bridge.
-  `TransportFrame`, fragment fields, transfer receipts and every
-  acknowledgement topic are removed from the contract.
-- **One delivery-class contract.** Epoch 4 adds the QoS 0 live topics to the
-  unchanged QoS 1 control topics. A preview is never published on the control
-  `event` topic, the control event router never publishes a live delta, and
-  `RelayTransport` never carries a live frame. There is no old-contract reader,
-  no feature flag and no dual publish path: one admission and one topic class
-  per message intent.
+- **One required epoch.** `relay_version=5` is the only accepted MQTT relay.
+  Epochs 3 and 4 are retired, their enum numbers and names are reserved, and
+  they are rejected with `protocol_version_incompatible`. There is no v2
+  acceptance, no unframed fallback, no `WRMQTT2` prefix, no dual epoch and no
+  compatibility bridge. `TransportFrame`, fragment fields, transfer receipts
+  and every acknowledgement topic are removed from the contract.
+- **One delivery contract.** Epoch 5 keeps the QoS 1 control topics, adds the
+  `query`/`reply` request-reply pair for post-pairing Noise and session queries,
+  and moves previews to direct QoS 0 Host-to-Device publication. The Host
+  `.../live` relay topic is retired. A preview is never published on the
+  control `event` topic or through Access; a query is never admitted on the
+  retired HTTPS handshake/query route; `RelayTransport` never carries a live
+  frame. There is no old-contract reader, no feature flag and no dual publish
+  path.
 - **Readiness gate.** Access marks a Host ready only after a valid
-  `HostReady` with `relay_version=4` and a valid advertisement. Access rejects
-  a Device or Host advertisement with any other epoch, including epoch 3.
-  Admission of a `HostRequest`, `HostResult`, `EventEnvelope`,
-  `RequestStateNotice` or relay object request requires the matching epoch and
-  application `protocol_version=1`, and live delivery additionally requires a
-  live topic subscription and an active grant.
+  `HostReady` with `relay_version=5` and a valid advertisement. Access rejects
+  a Device or Host advertisement with any other epoch, including epochs 3 and
+  4. Admission of a `HostRequest`, `HostResult`, `EventEnvelope`,
+  `RequestStateNotice`, query-lane message or relay object request requires the
+  matching epoch and application `protocol_version=1`; direct live delivery
+  additionally requires an active grant for the receiving Device and a current
+  Broker connection reference.
 - **Legacy artifact rejection.** An older Access, Host, Core, CLI, mobile build
-  or broker ACL that attempts v2 framing, a removed receipt/ack topic, an
-  epoch-3 advertisement, or an epoch-3 preview on the control topic fails
-  explicitly with `protocol_version_incompatible` before business delivery. A
-  mixed artifact set is not a supported release.
+  or broker ACL that attempts v2 framing, a removed receipt/ack topic, a retired
+  epoch-4 query or preview path, an epoch-3 or epoch-4 advertisement, or the
+  retired Host `.../live` topic fails explicitly with
+  `protocol_version_incompatible` before business delivery. A mixed artifact
+  set is not a supported release.
 - **Unchanged application version.** The application protocol version stays 1.
-  The epoch is the transport cut: it changes representation and adds a live
-  class, not the semantics of grants, keys, sessions, history, approvals or
-  command identity. Existing pairing credentials, Noise identities, pins,
-  grants and durable command recovery identities remain valid across the cut.
+  The epoch is the transport cut: it changes the query ingress, removes the
+  preview relay and watch renewal, and does not change the semantics of grants,
+  keys, sessions, history, approvals or command identity. Existing pairing
+  credentials, Noise identities, pins, grants and durable command recovery
+  identities remain valid across the cut.
 - **Operator coordination.** Access, Host, broker policy, Core and supported
-  clients deploy together. Add the live topics to the broker ACL and Mosquitto
-  policy in the same release. Quiesce old admissions, preserve original command
-  identities and ambiguity, then gate readiness on the new contract. Rollback
-  requires its own fenced admission and verified recovery; a live mixed-epoch
-  rollback is outside the contract.
+  clients deploy together. Quiesce old admissions; drain or expire old
+  in-flight queries; preserve original command identities, ambiguity and
+  durable command rows; add the query/reply pair and direct Device live policy
+  to the broker ACL in the same release; then gate readiness on the new
+  contract. A retired Device Will is not a presence or revocation fallback:
+  ordered Broker lifecycle events, the broker epoch and snapshot reconciliation
+  establish scoped disconnects. Rollback requires its own fenced admission and
+  verified recovery; a live mixed-epoch rollback is outside the contract.
 
 ## Model operations
 

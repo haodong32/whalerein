@@ -21,6 +21,15 @@ test('when assistant frame metadata is malformed, normalization rejects it witho
   assert.equal(end.createdAt, 10)
 })
 
+test('a scoped frame without the Agent recovers the Session from its attempt id', () => {
+  const event = assistantStreamEvent({
+    frame: { attemptId: 'session-1:4', revision: 2, type: 'chunk', index: 0,
+      chunk: { type: 'text-delta', index: 0, text: 'native ' } },
+  })
+  assert.equal(event.sessionId, 'session-1')
+  assert.equal(event.data.text, 'native ')
+})
+
 test('text and reasoning deltas carry distinct checked block kinds and adapter block identities', () => {
   const text = chunk(2, { type: 'text-delta', index: 2, text: 'answer' })
   assert.equal(text.data.block_id, 'text-2')

@@ -246,7 +246,7 @@ export class RelayObjectClient {
 
   async reserve({
     deviceId, sessionId = '', channelId = '', purpose, partId = '',
-    ciphertext, expiresAt,
+    ciphertext, expiresAt, requestId = '', connectionRef = '', enrollmentGeneration = 0,
   }) {
     if (!(ciphertext instanceof Uint8Array) || ciphertext.length === 0) {
       throw new PluginError('invalid_argument', 'relay ciphertext missing')
@@ -277,6 +277,9 @@ export class RelayObjectClient {
       ciphertext_bytes: ciphertext.length,
       sha256: digest,
       expires_at_unix_ms: expiresAt,
+      request_id: requestId,
+      enrollment_generation: enrollmentGeneration,
+      connection_ref: connectionRef,
       signed_at_unix_ms: signedAt,
       signature: sign(this.privateKey, text),
     })

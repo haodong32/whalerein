@@ -19,9 +19,11 @@ export function defaultReceive(generation = 1) {
     profile: 'TRANSPORT_PROFILE_DEFAULT',
     budget: transportProfileBudget('default'),
     connection_generation: generation,
-    relay_version: 4,
+    relay_version: 5,
   }
 }
+
+export const DEFAULT_CONNECTION_REF = '0123456789abcdef:connection-1'
 
 const sharedCodec = createCodec()
 
@@ -36,6 +38,9 @@ export function establishChannel({
   persistPeer = true,
   receive = defaultReceive(1),
   omitReceive = false,
+  connectionRef = DEFAULT_CONNECTION_REF,
+  grantGeneration = 1,
+  enrollmentGeneration = 1,
 }) {
   if (persistPeer) {
     store.upsertPeerKey({
@@ -58,11 +63,17 @@ export function establishChannel({
   })
   const reply = security.handleChannelHandshake({
     channel_id: channelId, device_id: deviceId, protocol_version: 1,
+    connection_ref: connectionRef,
+    grant_generation: grantGeneration,
+    enrollment_generation: enrollmentGeneration,
     body: noise.writeMessage(hello),
   })
   const ready = codec.decode('whalerein.v1.ChannelReady', noise.readMessage(reply))
   security.handleChannelHandshake({
     channel_id: channelId, device_id: deviceId, protocol_version: 1,
+    connection_ref: connectionRef,
+    grant_generation: grantGeneration,
+    enrollment_generation: enrollmentGeneration,
     body: noise.writeMessage(new Uint8Array(0)),
   })
   const derived = deriveChannelKeys(noise.handshakeHash, prologue)
@@ -75,6 +86,9 @@ export function establishChannel({
     c2h: derived.c2h,
     h2c: derived.h2c,
     noise,
+    connectionRef,
+    grantGeneration,
+    enrollmentGeneration,
     channel: security.getChannel(channelId),
   }
 }

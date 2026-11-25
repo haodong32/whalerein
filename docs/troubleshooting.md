@@ -57,7 +57,12 @@ review/confirmation. Follow the [diagnostic privacy rules](security.md#diagnosti
 |---|---|
 | Access unreachable | Verify advertised URL, listener and TLS/CA trust; probe `/healthz` and `/readyz`. |
 | Liveness passes, readiness fails | Inspect PostgreSQL and Access MQTT connection/subscription. |
-| Host offline | Check plugin host ID, MQTT credentials, subscription and HostReady; presence must recover after Access restart. |
+| Host offline | Check plugin host ID, MQTT credentials, subscription and HostReady; directory presence is Broker-derived and must recover from lifecycle events or a snapshot after Access restart. |
+| `protocol_version_incompatible` / upgrade prompt | The peer uses a retired relay epoch (3 or 4) or a retired frame. Deploy the matching epoch-5 Access, plugin, Host, Core and client set; there is no mixed-epoch or fallback path. |
+| Retired HTTP handshake/query path fails | Post-pairing Noise and session queries now use the MQTT 5 query lane. Upgrade the client; do not retry the old HTTPS route. |
+| Query reply times out | Check that the Device is subscribed to its own `.../d/{device_id}/reply`, the fixed response topic and Correlation Data match, the connection reference is current, and the original deadline has not elapsed. Access restart drops transient waiters; retry a safe read within the caller deadline. |
+| Live previews stop while control continues | Previews are QoS 0 and may drop. Check the direct `.../d/{device_id}/live` subscription and the Device grant. A lost preview is repaired by the committed control message or an authoritative history read; it is not a control failure. |
+| Watch appears stale | The five-second `CheckVersions` read is read-only and repairs a lost final notification. Check Host readiness and source availability; reconnect creates a new connection generation and observation. |
 | Channel rejected | Core retries read-only queries on a fresh channel; verify token rejection before re-pairing. |
 | Device revoked | Confirm Access rejected the stored token, then pair again. |
 | Command timeout/`unknown` | Reconcile the original command result; do not blindly repeat it with a new ID. |
@@ -67,7 +72,7 @@ review/confirmation. Follow the [diagnostic privacy rules](security.md#diagnosti
 | Attachment download fails | Keep existing destination files. Re-read the attachment row with `session history <id>` and retry a fresh download; add `--force` only to replace a colliding file and `--name` when the suggested name is unsafe. |
 | Reasoning missing | Pass `--show-reasoning`; the default hides reasoning without changing authorization. |
 | Approval rejected | Refresh pending approval state, digest, version and expiry. |
-| Large snapshot fails | Check peer capability, ACK ACLs and [transport/HTTP limits](../proto/v1/WIRE.md#transport-size-budget). |
+| Large snapshot fails | Check peer capability, broker ACLs, the direct live/query subscriptions and [transport/HTTP limits](../proto/v1/WIRE.md#transport-budgets-and-configuration). |
 | Duplicate device names | Identify the obsolete device ID before revoking it. |
 
 A disconnect alone proves neither revocation nor packet overflow. Preserve

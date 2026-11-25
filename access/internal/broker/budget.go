@@ -34,7 +34,7 @@ var transportCodes = map[string]struct{}{
 }
 
 // RelayEpoch is the only accepted complete-message relay contract.
-const RelayEpoch uint32 = 4
+const RelayEpoch uint32 = 5
 
 // Typed relay errors. Callers map these to stable wire outcomes; they never
 // include a topic, peer identity or payload byte.
@@ -45,7 +45,7 @@ var (
 	// ErrMessageBudget is a permanent complete-message refusal (payload_too_large).
 	ErrMessageBudget = errors.New("complete message exceeds the relay budget")
 	// ErrRelayEpoch is a missing or foreign relay epoch (protocol_version_incompatible).
-	ErrRelayEpoch = fmt.Errorf("%w: relay epoch is not v4", ErrPeerTransportUnsupported)
+	ErrRelayEpoch = fmt.Errorf("%w: relay epoch is not v5", ErrPeerTransportUnsupported)
 	// ErrReferenceTooLarge means the reference packet itself cannot fit.
 	ErrReferenceTooLarge = fmt.Errorf("%w: reference packet exceeds the packet limit", ErrMessageBudget)
 	// ErrStagingUnavailable means a reference was required but no stager is wired.
@@ -213,7 +213,7 @@ func routeForTopic(topic string) (receiverRoute, bool) {
 	switch parsed.Kind {
 	case KindRequest, KindPresence:
 		return receiverRoute{kind: "host", hostID: parsed.HostID}, true
-	case KindDeviceEvent, KindDeviceNotice:
+	case KindDeviceEvent, KindDeviceNotice, KindDeviceReply:
 		return receiverRoute{kind: "device", deviceID: parsed.DeviceID}, true
 	default:
 		return receiverRoute{}, false
@@ -248,6 +248,14 @@ func NewReceiverBudgets() *ReceiverBudgets {
 		entries: map[string]map[uint64]receiverEntry{},
 		current: map[string]map[uint64]string{},
 	}
+}
+
+// A broker process assigns connection IDs from a new sequence on startup.
+func (b *ReceiverBudgets) reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	clear(b.entries)
+	clear(b.current)
 }
 
 // NoteConnection records one broker-derived receiver connection. A newer

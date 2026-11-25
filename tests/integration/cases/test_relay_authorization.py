@@ -9,10 +9,12 @@ same authority path the product uses; only the caller is a probe.
 import base64
 import hashlib
 import json
+import os
+import subprocess
 import time
 
 import pytest
-from environment import Device, RelayDirectory
+from environment import ROOT, Device, RelayDirectory
 
 pytestmark = pytest.mark.transport
 
@@ -153,3 +155,54 @@ def test_ac03_revocation_fences_an_existing_reference(scenario, paired_device):
         paired_device.revoke()
         status, _, payload = directory.fetch(bearer, stored["objectId"])
         assert status in {401, 403}, payload
+
+
+def run_query_peer(scenario, arguments):
+    """Run one raw MQTT 5 peer and return only its printed routing facts."""
+    result = subprocess.run(
+        ["node", "tests/integration/drivers/transport/mqtt-query-peer.mjs", *arguments],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "WHALEREIN_TEST_MQTT_URL": "mqtt://127.0.0.1:1883",
+        },
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    assert result.returncode == 0, "raw MQTT query peer failed: " + result.stderr.strip()[-300:]
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines, "raw MQTT query peer emitted no facts"
+    return json.loads(lines[-1])
+
+
+def test_forged_connection_property_is_rejected_by_the_broker(scenario, paired_device):
+    """A Device-supplied whalerein-connection property is denied at PUBACK while the same query without it is accepted."""
+    with scenario.fixture_bearer(paired_device) as bearer:
+        facts = run_query_peer(
+            scenario,
+            ["forge", scenario.host, paired_device.identity["device_id"], bearer],
+        )
+    assert facts["forgedReason"] is not None and facts["forgedReason"] >= 0x80, facts
+    assert facts["acceptedReason"] == 0, facts
+
+
+def test_directed_reply_is_not_delivered_to_a_same_id_replacement(scenario, paired_device):
+    """A reply targeted at a replaced Device connection is dropped, while the same reply targeted at the current connection is delivered."""
+    access_password = scenario.env["WHALEREIN_BROKER_PASSWORD"]
+    with scenario.fixture_bearer(paired_device) as bearer:
+        facts = run_query_peer(
+            scenario,
+            [
+                "target",
+                scenario.host,
+                paired_device.identity["device_id"],
+                bearer,
+                access_password,
+            ],
+        )
+    assert facts["replaced"] is True, facts
+    assert facts["epochMatches"] is True, facts
+    assert facts["staleDelivered"] == 0, facts
+    assert facts["currentDelivered"] >= 1, facts

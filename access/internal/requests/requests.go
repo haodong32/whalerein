@@ -429,7 +429,7 @@ func (s *Service) resultLimitFor(request *whalereinv1.HostRequest) int64 {
 }
 
 // RelayEpoch is the only relay contract this build admits.
-const RelayEpoch uint32 = 4
+const RelayEpoch uint32 = 5
 
 func (s *Service) validate(input SubmitInput) (store.Request, error) {
 	req := input.Request
@@ -460,34 +460,22 @@ func (s *Service) validate(input SubmitInput) (store.Request, error) {
 	hasReference := req.GetBodyReference() != nil
 	reference := store.Request{}
 	switch req.GetKind() {
-	case whalereinv1.RequestKind_REQUEST_KIND_HANDSHAKE:
-		// Bootstrap bodies stay inline-only. A reference here would make a
-		// handshake depend on the ciphertext directory before it is admitted.
-		if hasReference {
-			return store.Request{}, fmt.Errorf("%w: handshake must be inline", ErrInvalidRequest)
-		}
-		if req.GetCommandId() != "" || len(req.GetPayloadDigest()) != 0 {
-			return store.Request{}, fmt.Errorf("%w: command fields on non-command request", ErrInvalidRequest)
-		}
-	case whalereinv1.RequestKind_REQUEST_KIND_QUERY,
-		whalereinv1.RequestKind_REQUEST_KIND_COMMAND:
+	case whalereinv1.RequestKind_REQUEST_KIND_HANDSHAKE,
+		whalereinv1.RequestKind_REQUEST_KIND_QUERY:
+		// Post-pairing Noise establishment and session queries were retired
+		// from the durable HTTP request route in epoch 5. They must arrive on
+		// the MQTT query lane; this route fails before creating a row or
+		// forwarding anything.
+		return store.Request{}, fmt.Errorf("%w: query and handshake use the MQTT query lane", ErrProtocolVersion)
+	case whalereinv1.RequestKind_REQUEST_KIND_COMMAND:
 		if hasBody == hasReference {
 			return store.Request{}, fmt.Errorf("%w: exactly one of body and body_reference is required", ErrInvalidRequest)
 		}
-		if req.GetKind() == whalereinv1.RequestKind_REQUEST_KIND_COMMAND {
-			if req.GetCommandId() == "" {
-				return store.Request{}, fmt.Errorf("%w: command_id is required", ErrInvalidRequest)
-			}
-			if len(req.GetPayloadDigest()) == 0 {
-				return store.Request{}, fmt.Errorf("%w: payload_digest is required", ErrInvalidRequest)
-			}
-		} else {
-			if req.GetCommandId() != "" {
-				return store.Request{}, fmt.Errorf("%w: command fields on non-command request", ErrInvalidRequest)
-			}
-			if !hasReference && len(req.GetPayloadDigest()) != 0 {
-				return store.Request{}, fmt.Errorf("%w: command fields on non-command request", ErrInvalidRequest)
-			}
+		if req.GetCommandId() == "" {
+			return store.Request{}, fmt.Errorf("%w: command_id is required", ErrInvalidRequest)
+		}
+		if len(req.GetPayloadDigest()) == 0 {
+			return store.Request{}, fmt.Errorf("%w: payload_digest is required", ErrInvalidRequest)
 		}
 		if hasReference {
 			// A referenced body is bound by its ciphertext digest. The request

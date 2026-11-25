@@ -90,7 +90,7 @@ def run_probe(case, broker):
             "AC-05.legacy",
             id="AC-05.legacy",
             marks=pytest.mark.description(
-                "When a relay envelope names epoch 0, 2 or the retired epoch 3, or mixes inline and reference representations, it is rejected as protocol_version_incompatible or invalid_argument and never reaches Host business handling."
+                "When a relay envelope names epoch 0, 2 or the retired epochs 3 and 4, or mixes inline and reference representations, it is rejected as protocol_version_incompatible or invalid_argument and never reaches Host business handling."
             ),
         ),
         pytest.param(
@@ -98,7 +98,7 @@ def run_probe(case, broker):
             "AC-05.matched",
             id="AC-05.matched",
             marks=pytest.mark.description(
-                "When a matching epoch-4 release publishes six small results at the negotiated budget, every body arrives intact, the publisher does not reconnect, and no fragment, receipt or acknowledgement packet appears."
+                "When a matching epoch-5 release publishes six small results at the negotiated budget, every body arrives intact, the publisher does not reconnect, and no fragment, receipt or acknowledgement packet appears."
             ),
         ),
         pytest.param(
@@ -106,7 +106,7 @@ def run_probe(case, broker):
             "AC-05.no-fragments",
             id="AC-05.no-fragments",
             marks=pytest.mark.description(
-                "When a matching epoch-4 release publishes complete packets, the capture contains no WRMQTT2 prefix, no receipt topic and no device acknowledgement topic."
+                "When a matching epoch-5 release publishes complete packets, the capture contains no WRMQTT2 prefix, no receipt topic and no device acknowledgement topic."
             ),
         ),
         pytest.param(
@@ -152,7 +152,7 @@ def run_probe(case, broker):
     ],
 )
 def test_relay_transport(case, subcase, broker):
-    """Passes the named epoch-4 relay subcase on the real broker."""
+    """Passes the named epoch-5 relay subcase on the real broker."""
     facts = run_probe(case, broker)
     if subcase == "AC-01.receiver-budget":
         assert facts["inlineBytes"] <= facts["limit"]
@@ -171,6 +171,7 @@ def test_relay_transport(case, subcase, broker):
             "0": "protocol_version_incompatible",
             "2": "protocol_version_incompatible",
             "3": "protocol_version_incompatible",
+            "4": "protocol_version_incompatible",
             "mixed": "invalid_argument",
         }
         assert facts["legacyDelivered"] == 0 and facts["validDelivered"] == 1

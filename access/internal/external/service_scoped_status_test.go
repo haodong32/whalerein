@@ -71,6 +71,13 @@ func (h *hookStore) MarkEnrollmentReady(ctx context.Context, hostID string, at t
 	return h.fakeStore.MarkEnrollmentReady(ctx, hostID, at)
 }
 
+func (h *hookStore) MarkRemovalEnforcedAt(ctx context.Context, removalOperationID string, applied *store.ConnectionRef, at time.Time) error {
+	if h.markEnforcedHook != nil {
+		return h.markEnforcedHook(ctx, removalOperationID, at)
+	}
+	return h.fakeStore.MarkRemovalEnforcedAt(ctx, removalOperationID, applied, at)
+}
+
 func (h *hookStore) MarkRemovalEnforced(ctx context.Context, removalOperationID string, at time.Time) error {
 	if h.markEnforcedHook != nil {
 		return h.markEnforcedHook(ctx, removalOperationID, at)

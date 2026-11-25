@@ -79,14 +79,23 @@ type Store interface {
 	ActiveDeviceByAuthHash(ctx context.Context, authHash []byte) (store.Device, error)
 	DeviceByID(ctx context.Context, deviceID string) (store.Device, error)
 	HasActiveGrant(ctx context.Context, hostID, deviceID string) (bool, error)
+	AdmissionGrantFor(ctx context.Context, hostID, deviceID string) (store.AdmissionGrant, error)
 	ListDeviceGrants(ctx context.Context, deviceID string) ([]store.AdmissionGrant, error)
+	ListHostGrants(ctx context.Context, hostID string) ([]store.AdmissionGrant, error)
 	RevokeDeviceGrants(ctx context.Context, deviceID string, at time.Time) ([]string, bool, error)
 	RevokeGrant(ctx context.Context, hostID, deviceID string, at time.Time) error
+	// RevokeGrantGeneration revokes only the frozen grant generation. It
+	// reports whether this generation was current, so a delayed retry cannot
+	// revoke a newer authorization.
+	RevokeGrantGeneration(ctx context.Context, hostID, deviceID string, grantGeneration uint64, at time.Time) (bool, error)
 	SetHostAuthorizationKey(ctx context.Context, hostID string, publicKey []byte) error
 	HostAuthorizationKey(ctx context.Context, hostID string) ([]byte, error)
 	HostBrokerCredential(ctx context.Context, hostID string) (store.EnrollmentCredential, error)
 	PendingRevocations(ctx context.Context, hostID string) ([]store.Revocation, error)
 	MarkRevocationsReplayed(ctx context.Context, hostID string, deviceIDs []string, revokedBefore, at time.Time, generations map[string]uint64) error
+	// Enrollment reads the managed Host enrollment generation used to decide
+	// whether a frozen scope was already replaced.
+	Enrollment(ctx context.Context, hostID string) (store.ExternalEnrollment, error)
 }
 
 // Admission is the bounded local grant authority used by realtime checks.
@@ -106,13 +115,13 @@ type PolicyObserver interface {
 	RecordPolicy(deviceID string, revision uint64)
 }
 
-// LineEnforcer applies revocation to the broker policy and closes superseded
-// broker connections. A revocation response is only complete after this
-// succeeds.
+// LineEnforcer applies one frozen revocation scope to the broker policy and
+// closes only the admitted connections that carried it. A revocation response
+// is only complete after this succeeds.
 type LineEnforcer interface {
-	RevokeGrant(ctx context.Context, hostID, deviceID string) error
-	RevokeDevice(ctx context.Context, deviceID string) error
-	RevokeHost(ctx context.Context, hostID string, grantGenerations map[string]uint64) error
+	RevokeGrant(ctx context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error)
+	RevokeDevice(ctx context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error)
+	RevokeHost(ctx context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error)
 }
 
 // Presence is broker-derived host connectivity. It never reads the database.
@@ -120,12 +129,19 @@ type Presence interface {
 	IsHostOnline(ctx context.Context, hostID string) bool
 }
 
-// Transport publishes host requests and performs explicit disconnects. The
-// broker package implements it; auth does not depend on that package.
+// ConnectionPresence is the broker-derived admitted-connection registry. A
+// presence source that omits it (a test double) freezes no live connection and
+// enforcement still fences by generation.
+type ConnectionPresence interface {
+	DeviceConnections(deviceID string) []store.ScopeConnection
+	HostScopeConnection(hostID string) (store.ScopeConnection, bool)
+}
+
+// Transport publishes host requests on the Host channel. Explicit disconnects
+// are scoped through LineEnforcer, never an unfenced username kick.
 type Transport interface {
 	PublishAndAwait(ctx context.Context, hostID string, req *whalereinv1.HostRequest, timeout time.Duration) (*whalereinv1.HostResult, error)
 	Publish(ctx context.Context, hostID string, req *whalereinv1.HostRequest) error
-	DisconnectDevice(ctx context.Context, deviceID string) error
 }
 
 // Config holds auth-relevant settings. Tokens are never logged.
@@ -485,6 +501,15 @@ func (s *Service) AuthenticateBroker(ctx context.Context, clientID, username, pa
 // principal. Device policies read the durable grant list; the result is
 // installed by the broker plugin for the life of that connection.
 func (s *Service) BrokerPolicy(ctx context.Context, identity BrokerIdentity) (policy.Connection, error) {
+	if identity.Kind == KindHost {
+		// Host policy carries one direct-preview write per currently authorized
+		// Device. A revoked grant disappears with the next projection.
+		grants, err := s.store.ListHostGrants(ctx, identity.HostID)
+		if err != nil {
+			return policy.Connection{}, fmt.Errorf("broker policy: %w", err)
+		}
+		return policy.Build(string(identity.Kind), identity.HostID, identity.DeviceID, grants), nil
+	}
 	if identity.Kind != KindDevice {
 		return policy.Build(string(identity.Kind), identity.HostID, identity.DeviceID, nil), nil
 	}

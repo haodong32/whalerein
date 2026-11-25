@@ -32,6 +32,10 @@ async fn setup(sync_history: bool) -> (tempfile::TempDir, Core, FakeAccess, TcpL
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     core.config.write().unwrap().as_mut().unwrap().mqtt_url =
         Some(format!("mqtt://{}", listener.local_addr().unwrap()));
+    // The fixture switches the transport after the initial HTTP bootstrap.
+    // Stop the connection opened against the fake Access broker so the
+    // observation attaches to this raw peer.
+    core.disconnect_host("host-1");
     (dir, core, access, listener)
 }
 
@@ -61,11 +65,11 @@ async fn subscribe(listener: &TcpListener) -> TcpStream {
     // preview topic at QoS 0. Acknowledge the QoS 1 publication and every
     // subscription so the event loop can progress.
     let mut subscriptions: Vec<(String, QoS)> = Vec::new();
-    while subscriptions.len() < 3 {
+    while subscriptions.len() < 4 {
         match read_packet(&mut stream, &mut buffer).await {
             Packet::Publish(publish) => {
                 let [high, low] = publish.pkid.to_be_bytes();
-                stream.write_all(&[0x40, 2, high, low]).await.unwrap();
+                stream.write_all(&[0x40, 4, high, low, 0, 0]).await.unwrap();
             }
             Packet::Subscribe(subscription) => {
                 let [high, low] = subscription.pkid.to_be_bytes();
@@ -79,7 +83,8 @@ async fn subscribe(listener: &TcpListener) -> TcpStream {
     }
     assert!(subscriptions[0].0.ends_with("/event"));
     assert!(subscriptions[1].0.ends_with("/notice"));
-    assert!(subscriptions[2].0.ends_with("/live"));
+    assert!(subscriptions[2].0.ends_with("/reply"));
+    assert!(subscriptions[3].0.ends_with("/live"));
     assert_eq!(
         subscriptions[0].1,
         QoS::AtLeastOnce,
@@ -92,16 +97,22 @@ async fn subscribe(listener: &TcpListener) -> TcpStream {
     );
     assert_eq!(
         subscriptions[2].1,
+        QoS::AtLeastOnce,
+        "query replies subscribe at QoS 1"
+    );
+    assert_eq!(
+        subscriptions[3].1,
         QoS::AtMostOnce,
         "live previews subscribe at QoS 0"
     );
-    let prefix = subscriptions[2].0.trim_end_matches("/live").to_owned();
+    let prefix = subscriptions[3].0.trim_end_matches("/live").to_owned();
     assert_eq!(
         subscriptions[0].0,
         format!("{prefix}/event"),
         "live and control topics share the device scope"
     );
     assert_eq!(subscriptions[1].0, format!("{prefix}/notice"));
+    assert_eq!(subscriptions[2].0, format!("{prefix}/reply"));
     stream
 }
 
@@ -145,7 +156,7 @@ fn seal(core: &Core, update: SessionUpdate) -> EventEnvelope {
         created_at_unix_ms: 1,
         nonce: frame.nonce,
         ciphertext: frame.ciphertext,
-        relay_version: 4,
+        relay_version: 5,
         ..Default::default()
     }
 }
@@ -922,7 +933,8 @@ async fn a_deterministic_watch_failure_keeps_the_host_connection() {
     // must still report Connected so the app can explain the session instead of
     // claiming the network is down.
     let (_dir, core, access, listener) = setup(false).await;
-    access.host.lock().unwrap().refresh_error = Some(whalerein_proto::ErrorCode::PayloadTooLarge);
+    access.host.lock().unwrap().version_check_error =
+        Some(whalerein_proto::ErrorCode::PayloadTooLarge);
     let key = core.session_key("session-1").await.unwrap();
     let peer = tokio::spawn(async move {
         let _stream = subscribe(&listener).await;
@@ -1300,7 +1312,7 @@ async fn session_observation_rejects_an_epoch_three_event() {
     let peer = tokio::spawn(async move {
         let mut stream = subscribe(&listener).await;
         let mut event = delta_event(&peer_core, "session-1", "watch-1", 1, "old");
-        event.relay_version = crate::access::transport::RELAY_EPOCH_V4 - 1;
+        event.relay_version = crate::access::transport::RELAY_EPOCH_V5 - 1;
         publish_control(&mut stream, event).await;
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
@@ -1342,7 +1354,8 @@ async fn a_deterministic_lease_failure_ends_the_watch_instead_of_reconnecting() 
     // must report the real cause once, not loop through reconnects that look
     // like a network problem.
     let (_dir, core, access, listener) = setup(false).await;
-    access.host.lock().unwrap().refresh_error = Some(whalerein_proto::ErrorCode::PayloadTooLarge);
+    access.host.lock().unwrap().version_check_error =
+        Some(whalerein_proto::ErrorCode::PayloadTooLarge);
     let key = core.session_key("session-1").await.unwrap();
     let peer = tokio::spawn(async move {
         let _stream = subscribe(&listener).await;
@@ -1386,7 +1399,7 @@ async fn a_transient_lease_failure_keeps_the_stream_open() {
     // A failed renewal changes nothing while the lease still has room: the
     // same connection retries on the next tick.
     let (_dir, core, access, listener) = setup(false).await;
-    access.host.lock().unwrap().refresh_error = Some(whalerein_proto::ErrorCode::Unavailable);
+    access.host.lock().unwrap().version_check_error = Some(whalerein_proto::ErrorCode::Unavailable);
     let key = core.session_key("session-1").await.unwrap();
     let peer = tokio::spawn(async move {
         let _stream = subscribe(&listener).await;
@@ -1519,7 +1532,8 @@ async fn a_transient_approvals_read_failure_keeps_visible_pending_approvals() {
 #[tokio::test]
 async fn a_malformed_lease_refusal_ends_the_watch_with_its_real_code() {
     let (_dir, core, access, listener) = setup(false).await;
-    access.host.lock().unwrap().refresh_error = Some(whalerein_proto::ErrorCode::InvalidArgument);
+    access.host.lock().unwrap().version_check_error =
+        Some(whalerein_proto::ErrorCode::InvalidArgument);
     let key = core.session_key("session-1").await.unwrap();
     let peer = tokio::spawn(async move {
         let _stream = subscribe(&listener).await;

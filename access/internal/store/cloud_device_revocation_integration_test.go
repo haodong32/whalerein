@@ -135,8 +135,9 @@ func TestCloudDeviceGrantRevocationIsHostScopedAndReleasesTheSlotAfterEnforcemen
 		}
 	}
 
-	if hasGrant, err := s.BeginCloudDeviceRevocation(ctx, workspace, "host-a", device, now); err != nil || !hasGrant {
-		t.Fatalf("begin revocation = %v, err=%v", hasGrant, err)
+	frozen, err := s.BeginCloudDeviceRevocation(ctx, workspace, "host-a", device, now)
+	if err != nil || !frozen.Exists {
+		t.Fatalf("begin revocation = %+v, err=%v", frozen, err)
 	}
 	if state, err := s.CloudDeviceGrantStatus(ctx, workspace, "host-a", device); err != nil || state != "pending" {
 		t.Fatalf("pending state = %q, err=%v", state, err)
@@ -185,8 +186,9 @@ func TestCloudDeviceGrantRevocationIsHostScopedAndReleasesTheSlotAfterEnforcemen
 
 	// The last grant releases the final slot and the Device credential can no
 	// longer reconnect.
-	if hasGrant, err := s.BeginCloudDeviceRevocation(ctx, workspace, "host-b", device, now); err != nil || !hasGrant {
-		t.Fatalf("begin sibling revocation = %v, err=%v", hasGrant, err)
+	frozen, err = s.BeginCloudDeviceRevocation(ctx, workspace, "host-b", device, now)
+	if err != nil || !frozen.Exists {
+		t.Fatalf("begin sibling revocation = %+v, err=%v", frozen, err)
 	}
 	if err := s.RevokeGrant(ctx, "host-b", device, now); err != nil {
 		t.Fatal(err)

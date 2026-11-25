@@ -56,6 +56,11 @@
 #define CONTROL_REPLY_TOPIC "whalerein/v1/control/reply"
 #define CONTROL_EVENT_TOPIC "whalerein/v1/control/events"
 
+#define PROP_CONNECTION "whalerein-connection"
+#define PROP_TARGET "whalerein-target"
+#define EPOCH_LEN 16
+#define CONN_REF_LEN (EPOCH_LEN + 1 + 20)
+
 #define MAX_LINE 4096
 #define MAX_ACL 1024
 #define MAX_CLIENTS 20000
@@ -188,6 +193,7 @@ static struct auth_job *jobs_head = NULL;
 static struct auth_job *jobs_tail = NULL;
 static size_t inflight = 0;
 static uint64_t next_conn_id = 1;
+static char broker_epoch[EPOCH_LEN + 1];
 static uint64_t next_seq = 1;
 static uint64_t next_fence_order = 1;
 static time_t policy_fresh_until_ms = 0;
@@ -241,6 +247,116 @@ static char *dup_string(const char *value)
 	}
 	memcpy(copy, value, len + 1);
 	return copy;
+}
+
+static bool topic_matches(const char *filter, const char *topic);
+
+/* A broker-process epoch invalidates every connection reference after a broker
+ * restart. It is random per process and never persisted. */
+static void generate_broker_epoch(void)
+{
+	unsigned char bytes[EPOCH_LEN / 2];
+	ssize_t got = -1;
+	int fd;
+	size_t i;
+
+	fd = open("/dev/urandom", O_RDONLY);
+	if (fd >= 0) {
+		got = read(fd, bytes, sizeof(bytes));
+		close(fd);
+	}
+	if (got == (ssize_t)sizeof(bytes)) {
+		for (i = 0; i < sizeof(bytes); i++) {
+			snprintf(broker_epoch + (i * 2), 3, "%02x", bytes[i]);
+		}
+		return;
+	}
+	snprintf(broker_epoch, sizeof(broker_epoch), "%08x%08x",
+		 (unsigned int)time(NULL), (unsigned int)getpid());
+}
+
+/* <broker-epoch>:<accepted-connection-instance>. */
+static void connection_ref(const struct wclient *client, char *out, size_t out_len)
+{
+	if (!client) {
+		snprintf(out, out_len, "%s:0", broker_epoch);
+		return;
+	}
+	snprintf(out, out_len, "%s:%llu", broker_epoch,
+		 (unsigned long long)client->conn_id);
+}
+
+static bool property_name_is(const mosquitto_property *property, const char *name)
+{
+	const mosquitto_property *found;
+	char *property_name = NULL;
+	char *value = NULL;
+	bool match = false;
+
+	if (!property || mosquitto_property_identifier(property) != MQTT_PROP_USER_PROPERTY) {
+		return false;
+	}
+	found = mosquitto_property_read_string_pair(property, MQTT_PROP_USER_PROPERTY,
+						    &property_name, &value, false);
+	if (found == property && property_name) {
+		match = strcmp(property_name, name) == 0;
+	}
+	free(property_name);
+	free(value);
+	return match;
+}
+
+static bool user_property_present(const mosquitto_property *properties, const char *name)
+{
+	const mosquitto_property *property;
+
+	for (property = properties; property; property = mosquitto_property_next(property)) {
+		if (property_name_is(property, name)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool user_property_value(const mosquitto_property *properties, const char *name,
+				char *out, size_t out_len)
+{
+	const mosquitto_property *property;
+
+	for (property = properties; property; property = mosquitto_property_next(property)) {
+		const mosquitto_property *found;
+		char *property_name = NULL;
+		char *value = NULL;
+
+		if (!property_name_is(property, name)) {
+			continue;
+		}
+		found = mosquitto_property_read_string_pair(property, MQTT_PROP_USER_PROPERTY,
+							    &property_name, &value, false);
+		if (found == property && value) {
+			snprintf(out, out_len, "%s", value);
+			free(property_name);
+			free(value);
+			return true;
+		}
+		free(property_name);
+		free(value);
+	}
+	return false;
+}
+
+static bool query_reply_topic(const char *topic)
+{
+	return topic_matches("whalerein/v1/h/+/d/+/reply", topic);
+}
+
+static bool directed_topic(const char *topic)
+{
+	/* The device-scoped reply topic is queued at QoS 1: Access names the exact
+	 * admitted connection so a same-ID replacement cannot consume a stale
+	 * reply. QoS 0 previews are not queued and are scoped by topic plus the
+	 * Broker's live grant re-check at delivery. */
+	return query_reply_topic(topic);
 }
 
 /* MQTT topic-filter match for a concrete topic. */
@@ -499,28 +615,36 @@ static void publish_event_locked(uint64_t seq, const char *type, struct wclient 
 	int len;
 	int rc;
 
-	len = snprintf(payload, sizeof(payload),
-		       "whalerein/1\n"
-		       "seq %llu\n"
-		       "event %s\n"
-		       "client %s\n"
-		       "kind %s\n"
-		       "host %s\n"
-		       "device %s\n"
-		       "conn %llu\n"
-		       "at %lld\n"
-		       "reason %d\n",
-		       (unsigned long long)seq, type,
-		       client_id ? client_id : "",
-		       kind ? kind : "",
-		       host_id ? host_id : "",
-		       device_id ? device_id : "",
-		       (unsigned long long)conn_id,
-		       (long long)now_ms(), reason);
+	{
+		char ref[CONN_REF_LEN];
+
+		connection_ref(client, ref, sizeof(ref));
+		len = snprintf(payload, sizeof(payload),
+			       "whalerein/1\n"
+			       "seq %llu\n"
+			       "epoch %s\n"
+			       "event %s\n"
+			       "client %s\n"
+			       "kind %s\n"
+			       "host %s\n"
+			       "device %s\n"
+			       "session %s\n"
+			       "conn %llu\n"
+			       "ref %s\n"
+			       "at %lld\n"
+			       "reason %d\n",
+			       (unsigned long long)seq, broker_epoch, type,
+			       client_id ? client_id : "",
+			       kind ? kind : "",
+			       host_id ? host_id : "",
+			       device_id ? device_id : "",
+			       client ? client->session_id : "",
+			       (unsigned long long)conn_id, ref,
+			       (long long)now_ms(), reason);
+	}
 	if (len <= 0 || (size_t)len >= sizeof(payload)) {
 		return;
 	}
-	UNUSED(client);
 	rc = mosquitto_broker_publish_copy(NULL, CONTROL_EVENT_TOPIC, len, payload, 1, false, NULL);
 	if (rc != MOSQ_ERR_SUCCESS) {
 		mosquitto_log_printf(MOSQ_LOG_ERR, "whalerein: presence event publish failed: %d", rc);
@@ -864,6 +988,8 @@ static void handle_remove(struct request *request, char *body, size_t body_len)
 	char kick[16];
 	struct wclient *client;
 	uint64_t conn_id = 0;
+	uint64_t fence_conn = 0;
+	bool have_conn;
 
 	if (!line_value(request, "client", client_id, sizeof(client_id))) {
 		set_reply_error(body, body_len, "invalid_argument", "missing client");
@@ -872,11 +998,17 @@ static void handle_remove(struct request *request, char *body, size_t body_len)
 	if (!line_value(request, "kick", kick, sizeof(kick))) {
 		kick[0] = '\0';
 	}
+	{
+		char conn_value[64];
+
+		have_conn = line_value(request, "conn", conn_value, sizeof(conn_value)) &&
+			    line_uint(request, "conn", &fence_conn, true);
+	}
 	pthread_mutex_lock(&lock);
 	client = client_find_locked(client_id);
-	if (!client) {
+	if (!client || (have_conn && client->conn_id != fence_conn)) {
 		pthread_mutex_unlock(&lock);
-		snprintf(body, body_len, "ok\nseq %llu\n", (unsigned long long)next_seq);
+		snprintf(body, body_len, "ok\nabsent 1\nseq %llu\n", (unsigned long long)next_seq);
 		return;
 	}
 	conn_id = client->conn_id;
@@ -900,7 +1032,9 @@ static void handle_deny(struct request *request, char *body, size_t body_len)
 	uint64_t generation = 0;
 	uint64_t order = 0;
 	uint64_t matched = 0;
+	uint64_t fence_conn = 0;
 	bool have_host;
+	bool have_conn;
 	struct fence *fence;
 	struct wclient *client;
 	char kick_ids[16][128];
@@ -913,6 +1047,12 @@ static void handle_deny(struct request *request, char *body, size_t body_len)
 		return;
 	}
 	have_host = line_value(request, "host", host_id, sizeof(host_id));
+	{
+		char conn_value[64];
+
+		have_conn = line_value(request, "conn", conn_value, sizeof(conn_value)) &&
+			    line_uint(request, "conn", &fence_conn, true);
+	}
 	if (!line_value(request, "kick", kick, sizeof(kick))) {
 		kick[0] = '\0';
 	}
@@ -946,6 +1086,9 @@ static void handle_deny(struct request *request, char *body, size_t body_len)
 		bool scope_match = false;
 
 		if (!client->device_id || strcmp(client->device_id, device_id) != 0) {
+			continue;
+		}
+		if (have_conn && client->conn_id != fence_conn) {
 			continue;
 		}
 		for (i = 0; i < client->acl_count; i++) {
@@ -1022,10 +1165,29 @@ static void handle_kick(struct request *request, char *body, size_t body_len)
 {
 	char client_id[MAX_LINE];
 	char username[MAX_LINE];
+	uint64_t fence_conn = 0;
+	bool have_conn;
+	bool absent = false;
 	int rc = MOSQ_ERR_NOT_FOUND;
 
 	if (line_value(request, "client", client_id, sizeof(client_id))) {
-		rc = mosquitto_kick_client_by_clientid(client_id, false);
+		{
+			char conn_value[64];
+
+			have_conn = line_value(request, "conn", conn_value, sizeof(conn_value)) &&
+				    line_uint(request, "conn", &fence_conn, true);
+		}
+		if (have_conn) {
+			struct wclient *client;
+
+			pthread_mutex_lock(&lock);
+			client = client_find_locked(client_id);
+			absent = !client || client->conn_id != fence_conn;
+			pthread_mutex_unlock(&lock);
+		}
+		if (!absent) {
+			rc = mosquitto_kick_client_by_clientid(client_id, false);
+		}
 	} else if (line_value(request, "username", username, sizeof(username))) {
 		rc = mosquitto_kick_client_by_username(username, false);
 	} else {
@@ -1111,8 +1273,11 @@ static void handle_renew_session(struct request *request, char *body, size_t bod
 
 static size_t snapshot_line(char *out, size_t out_len, const struct wclient *client, uint64_t seq)
 {
+	char ref[CONN_REF_LEN];
+
+	connection_ref(client, ref, sizeof(ref));
 	return (size_t)snprintf(out, out_len,
-				"client %s %s %s %s %llu %llu %s %llu %lld %s\n",
+				"client %s %s %s %s %llu %llu %s %llu %lld %s %s\n",
 				client->client_id,
 				client->kind == KIND_HOST ? "host" :
 				client->kind == KIND_DEVICE ? "device" :
@@ -1124,7 +1289,8 @@ static size_t snapshot_line(char *out, size_t out_len, const struct wclient *cli
 				client->connected ? "connected" : "offline",
 				(unsigned long long)seq,
 				(long long)client->connected_at_ms,
-				client->session_id[0] ? client->session_id : "-");
+				client->session_id[0] ? client->session_id : "-",
+				ref);
 }
 
 static char *handle_snapshot(char *body, size_t body_len)
@@ -1138,8 +1304,10 @@ static char *handle_snapshot(char *body, size_t body_len)
 	 * follow carry a strictly greater sequence, so Access can discard only
 	 * events the snapshot supersedes. */
 	seq = next_seq > 0 ? next_seq - 1 : 0;
-	used = (size_t)snprintf(body, body_len, "ok\nseq %llu\nrevision %llu\nsession_capability 1\n",
-				 (unsigned long long)seq, (unsigned long long)applied_revision);
+	used = (size_t)snprintf(body, body_len,
+				 "ok\nseq %llu\nepoch %s\nrevision %llu\nsession_capability 1\n",
+				 (unsigned long long)seq, broker_epoch,
+				 (unsigned long long)applied_revision);
 	for (client = clients; client && used < body_len - 1; client = client->next) {
 		size_t written = snapshot_line(body + used, body_len - used, client, seq);
 
@@ -1686,6 +1854,24 @@ static enum principal_kind kind_from_username(const char *username)
 	return KIND_NONE;
 }
 
+static const struct {
+	int access;
+	const char *filter;
+} access_acls[] = {
+	{ACL_WRITE, "whalerein/v1/h/+/request"},
+	{ACL_WRITE, "whalerein/v1/h/+/d/+/event"},
+	{ACL_WRITE, "whalerein/v1/h/+/d/+/notice"},
+	{ACL_WRITE, "whalerein/v1/h/+/d/+/reply"},
+	{ACL_WRITE, "whalerein/v1/h/+/presence"},
+	{ACL_WRITE, "$CONTROL/whalerein/v1"},
+	{ACL_READ, "whalerein/v1/h/+/result"},
+	{ACL_READ, "whalerein/v1/h/+/event"},
+	{ACL_READ, "whalerein/v1/h/+/d/+/query"},
+	{ACL_READ, "whalerein/v1/h/+/d/+/ready"},
+	{ACL_READ, "whalerein/v1/control/reply"},
+	{ACL_READ, "whalerein/v1/control/events"},
+};
+
 static int basic_auth_callback(int event, void *event_data, void *userdata)
 {
 	struct mosquitto_evt_basic_auth *ed = event_data;
@@ -1714,24 +1900,7 @@ static int basic_auth_callback(int event, void *event_data, void *userdata)
 		struct auth_result *result;
 		struct acl_entry acls[16];
 		size_t acl_count = 0;
-		static const struct {
-			int access;
-			const char *filter;
-		} access_acls[] = {
-			{ACL_WRITE, "whalerein/v1/h/+/request"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/event"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/notice"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/live"},
-			{ACL_WRITE, "whalerein/v1/h/+/presence"},
-			{ACL_WRITE, "$CONTROL/whalerein/v1"},
-			{ACL_READ, "whalerein/v1/h/+/result"},
-			{ACL_READ, "whalerein/v1/h/+/event"},
-			{ACL_READ, "whalerein/v1/h/+/live"},
-			{ACL_READ, "whalerein/v1/h/+/d/+/ready"},
-			{ACL_READ, "whalerein/v1/presence/device/+"},
-			{ACL_READ, "whalerein/v1/control/reply"},
-			{ACL_READ, "whalerein/v1/control/events"},
-		};
+
 		size_t i;
 
 		if (!cfg.access_password || !password || strcmp(password, cfg.access_password) != 0) {
@@ -1984,6 +2153,7 @@ static int disconnect_callback(int event, void *event_data, void *userdata)
 static int acl_check_callback(int event, void *event_data, void *userdata)
 {
 	struct mosquitto_evt_acl_check *ed = event_data;
+
 	const char *client_id;
 	const char *username;
 	struct wclient *client;
@@ -2020,24 +2190,7 @@ static int acl_check_callback(int event, void *event_data, void *userdata)
 	client = client_find_locked(client_id);
 	if (!client && username && cfg.access_username && strcmp(username, cfg.access_username) == 0) {
 		/* Access identity policy is fixed and does not need CONNECT state. */
-		static const struct {
-			int access;
-			const char *filter;
-		} access_acls[] = {
-			{ACL_WRITE, "whalerein/v1/h/+/request"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/event"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/notice"},
-			{ACL_WRITE, "whalerein/v1/h/+/d/+/live"},
-			{ACL_WRITE, "whalerein/v1/h/+/presence"},
-			{ACL_WRITE, "$CONTROL/whalerein/v1"},
-			{ACL_READ, "whalerein/v1/h/+/result"},
-			{ACL_READ, "whalerein/v1/h/+/event"},
-			{ACL_READ, "whalerein/v1/h/+/live"},
-			{ACL_READ, "whalerein/v1/h/+/d/+/ready"},
-			{ACL_READ, "whalerein/v1/presence/device/+"},
-			{ACL_READ, "whalerein/v1/control/reply"},
-			{ACL_READ, "whalerein/v1/control/events"},
-		};
+
 		size_t i;
 
 		rc = MOSQ_ERR_ACL_DENIED;
@@ -2059,6 +2212,93 @@ static int acl_check_callback(int event, void *event_data, void *userdata)
 	rc = acl_decide_locked(client, access, ed->topic);
 	pthread_mutex_unlock(&lock);
 	return rc;
+}
+
+/* Stamp the authenticated ingress connection. External principals cannot set
+ * the reserved connection reference or delivery target themselves. */
+static int message_in_callback(int event, void *event_data, void *userdata)
+{
+	mosquitto_log_printf(MOSQ_LOG_ERR, "whalerein: message-in invoked");
+	struct mosquitto_evt_message *ed = event_data;
+	struct wclient *client;
+	const char *client_id;
+	char ref[CONN_REF_LEN];
+	int rc = MOSQ_ERR_SUCCESS;
+
+	UNUSED(event);
+	UNUSED(userdata);
+
+	if (!ed || !ed->client || !ed->topic) {
+		return MOSQ_ERR_SUCCESS;
+	}
+	client_id = mosquitto_client_id(ed->client);
+	if (!client_id) {
+		return MOSQ_ERR_ACL_DENIED;
+	}
+	pthread_mutex_lock(&lock);
+	client = client_find_locked(client_id);
+	if (!client || !client->connected || client->handle != ed->client) {
+		mosquitto_log_printf(MOSQ_LOG_WARNING, "whalerein: message-in unknown client %s", client_id);
+		pthread_mutex_unlock(&lock);
+		return MOSQ_ERR_ACL_DENIED;
+	}
+	if (client->kind != KIND_ACCESS &&
+	    (user_property_present(ed->properties, PROP_CONNECTION) ||
+	     user_property_present(ed->properties, PROP_TARGET))) {
+		mosquitto_log_printf(MOSQ_LOG_WARNING, "whalerein: message-in reserved property from %s", client_id);
+		pthread_mutex_unlock(&lock);
+		return MOSQ_ERR_ACL_DENIED;
+	}
+	connection_ref(client, ref, sizeof(ref));
+	if (mosquitto_property_add_string_pair(&ed->properties, MQTT_PROP_USER_PROPERTY,
+					       PROP_CONNECTION, ref) != MOSQ_ERR_SUCCESS) {
+		rc = MOSQ_ERR_NOMEM;
+	}
+	pthread_mutex_unlock(&lock);
+	return rc;
+}
+
+/* Re-check the receiving connection and its current policy at the final
+ * delivery seam so a queued packet cannot outlive a grant, replacement or
+ * broker-epoch change. */
+static int message_out_callback(int event, void *event_data, void *userdata)
+{
+	struct mosquitto_evt_message *ed = event_data;
+	struct wclient *client;
+	const char *client_id;
+	char expected[CONN_REF_LEN];
+	char target[CONN_REF_LEN];
+
+	UNUSED(event);
+	UNUSED(userdata);
+
+	if (!ed || !ed->client || !ed->topic) {
+		return MOSQ_ERR_ACL_DENIED;
+	}
+	client_id = mosquitto_client_id(ed->client);
+	if (!client_id) {
+		return MOSQ_ERR_ACL_DENIED;
+	}
+	pthread_mutex_lock(&lock);
+	client = client_find_locked(client_id);
+	if (!client || !client->connected || client->handle != ed->client) {
+		pthread_mutex_unlock(&lock);
+		return MOSQ_ERR_ACL_DENIED;
+	}
+	if (acl_decide_locked(client, ACL_READ, ed->topic) != MOSQ_ERR_SUCCESS) {
+		pthread_mutex_unlock(&lock);
+		return MOSQ_ERR_ACL_DENIED;
+	}
+	if (directed_topic(ed->topic)) {
+		connection_ref(client, expected, sizeof(expected));
+		if (!user_property_value(ed->properties, PROP_TARGET, target, sizeof(target)) ||
+		    strcmp(target, expected) != 0) {
+			pthread_mutex_unlock(&lock);
+			return MOSQ_ERR_ACL_DENIED;
+		}
+	}
+	pthread_mutex_unlock(&lock);
+	return MOSQ_ERR_SUCCESS;
 }
 
 static int control_callback(int event, void *event_data, void *userdata)
@@ -2303,6 +2543,7 @@ int mosquitto_plugin_init(mosquitto_plugin_id_t *identifier, void **user_data,
 	}
 	sock_timeout_ms = cfg.timeout_ms;
 	policy_fresh_until_ms = now_ms() + cfg.ttl_ms;
+	generate_broker_epoch();
 
 	{
 		pthread_attr_t attr;
@@ -2342,6 +2583,16 @@ int mosquitto_plugin_init(mosquitto_plugin_id_t *identifier, void **user_data,
 		return rc;
 	}
 	rc = mosquitto_callback_register(mosq_pid, MOSQ_EVT_TICK, tick_callback, NULL, NULL);
+	if (rc) {
+		return rc;
+	}
+	rc = mosquitto_callback_register(mosq_pid, MOSQ_EVT_MESSAGE_IN, message_in_callback,
+					 NULL, NULL);
+	if (rc) {
+		return rc;
+	}
+	rc = mosquitto_callback_register(mosq_pid, MOSQ_EVT_MESSAGE_OUT, message_out_callback,
+					 NULL, NULL);
 	if (rc) {
 		return rc;
 	}

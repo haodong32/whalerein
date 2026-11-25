@@ -121,9 +121,11 @@ type DisabledEnrollment struct {
 	HostID             string
 	RemovalOperationID string
 	Target             RemovalTarget
-	DisabledAt         time.Time
-	EnforcedAt         *time.Time
-	Revocations        map[string]uint64
+	// Generation is the frozen enrollment generation of the removal.
+	Generation  uint64
+	DisabledAt  time.Time
+	EnforcedAt  *time.Time
+	Revocations map[string]uint64
 }
 
 // removalRow is the stored removal record.
@@ -678,9 +680,41 @@ func (s *Store) DisableEnrollmentWithTarget(
 		HostID:             hostID,
 		RemovalOperationID: newID,
 		Target:             effective,
+		Generation:         uint64(revisionGeneration(effective.EnrollmentRevision)),
 		DisabledAt:         *disabledAt,
 		Revocations:        revocations,
 	}, nil
+}
+
+// MarkRemovalEnforcedAt records a matching broker acknowledgement and the
+// exact connection instance it applied to. It only sets the columns once and
+// never changes the frozen target or revoked generations.
+func (s *Store) MarkRemovalEnforcedAt(ctx context.Context, removalOperationID string, applied *ConnectionRef, at time.Time) error {
+	if removalOperationID == "" {
+		return errors.New("store: removal operation id is required")
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	var epoch any
+	var id any
+	if applied != nil && applied.Valid() {
+		epoch = applied.Epoch
+		id = int64(applied.ID)
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE external_removals
+		SET enforced_at = COALESCE(enforced_at, $2),
+		    enforced_connection_epoch = COALESCE(enforced_connection_epoch, $3),
+		    enforced_connection_id = COALESCE(enforced_connection_id, $4)
+		WHERE removal_operation_id = $1`, removalOperationID, at, epoch, id)
+	if err != nil {
+		return fmt.Errorf("mark removal enforced: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // MarkRemovalEnforced records a matching broker acknowledgement. It only sets
@@ -1022,6 +1056,10 @@ func disabledFromRemoval(removal removalRow) DisabledEnrollment {
 	if revocations == nil {
 		revocations = map[string]uint64{}
 	}
+	generation := uint64(0)
+	if removal.Generation > 0 {
+		generation = uint64(removal.Generation)
+	}
 	return DisabledEnrollment{
 		HostID:             removal.HostID,
 		RemovalOperationID: removal.RemovalOperationID,
@@ -1030,6 +1068,7 @@ func disabledFromRemoval(removal removalRow) DisabledEnrollment {
 			EnrollmentOperationID: removal.EnrollmentOperationID,
 			EnrollmentRevision:    removal.EnrollmentRevision,
 		},
+		Generation:  generation,
 		DisabledAt:  removal.DisabledAt,
 		EnforcedAt:  removal.EnforcedAt,
 		Revocations: revocations,

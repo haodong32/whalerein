@@ -25,29 +25,50 @@ func (c *capturedClaim) ClaimCloud(_ context.Context, _ *whalereinv1.PairingClai
 }
 
 type testDeviceGrants struct {
-	events []string
-	exists bool
-	begin  error
-	fail   error
+	events      []string
+	exists      bool
+	begin       error
+	fail        error
+	enforced    bool
+	applied     *store.ConnectionRef
+	completedAt struct {
+		generation int64
+		reference  *store.ConnectionRef
+	}
 }
 
 func (s *testDeviceGrants) CloudDeviceGrantStatus(context.Context, string, string, string) (string, error) {
 	return "pending", nil
 }
 
-func (s *testDeviceGrants) BeginCloudDeviceRevocation(context.Context, string, string, string, time.Time) (bool, error) {
+func (s *testDeviceGrants) BeginCloudDeviceRevocation(_ context.Context, _ string, hostID, deviceID string, _ time.Time) (store.CloudDeviceRevocation, error) {
 	s.events = append(s.events, "record")
-	return s.exists, s.begin
+	if s.begin != nil {
+		return store.CloudDeviceRevocation{}, s.begin
+	}
+	return store.CloudDeviceRevocation{
+		HostID: hostID, DeviceID: deviceID, EnrollmentGeneration: 1,
+		GrantGeneration: 3, Exists: s.exists, Enforced: s.enforced,
+	}, nil
 }
 
-func (s *testDeviceGrants) CompleteCloudDeviceRevocation(context.Context, string, string, time.Time) error {
+func (s *testDeviceGrants) CompleteCloudDeviceRevocationAt(_ context.Context, _ string, _ string, generation int64, applied *store.ConnectionRef, _ time.Time) error {
 	s.events = append(s.events, "complete")
+	s.completedAt.generation = generation
+	s.completedAt.reference = applied
 	return nil
 }
 
-func (s *testDeviceGrants) RevokeHostGrant(context.Context, string, string) error {
+func (s *testDeviceGrants) EnforceRevocationScope(_ context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
 	s.events = append(s.events, "enforce")
-	return s.fail
+	if s.fail != nil {
+		return store.EnforcementReceipt{Scope: scope}, s.fail
+	}
+	var applied []store.ScopeConnection
+	if s.applied != nil {
+		applied = []store.ScopeConnection{{Ref: *s.applied, ClientID: "whalerein-device-device"}}
+	}
+	return store.EnforcementReceipt{Scope: scope, Applied: applied, Absent: len(applied) == 0}, nil
 }
 
 func TestCloudDevicePairingValidatesScopeBeforeNoise(t *testing.T) {
@@ -162,6 +183,70 @@ func TestCloudDeviceRevocationCompletesOnlyAfterEnforcement(t *testing.T) {
 	}
 	if got := len(data.events); got != 2 || data.events[0] != "record" || data.events[1] != "complete" {
 		t.Fatalf("pre-grant revocation should record a fence without a live line, got %v", data.events)
+	}
+}
+
+func TestConsoleRevocationStaysPendingUntilTheBrokerConfirmsTheFrozenScope(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	data := &testDeviceGrants{exists: true, fail: errors.New("broker timeout")}
+	WithDeviceGrants(nil, data, data)(h.service)
+
+	if err := h.service.RevokeDeviceGrant(ctx, "workspace", "host", "device"); !errors.Is(err, ErrEnforcementUnavailable) {
+		t.Fatalf("expected a pending enforcement, got %v", err)
+	}
+	if len(data.events) != 2 || data.events[0] != "record" || data.events[1] != "enforce" {
+		t.Fatalf("a lost acknowledgement must leave the receipt pending: %v", data.events)
+	}
+
+	// A successful retry re-issues exactly the frozen scope and records the
+	// applied connection.
+	reference := store.ConnectionRef{Epoch: "broker-epoch", ID: 17}
+	data.fail = nil
+	data.applied = &reference
+	if err := h.service.RevokeDeviceGrant(ctx, "workspace", "host", "device"); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.events) != 5 || data.events[4] != "complete" {
+		t.Fatalf("retry did not confirm enforcement: %v", data.events)
+	}
+	if data.completedAt.generation != 1 {
+		t.Fatalf("completion lost the frozen enrollment generation: %+v", data.completedAt)
+	}
+	if data.completedAt.reference == nil || *data.completedAt.reference != reference {
+		t.Fatalf("completion lost the applied connection: %+v", data.completedAt)
+	}
+
+	// An already enforced receipt is idempotent and issues no further work.
+	data.events = nil
+	data.enforced = true
+	if err := h.service.RevokeDeviceGrant(ctx, "workspace", "host", "device"); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.events) != 1 || data.events[0] != "record" {
+		t.Fatalf("an enforced receipt was replayed: %v", data.events)
+	}
+}
+
+func TestPendingRevocationSurvivesRestartAndFreshnessFailure(t *testing.T) {
+	ctx := context.Background()
+	data := &testDeviceGrants{exists: true, fail: errors.New("broker freshness expired")}
+	first := newHarness(t)
+	WithDeviceGrants(nil, data, data)(first.service)
+	if err := first.service.RevokeDeviceGrant(ctx, "workspace", "host", "device"); !errors.Is(err, ErrEnforcementUnavailable) {
+		t.Fatalf("expected a pending enforcement, got %v", err)
+	}
+
+	// A restarted Access with the same durable receipt re-issues the frozen
+	// scope; freshness expiry never advances the operation to enforced.
+	second := newHarness(t)
+	WithDeviceGrants(nil, data, data)(second.service)
+	data.fail = nil
+	if err := second.service.RevokeDeviceGrant(ctx, "workspace", "host", "device"); err != nil {
+		t.Fatal(err)
+	}
+	if data.events[len(data.events)-1] != "complete" {
+		t.Fatalf("restart retry did not confirm enforcement: %v", data.events)
 	}
 }
 

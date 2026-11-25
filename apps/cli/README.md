@@ -68,6 +68,10 @@ Session IDs belong to the selected Host.
 
 ## Commands
 
+- `host list` reports the Access/Broker-derived directory presence. `host
+  status` reports this device's own MQTT connection and access state: a
+  device-only network loss can make the local status reconnect while the Host
+  remains online in the directory.
 - `status` inspects selected paths, service, sign-in and Device access.
 - `logout` signs this instance out immediately and reports a pending remote
   sign-out when Cloud or Access cannot yet confirm it. Run `status` or

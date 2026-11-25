@@ -78,6 +78,7 @@ LEAVES = {
     ),
     "native-dsh": Leaf(
         (
+            "native_bundle_provenance",
             "native_client_recovery",
             "global_pair_commit_race",
             "global_pending_pairing_revoke",

@@ -14,25 +14,33 @@ type presenceTransition struct {
 	at       time.Time
 }
 
+func observeDevice(p *Presence, device string, connected bool, id uint64, at time.Time) {
+	event := "disconnected"
+	if connected {
+		event = "connected"
+	}
+	p.HandleNotification(&Notification{Sequence: p.lastSeq + 1, Epoch: p.BrokerEpoch(), Event: event, Kind: "device", DeviceID: device, ConnID: id, AtUnixMilli: at.UnixMilli()})
+}
+
 func TestDevicePresenceOfflineCallbackFiresOncePerTransitionAndResets(t *testing.T) {
 	presence := newPresence()
 	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
+	presence.SetConnectionClosedHandler(func(deviceID, source string, at time.Time, _ ConnectionRef) {
 		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
 	})
 	base := time.Unix(1000, 0)
 
-	presence.SetDeviceOnline("d1", true, base)
+	observeDevice(presence, "d1", true, 1, base)
 	if len(transitions) != 0 {
 		t.Fatalf("online event emitted offline: %+v", transitions)
 	}
-	presence.SetDeviceOnline("d1", false, base.Add(time.Second))
+	observeDevice(presence, "d1", false, 1, base.Add(time.Second))
 	if len(transitions) != 1 || transitions[0].deviceID != "d1" || transitions[0].source != PresenceSourceBroker {
 		t.Fatalf("transitions = %+v", transitions)
 	}
 
 	// A repeated offline event is deduplicated, even with a newer timestamp.
-	presence.SetDeviceOnline("d1", false, base.Add(2*time.Second))
+	observeDevice(presence, "d1", false, 1, base.Add(2*time.Second))
 	if len(transitions) != 1 {
 		t.Fatalf("duplicate offline emitted: %+v", transitions)
 	}
@@ -41,8 +49,8 @@ func TestDevicePresenceOfflineCallbackFiresOncePerTransitionAndResets(t *testing
 	}
 
 	// Reconnecting resets presence so a later disconnect emits again.
-	presence.SetDeviceOnline("d1", true, base.Add(3*time.Second))
-	presence.SetDeviceOnline("d1", false, base.Add(4*time.Second))
+	observeDevice(presence, "d1", true, 2, base.Add(3*time.Second))
+	observeDevice(presence, "d1", false, 2, base.Add(4*time.Second))
 	if len(transitions) != 2 {
 		t.Fatalf("transitions after reconnect = %+v", transitions)
 	}
@@ -51,78 +59,6 @@ func TestDevicePresenceOfflineCallbackFiresOncePerTransitionAndResets(t *testing
 	}
 	if got := testutil.ToFloat64(presence.metrics.DevicePresenceEvents.WithLabelValues(PresenceSourceBroker, "online")); got != 2 {
 		t.Fatalf("online metric = %v", got)
-	}
-}
-
-func TestDeviceWillUnknownEntryFiresAndInvalidPayloadsAreDropped(t *testing.T) {
-	presence := newPresence()
-	presence.now = func() time.Time { return time.Unix(2000, 0) }
-	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
-		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
-	})
-
-	valid := []byte(`{"event":"device_offline","device_id":"d9"}`)
-	presence.HandleDeviceWill(DeviceWillTopic("d9"), valid)
-	if len(transitions) != 1 || transitions[0].deviceID != "d9" || transitions[0].source != PresenceSourceWill {
-		t.Fatalf("unknown-device will = %+v", transitions)
-	}
-	presence.HandleDeviceWill(DeviceWillTopic("d9"), valid)
-	if len(transitions) != 1 {
-		t.Fatalf("duplicate will emitted: %+v", transitions)
-	}
-	if got := testutil.ToFloat64(presence.metrics.PresenceDuplicatesIgnored); got != 1 {
-		t.Fatalf("duplicate metric = %v", got)
-	}
-
-	for _, tc := range []struct {
-		name    string
-		topic   string
-		payload []byte
-	}{
-		{"filter topic", DeviceWillFilter, valid},
-		{"malformed payload", DeviceWillTopic("d10"), []byte(`{`)},
-		{"wrong event", DeviceWillTopic("d10"), []byte(`{"event":"device_online","device_id":"d10"}`)},
-		{"identity mismatch", DeviceWillTopic("d10"), []byte(`{"event":"device_offline","device_id":"d11"}`)},
-	} {
-		presence.HandleDeviceWill(tc.topic, tc.payload)
-		if len(transitions) != 1 {
-			t.Fatalf("%s emitted: %+v", tc.name, transitions)
-		}
-	}
-	if got := testutil.ToFloat64(presence.metrics.PresenceInvalidPayloads); got != 4 {
-		t.Fatalf("invalid metric = %v", got)
-	}
-}
-
-func TestDeviceWillCannotOverrideANewerConnection(t *testing.T) {
-	presence := newPresence()
-	base := time.Unix(4000, 0)
-	presence.now = func() time.Time { return base }
-	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
-		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
-	})
-
-	presence.HandleNotification(&Notification{Sequence: 1, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 1, AtUnixMilli: 1000})
-	// A duplicate client id takes over the device identity; the broker reports
-	// the older connection's disconnect first, then the older Will arrives.
-	presence.HandleNotification(&Notification{Sequence: 2, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 2, AtUnixMilli: 2000})
-	presence.HandleNotification(&Notification{Sequence: 3, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 1, AtUnixMilli: 2500})
-	if len(transitions) != 0 {
-		t.Fatalf("superseded disconnect emitted offline: %+v", transitions)
-	}
-	presence.HandleDeviceWill(DeviceWillTopic("d1"), []byte(`{"event":"device_offline","device_id":"d1"}`))
-	if len(transitions) != 0 {
-		t.Fatalf("stale will marked the newer connection offline: %+v", transitions)
-	}
-	if !presence.devices["d1"].online || presence.devices["d1"].connID != 2 {
-		t.Fatalf("newer connection state = %+v", presence.devices["d1"])
-	}
-	// The real disconnect for the current connection still transitions.
-	presence.HandleNotification(&Notification{Sequence: 4, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 2, AtUnixMilli: 3000})
-	if len(transitions) != 1 || transitions[0].source != PresenceSourceBroker {
-		t.Fatalf("current disconnect = %+v", transitions)
 	}
 }
 
@@ -161,10 +97,10 @@ func TestPresenceCacheTTLExpiresADeviceAndFansOutOffline(t *testing.T) {
 	base := time.Unix(6000, 0)
 	presence.now = func() time.Time { return base }
 	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
+	presence.SetConnectionClosedHandler(func(deviceID, source string, at time.Time, _ ConnectionRef) {
 		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
 	})
-	presence.SetDeviceOnline("d1", true, base)
+	observeDevice(presence, "d1", true, 1, base)
 	base = base.Add(51 * time.Millisecond) // one millisecond past the 50 ms test TTL
 	if expired := presence.Sweep(); expired != 1 {
 		t.Fatalf("sweep expired %d entries", expired)
@@ -177,7 +113,7 @@ func TestPresenceCacheTTLExpiresADeviceAndFansOutOffline(t *testing.T) {
 		t.Fatalf("repeated sweep = %d/%+v", expired, transitions)
 	}
 	// A reconnect refreshes the observation and becomes expirable again.
-	presence.SetDeviceOnline("d1", true, base)
+	observeDevice(presence, "d1", true, 1, base)
 	base = base.Add(51 * time.Millisecond)
 	presence.Sweep()
 	if len(transitions) != 2 {
@@ -190,11 +126,11 @@ func TestSnapshotRepairsALostDeviceDisconnect(t *testing.T) {
 	base := time.Unix(7000, 0)
 	presence.now = func() time.Time { return base }
 	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
+	presence.SetConnectionClosedHandler(func(deviceID, source string, at time.Time, _ ConnectionRef) {
 		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
 	})
-	presence.SetDeviceOnline("lost", true, base)
-	presence.SetDeviceOnline("live", true, base)
+	observeDevice(presence, "lost", true, 1, base)
+	observeDevice(presence, "live", true, 2, base)
 
 	presence.ApplySnapshot([]SnapshotClient{
 		{ClientID: "whalerein-device-live", Kind: "device", DeviceID: "live", State: "connected", ConnID: 2, Connected: 1000},
@@ -224,31 +160,6 @@ func TestSnapshotEstablishesHostReadinessAfterAccessRestart(t *testing.T) {
 	}
 }
 
-func TestBrokerDisconnectIsPrimaryAndDeduplicatesTheFollowingWill(t *testing.T) {
-	presence := newPresence()
-	presence.now = func() time.Time { return time.Unix(3000, 0) }
-	var transitions []presenceTransition
-	presence.SetDeviceOfflineHandler(func(deviceID, source string, at time.Time) {
-		transitions = append(transitions, presenceTransition{deviceID: deviceID, source: source, at: at})
-	})
-
-	presence.HandleNotification(&Notification{Sequence: 1, Event: "connected", Kind: "device", DeviceID: "d1", ConnID: 1, AtUnixMilli: 1000})
-	presence.HandleNotification(&Notification{Sequence: 2, Event: "disconnected", Kind: "device", DeviceID: "d1", ConnID: 1, AtUnixMilli: 2000})
-	if len(transitions) != 1 || transitions[0].source != PresenceSourceBroker {
-		t.Fatalf("broker transition = %+v", transitions)
-	}
-	presence.HandleDeviceWill(DeviceWillTopic("d1"), []byte(`{"event":"device_offline","device_id":"d1"}`))
-	if len(transitions) != 1 {
-		t.Fatalf("will duplicated broker transition: %+v", transitions)
-	}
-	if got := testutil.ToFloat64(presence.metrics.DevicePresenceEvents.WithLabelValues(PresenceSourceBroker, "offline")); got != 1 {
-		t.Fatalf("broker offline metric = %v", got)
-	}
-	if got := testutil.ToFloat64(presence.metrics.DevicePresenceEvents.WithLabelValues(PresenceSourceWill, "offline")); got != 0 {
-		t.Fatalf("will offline metric = %v", got)
-	}
-}
-
 func TestLiveNotificationsCannotEstablishPresenceBeforeASnapshot(t *testing.T) {
 	presence := newPresence()
 	presence.HandleNotification(&Notification{Sequence: 1, Event: "connected", Kind: "host", HostID: "h1", ConnID: 1, AtUnixMilli: 1000})
@@ -261,5 +172,40 @@ func TestLiveNotificationsCannotEstablishPresenceBeforeASnapshot(t *testing.T) {
 	}, 2)
 	if !presence.Available() || !presence.IsHostOnline(context.Background(), "h1") {
 		t.Fatal("snapshot did not establish presence")
+	}
+}
+
+// Sequence and connection numbers may both repeat in the new broker process.
+func TestNewBrokerEpochRestartsPresenceSequenceAndClosesOldScopes(t *testing.T) {
+	p := newPresence()
+	p.ApplySnapshot([]SnapshotClient{{Kind: "host", HostID: "host", State: "connected", ConnID: 8}}, 500)
+	p.SetBrokerEpoch("2222222222222222")
+	p.ApplySnapshot(nil, 1)
+	if p.IsHostOnline(context.Background(), "host") {
+		t.Fatal("old Host survived epoch change")
+	}
+	p.HandleNotification(&Notification{Epoch: p.BrokerEpoch(), Sequence: 2, Event: "connected", Kind: "device", DeviceID: "d", ConnID: 8})
+	if !p.DeviceConnectionActive("d", ConnectionRef{Epoch: p.BrokerEpoch(), ID: 8}) {
+		t.Fatal("new broker sequence was rejected")
+	}
+}
+
+func TestSnapshotClosesOnlyMissingDeviceAndSessionConnections(t *testing.T) {
+	p := newPresence()
+	p.ApplySnapshot([]SnapshotClient{
+		{Kind: "device", DeviceID: "d", ConnID: 1, State: "connected"},
+		{Kind: "session", DeviceID: "d", SessionID: "managed-login", ConnID: 2, State: "connected"},
+	}, 10)
+	if session, active := p.DeviceConnectionSession("d", ConnectionRef{Epoch: p.BrokerEpoch(), ID: 2}); !active || session != "managed-login" {
+		t.Fatal("snapshot lost the managed login scope")
+	}
+	var closed []ConnectionRef
+	p.SetConnectionClosedHandler(func(_ string, _ string, _ time.Time, ref ConnectionRef) { closed = append(closed, ref) })
+	p.HandleNotification(&Notification{Epoch: p.BrokerEpoch(), Sequence: 12, Event: "disconnected", Kind: "session", DeviceID: "d", ConnID: 2})
+	p.ApplySnapshot([]SnapshotClient{
+		{Kind: "session", DeviceID: "d", SessionID: "managed-login", ConnID: 2, State: "connected"},
+	}, 11)
+	if len(closed) != 2 || closed[0].ID != 2 || closed[1].ID != 1 || len(p.DeviceConnections("d")) != 0 {
+		t.Fatal("snapshot lost a closure or revived a disconnected session")
 	}
 }

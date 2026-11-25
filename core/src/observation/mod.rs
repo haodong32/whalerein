@@ -16,8 +16,8 @@ use prost::Message;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use whalerein_proto::{
-    request_payload, response_payload, session_update, EventEnvelope, QuestionDescriptor,
-    RefreshWatches, UnwatchSession, WatchSession,
+    request_payload, response_payload, session_update, CheckVersions, EventEnvelope,
+    QuestionDescriptor, UnwatchSession, WatchSession,
 };
 
 use crate::access::DeliveryClass;
@@ -638,15 +638,22 @@ async fn run_connection(
     cancellation: &Cancellation,
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
 ) -> CoreResult<End> {
-    let channel = core.ensure_channel(&key.host_id, fresh).await?;
-    // The transport belongs to the Host, not to this session. Attaching here
-    // only subscribes to it; the connection keeps running for other sessions
-    // and for the app-level monitor.
+    // Ordering: open and prepare the one authorized MQTT connection first, then
+    // negotiate Noise on its query lane, then attach the observation's control
+    // and preview receivers before WatchSession can produce events.
     let regional = core.cloud_transport().await?;
     let connection = core
         .host_connection_with(&key.host_id, regional.clone())
         .await?;
+    // Register the observation's control and preview receivers before the
+    // subscription becomes ready and before WatchSession can produce events.
+    // A preview or control frame that arrives during attach is queued by this
+    // subscription instead of being dropped by the shared connection.
     let (subscription, detach) = connection.subscribe();
+    core.wait_host_transport(&key.host_id, &connection, cancellation)
+        .await?;
+    let connection_generation = connection.generation();
+    let channel = core.ensure_channel(&key.host_id, fresh).await?;
     let interrupted = subscription.interrupted.clone();
     let overflow = subscription.overflow.clone();
     let live_overflow = subscription.live_overflow.clone();
@@ -655,7 +662,6 @@ async fn run_connection(
     let live_queued = subscription.live_queued.clone();
     let control_rx = subscription.control;
     let live_rx = subscription.live;
-    connection.wait_ready(cancellation).await?;
     // A cloud region change invalidates the token this transport connected
     // with. The watch notices it and closes the shared connection; the
     // binding re-attaches when the session settles.
@@ -794,6 +800,8 @@ async fn run_connection(
     };
     conversation_loop(
         core,
+        &connection,
+        connection_generation,
         key,
         observation_id,
         generation,
@@ -835,6 +843,8 @@ struct ApprovalCache {
 #[allow(clippy::too_many_arguments)]
 async fn conversation_loop(
     core: &Core,
+    connection: &Arc<crate::connection::HostConnection>,
+    connection_generation: u64,
     key: &SessionKey,
     observation_id: &str,
     generation: u64,
@@ -981,19 +991,21 @@ async fn conversation_loop(
                 }
             }
             _ = interval.tick() => {
-                // The encrypted stream cannot carry an Access-authored close,
-                // and a removed grant can leave it idle. Renew the authority
-                // lease over HTTP; a typed reason is terminal immediately.
-                if let Err(authority) = core.check_host_authority(&key.host_id).await {
-                    if matches!(authority, CoreError::AuthorityClosed(_)) {
-                        return Err(authority);
-                    }
+                // A replacement broker session cannot carry this observation:
+                // its generation, subscriptions and stream are gone.
+                if connection.generation() != connection_generation {
+                    pump.finish().await;
+                    return Ok(End::Reconnect);
                 }
+                // The check is read-only. Ownership comes from the authenticated
+                // connection instance, and a revoked query or terminal
+                // connection state ends the observation; there is no HTTP
+                // authority read and no renewal effect.
                 let failure = error.lock().expect("watch error mutex").take();
                 if let Some(failure) = failure {
                     return Err(failure);
                 }
-                let renewal = renew_watch_lease(core, key, &watch_id).await;
+                let renewal = check_versions(core, key, &watch_id).await;
                 let lease = match renewal {
                     LeaseRenewal::Extended(lease) => lease,
                     // The Host no longer holds this observation; only a fresh
@@ -1133,10 +1145,10 @@ async fn fetch_approvals(
     Some(list.approvals.into_iter().map(Into::into).collect())
 }
 
-/// Outcome of one lease renewal.
+/// Outcome of one read-only version check.
 enum LeaseRenewal {
-    /// The lease was extended and carries only divergence markers.
-    Extended(whalerein_proto::WatchLease),
+    /// The authoritative markers for this observation.
+    Extended(whalerein_proto::VersionCheck),
     /// The Host no longer owns this observation; re-attach for a baseline.
     Reattach,
     /// Deterministic failure: the caller must see it, never a reconnect.
@@ -1145,15 +1157,19 @@ enum LeaseRenewal {
     Retry,
 }
 
-/// Renew one watch lease. The Host answers from cached markers, so the
-/// response is constant-sized no matter how large the transcript is.
-async fn renew_watch_lease(core: &Core, key: &SessionKey, watch_id: &str) -> LeaseRenewal {
+/// Read the authoritative DSH version markers for one active observation.
+///
+/// The check is read-only: it never renews ownership, extends a lease or
+/// creates a durable request. An authoritative absence or denial ends the
+/// observer; a transient failure leaves the last known data stale until the
+/// next tick.
+async fn check_versions(core: &Core, key: &SessionKey, watch_id: &str) -> LeaseRenewal {
     let response = core
         .query(
             &key.host_id,
             whalerein_proto::RequestPayload {
-                payload: Some(request_payload::Payload::RefreshWatches(RefreshWatches {
-                    watch_ids: vec![watch_id.to_owned()],
+                payload: Some(request_payload::Payload::CheckVersions(CheckVersions {
+                    session_id: key.session_id.clone(),
                 })),
             },
         )
@@ -1175,9 +1191,7 @@ async fn renew_watch_lease(core: &Core, key: &SessionKey, watch_id: &str) -> Lea
                     LeaseRenewal::Terminal(CoreError::AuthorityClosed("unauthorized".into()))
                 }
                 // Retrying a deterministic refusal with a new connection
-                // cannot succeed and would mask the real cause. `fix_input`
-                // and `upgrade` codes are terminal for the current attempt,
-                // exactly as WIRE.md classifies them.
+                // cannot succeed and would mask the real cause.
                 "payload_too_large" | "invalid_argument" => LeaseRenewal::Terminal(core_error),
                 "unsupported_capability" | "protocol_version_incompatible" => {
                     LeaseRenewal::Terminal(core_error)
@@ -1186,16 +1200,19 @@ async fn renew_watch_lease(core: &Core, key: &SessionKey, watch_id: &str) -> Lea
             };
         }
     };
-    let Some(response_payload::Payload::WatchStates(states)) = response.payload else {
-        return LeaseRenewal::Terminal(CoreError::Security("unexpected watch refresh".into()));
+    let Some(response_payload::Payload::VersionChecks(checks)) = response.payload else {
+        return LeaseRenewal::Terminal(CoreError::Security(
+            "unexpected version check response".into(),
+        ));
     };
-    match states
-        .watches
+    match checks
+        .checks
         .into_iter()
-        .find(|lease| lease.watch_id == watch_id)
+        .find(|check| check.watch_id == watch_id)
     {
-        Some(lease) => LeaseRenewal::Extended(lease),
-        None => LeaseRenewal::Terminal(CoreError::Security("missing watch refresh".into())),
+        Some(check) => LeaseRenewal::Extended(check),
+        // An absent check means the observation is no longer authoritative.
+        None => LeaseRenewal::Terminal(CoreError::AuthorityClosed("session_deleted".into())),
     }
 }
 
@@ -1241,9 +1258,16 @@ async fn handle_envelope(
     sync: Option<&crate::sync::SyncService>,
     envelope: &EventEnvelope,
 ) -> CoreResult<Flow> {
-    // A referenced control event is fetched and verified over HTTPS before
-    // AEAD; a partial or failed fetch never becomes an event. Live envelopes
-    // are always inline, so this resolves to the same bytes without a fetch.
+    // The control and live topics are shared by this Device's connections.
+    // Only the observation that owns the Noise channel can open the event.
+    if envelope.device_id == channel.device_id()
+        && envelope.host_id == channel.host_id()
+        && !envelope.channel_id.is_empty()
+        && envelope.channel_id != channel.channel_id()
+    {
+        return Ok(Flow::Continue);
+    }
+    // Resolve and verify a referenced control event before opening it.
     let envelope = core.resolve_event_envelope(envelope).await?;
     let update = match crate::sync::open_event(channel, &envelope)? {
         crate::sync::OpenedEvent::Update(update) => update,

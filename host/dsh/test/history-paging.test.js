@@ -143,6 +143,27 @@ test('exact reads resolve a canonical committed reference through the same proje
   }
 })
 
+test('a live notification ahead of the passive head never rotates the pinned projection', async () => {
+  const adapter = await source()
+  try {
+    adapter.output('s', 'a')
+    adapter.output('s', 'b')
+    adapter.nativeHead = async () => 2
+    const first = await adapter.readHistory('s', { snapshot: true, max_messages: 1 })
+    // A committed notification reports the live sequence (3) before the
+    // passive page cursor catches up. The next page still reads head 2; that
+    // must not look like a rewind.
+    adapter.output('s', 'c')
+    adapter.nativeHead = async () => 2
+    const second = await adapter.readHistory('s', { snapshot: true })
+    assert.equal(second.projection_id, first.projection_id)
+    const state = await adapter.readState('s')
+    assert.equal(state.projection_id, first.projection_id)
+  } finally {
+    await adapter.close()
+  }
+})
+
 test('exact reads reject stale locators, wrong scope and oversize canonical messages explicitly', async () => {
   const adapter = await source()
   try {

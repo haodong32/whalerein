@@ -17,9 +17,8 @@ import { CommandService } from './commands/service.js'
 import { questionResponseBudget } from './commands/question-pager.js'
 import { WatchedEvents } from './events/watches.js'
 import { MqttAccess } from './access/mqtt.js'
-import { MESSAGE_BYTES, RELAY_VERSION } from './access/transport.js'
 import { loadOrCreateHostIdentity } from './security/identity.js'
-import { validateRequestTransportMetadata } from './contracts/transport.js'
+import { RELAY_VERSION, validateRequestTransportMetadata, validateBrokerConnectionRef } from './contracts/transport.js'
 
 const EMPTY = new Uint8Array(0)
 
@@ -38,6 +37,31 @@ const REQUEST_KINDS = new Set([
 function sanitizeDetail(value) {
   if (typeof value !== 'string' || value.length === 0) return undefined
   return value.replace(/[\r\n]/g, ' ').slice(0, 200)
+}
+
+function requestGeneration(value) {
+  if (value === undefined || value === null) return 0
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : null
+  if (typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value)) {
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) ? parsed : null
+  }
+  return null
+}
+
+/**
+ * The immutable Broker connection scope Access admitted for a post-pairing
+ * request. A query or handshake without it fails closed because Host could
+ * neither own the observation nor guarantee reply affinity.
+ */
+function admittedConnectionScope(request) {
+  const connectionRef = validateBrokerConnectionRef(request?.connection_ref)
+  const grantGeneration = requestGeneration(request?.grant_generation)
+  const enrollmentGeneration = requestGeneration(request?.enrollment_generation)
+  if (grantGeneration === null || enrollmentGeneration === null) {
+    throw new PluginError('invalid_argument', 'request generation invalid')
+  }
+  return { connectionRef, grantGeneration, enrollmentGeneration }
 }
 
 export class HostRuntime {
@@ -155,6 +179,9 @@ export class HostRuntime {
           this.#events?.onChannelsCleared(channels)
           for (const { deviceId, channelId } of channels) this.#commands?.cancelChannel(deviceId, channelId, reason)
         },
+        onRevokedDevices: (deviceIds) => {
+          this.#events?.onRevoked?.(deviceIds)
+        },
         onRevokedChannels: (channels, deviceIds) => {
           this.#events?.onChannelsCleared(channels)
           for (const deviceId of deviceIds) this.#commands?.revokeDevice(deviceId)
@@ -238,13 +265,39 @@ export class HostRuntime {
 
   #handlePresence(event) {
     if (event?.event === 'request_stale') return this.#handleRequestStale(event)
+    // A connection-scoped lifecycle close replaces the Device Will. Only the
+    // observations bound to that exact Broker connection instance end; a
+    // delayed close for an old reference can never touch a newer observation.
+    if (event?.event === 'connection_closed') {
+      return this.#handleConnectionClosed(event)
+    }
+  }
+
+  #handleConnectionClosed(event) {
     const deviceId = event?.device_id
-    if (typeof deviceId !== 'string' || !deviceId) return
-    // Presence describes the Device's MQTT subscriber. Its independent HTTP
-    // requests retain their own channel and exact request lease.
-    this.#events?.onDeviceOffline(deviceId)
+    if (typeof deviceId !== 'string' || deviceId === '') return
+    if (event.host_id !== undefined && event.host_id !== this.#config.hostId) {
+      this.#logger?.warn('lifecycle_rejected', { code: 'forbidden', reason: 'host_mismatch' })
+      return
+    }
+    let connectionRef
+    try { connectionRef = validateBrokerConnectionRef(event.connection_ref) }
+    catch {
+      this.#logger?.warn('lifecycle_rejected', { code: 'invalid_argument', reason: 'connection_ref_invalid' })
+      return
+    }
+    if (event.broker_epoch !== undefined && !/^[0-9a-f]{16}$/.test(String(event.broker_epoch))) {
+      this.#logger?.warn('lifecycle_rejected', { code: 'invalid_argument', reason: 'broker_epoch_invalid' })
+      return
+    }
+    const closed = this.#security?.closeConnection?.(deviceId, connectionRef) ?? []
+    // Even if the channel was already pruned, the exact watch binding still
+    // owns the close (for example after a transient channel removal).
+    this.#events?.onConnectionClosed?.(deviceId, connectionRef, closed)
     this.presenceEvents += 1
-    this.#logger?.info('device_offline', { device: deviceId, reason: String(event?.reason ?? '').slice(0, 32) })
+    this.#logger?.info('connection_closed', {
+      device: deviceId, channels: closed.length, reason: String(event?.reason ?? '').slice(0, 32),
+    })
   }
 
   // A cancellation notice is only authoritative for its exact existing scope.
@@ -450,7 +503,7 @@ export class HostRuntime {
         return await this.#reply(request, {
           status: 'rejected',
           errorCode: 'protocol_version_incompatible',
-          errorDetail: 'relay epoch is not 4; upgrade the sender',
+          errorDetail: `relay epoch is not ${RELAY_VERSION}; upgrade the sender`,
         })
       }
       if (kind === 'REQUEST_KIND_ACCESS_READY') {
@@ -484,6 +537,17 @@ export class HostRuntime {
         }
         if (isExpired(expires, this.now())) {
           return await this.#reply(request, { status: 'rejected', errorCode: 'expired' })
+        }
+      }
+      // Post-pairing handshakes and queries are bound to the Broker connection
+      // Access admitted. Host records it on the pending handshake/channel and
+      // every observation so a replaced connection can never be revived.
+      if (kind === 'REQUEST_KIND_HANDSHAKE' || kind === 'REQUEST_KIND_QUERY') {
+        try {
+          request.connectionScope = admittedConnectionScope(request)
+        } catch {
+          this.#logger?.warn('request_transport_rejected', { code: 'invalid_argument', kind, layer: 'host', reason: 'connection_scope' })
+          return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument', errorDetail: 'connection scope missing' })
         }
       }
       if (kind === 'REQUEST_KIND_PAIRING_CLAIM' || kind === 'REQUEST_KIND_PAIRING_AUTHORIZE') {
@@ -554,6 +618,11 @@ export class HostRuntime {
   }
 
   async #handleHandshake(request) {
+    // Post-pairing Noise establishment is admitted only after the Host's
+    // authorized subscriptions and readiness exist on the current connection.
+    if (!this.#started || this.#stopping || !this.#access?.connected || this.#security?.revocationsPending) {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'unavailable' })
+    }
     try {
       const resultBody = this.#security.handleChannelHandshake(request)
       return await this.#reply(request, { status: 'succeeded', resultBody })
@@ -607,6 +676,13 @@ export class HostRuntime {
         errorCode: 'invalid_argument',
         errorDetail: 'RequestPayload carries no known payload variant; the sender may use a newer protocol version',
       })
+    }
+    // The pre-dispatch check above can be outpaced by channel open, queueing or
+    // decryption. Re-check the original deadline immediately before any source
+    // work; an elapsed query is never dispatched.
+    const deadline = Number(request.expires_at_unix_ms ?? 0)
+    if (deadline > 0 && isExpired(deadline, this.now())) {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'expired' })
     }
     // Local stop fence: once shutdown begins, no fresh read, watch or send may
     // be admitted. A command is journal-fenced so it can never execute later
@@ -673,6 +749,15 @@ export class HostRuntime {
   }
 
   async #reply(request, { status, resultBody, errorCode = 'error_code_unspecified', receiverLimitBytes, completedAt, errorDetail }) {
+    // A reply belongs to the connection scope that admitted its request. After
+    // revoke, replacement or a connection-scoped lifecycle close, the channel
+    // (or pending handshake) is gone and no late result may be published.
+    if (!this.#security?.canReplyForRequest?.(request)) {
+      this.#logger?.info('host_result_dropped', {
+        reason: 'connection_closed', request: request?.request_id, kind: request?.kind,
+      })
+      return null
+    }
     const known = isErrorCode(errorCode)
     if (!known && errorCode !== 'error_code_unspecified') {
       this.#logger?.warn('unknown_error_code', { code: typeof errorCode === 'string' ? errorCode.slice(0, 32) : 'non_string' })
@@ -700,10 +785,41 @@ export class HostRuntime {
     // never fails for a transport reason. `payload_too_large` remains the true
     // hard failure: the envelope cannot be represented even by reference.
     let encoded = this.#codec.encode('whalerein.v1.HostResult', result)
+    const replyOptions = {
+      envelopeLimit: receiverLimitBytes,
+      requestId: request.request_id,
+      expiresAt: request.replyDeadline ?? (Number(request.expires_at_unix_ms) || undefined),
+      connectionRef: request.connection_ref,
+      enrollmentGeneration: Number(request.enrollment_generation) || 0,
+    }
     try {
-      await this.#access.publishResult(encoded, { envelopeLimit: receiverLimitBytes })
+      await this.#access.publishResult(encoded, replyOptions)
     } catch (error) {
-      if (error?.code !== 'payload_too_large') throw error
+      const failureCode = typeof error?.code === 'string' && error.code !== ''
+        ? error.code
+        : 'internal'
+      if (error?.code !== 'payload_too_large') {
+        this.#logger?.warn('host_result_publish_failed', {
+          code: failureCode, kind: request.kind, bytes: encoded.length,
+          reason: typeof error.message === 'string' ? error.message.slice(0, 160) : '',
+          layer: 'host',
+        })
+        result.status = 'failed'
+        result.result_body = EMPTY
+        result.error_code = isErrorCode(failureCode) ? failureCode : 'internal'
+        result.error_message = publicMessage(result.error_code)
+        encoded = this.#codec.encode('whalerein.v1.HostResult', result)
+        try {
+          // The failure envelope is small and inline; it never carries the
+          // query object scope that just failed.
+          await this.#access.publishResult(encoded, { ...replyOptions, requestId: request.request_id })
+        } catch (second) {
+          this.#logger?.warn('host_result_failure_unpublishable', {
+            code: codeOf(second), kind: request.kind, layer: 'host',
+          })
+        }
+        return result
+      }
       this.#logger?.warn('host_result_unrepresentable', {
         code: 'payload_too_large', kind: request.kind, bytes: encoded.length,
         reason: typeof error.message === 'string' ? error.message.slice(0, 160) : '',
@@ -714,7 +830,7 @@ export class HostRuntime {
       result.error_code = 'payload_too_large'
       result.error_message = publicMessage('payload_too_large')
       encoded = this.#codec.encode('whalerein.v1.HostResult', result)
-      await this.#access.publishResult(encoded)
+      await this.#access.publishResult(encoded, replyOptions)
     }
     this.#logger?.info('host_result', { status: result.status, code: result.error_code, request: request.request_id, trace: request.trace_id, kind: request.kind, bytes: encoded.length, layer: 'host' })
     return result

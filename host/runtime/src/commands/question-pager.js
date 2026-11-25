@@ -15,17 +15,12 @@
 //    misleading conflict.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { AdapterError } from '../errors.js'
-import { MESSAGE_BYTES, RELAY_VERSION } from '../access/transport.js'
+import { DEFAULT_ENVELOPE_BYTES, RELAY_VERSION } from '../contracts/transport.js'
+import { maxPlaintextBytes, varintBytes } from '../access/packet.js'
 import { validateQuestionStamp } from '../contracts/source.js'
 
 const CURSOR_VERSION = 2
 const MAX_INDEX = 1_000_000
-
-function varintBytes(value) {
-  let n = value, count = 1
-  while (n >= 128) { n = Math.floor(n / 128); count++ }
-  return count
-}
 
 // The AEAD adds a 12-byte nonce and a 16-byte authentication tag. Calculate
 // the largest complete ResponsePayload that can fit the actual HostResult,
@@ -42,18 +37,11 @@ export function questionResponseBudget(codec, request, hostId, completedAt, prot
   const frameBase = codec.encode('whalerein.v1.EncryptedFrame', {
     channel_id: request.channel_id ?? '', nonce: new Uint8Array(12),
   }).length
-  const fits = plain => {
+  return maxPlaintextBytes(plain => {
     const cipher = plain + 16
     const frame = frameBase + 1 + varintBytes(cipher) + cipher
-    return hostBase + 1 + varintBytes(frame) + frame <= MESSAGE_BYTES
-  }
-  let low = 0, high = MESSAGE_BYTES
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2)
-    if (fits(middle)) low = middle
-    else high = middle - 1
-  }
-  return fits(low) ? low : 0
+    return hostBase + 1 + varintBytes(frame) + frame
+  }, DEFAULT_ENVELOPE_BYTES)
 }
 
 export class QuestionPager {

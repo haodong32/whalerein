@@ -834,7 +834,7 @@ def test_queue_edit_encoded_envelope_budget_and_complete_response(scenario, pair
     assert budget["sizes"][0] < budget["sizes"][1] <= budget["wire_limit"] < budget["sizes"][2]
     assert budget["reference_fits_packet"], "a reference must fit one complete packet"
     assert budget["over"] == budget["sizes"][2]
-    executable=ROOT / "target/debug/examples/delivery_budget_driver"
+    executable=ROOT / "target/debug/examples/delivery_driver"
     env=paired_device.env()
     before=scenario.dsh.process.control("gx_effect_counts")["updatePendingQueue"]
     for offset,expected in [(-1,"succeeded"),(0,"succeeded"),(1,"payload_too_large")]:
@@ -895,12 +895,7 @@ def test_queue_complete_response_exact_encrypted_boundary(scenario, paired_devic
 
 def test_queue_denied_for_unpaired_and_revoked_token(scenario, paired_device):
     """Unpaired clients and a revoked transport token cannot execute pending queue mutations."""
-    import base64
-    import json
-    import subprocess
-    import time
-    import uuid
-    from environment import Device, http
+    from environment import Device
 
     session = "queue-auth-fixture"
     scenario.dsh.process.control("create_queue_session", session_id=session)
@@ -915,27 +910,15 @@ def test_queue_denied_for_unpaired_and_revoked_token(scenario, paired_device):
     paired_device.sessions(scenario.host)
     queue = paired_device.call("session", "queue","list","--session",session)
     item=queue["items"][0]["item_id"]
-    query=f"""SELECT json_build_object(
-      'requestId',request_id,'hostId',host_id,'deviceId',device_id,'commandId',command_id,
-      'kind',kind,'protocolVersion',protocol_version,'channelId',channel_id,
-      'relayVersion',relay_version,'body',encode(request_body,'base64'),
-      'payloadDigest',encode(payload_digest,'base64')) FROM {scenario.schema}.requests
-      WHERE kind=2 AND device_id='{paired_device.identity["device_id"]}' ORDER BY created_at DESC LIMIT 1"""
-    row=subprocess.run(["psql","-h","127.0.0.1","-p","55432","-U","postgres","-d","whalerein_test","-tAc",query],capture_output=True,text=True,timeout=5,check=True)
-    saved=json.loads(row.stdout)
-    for field in ("body","payloadDigest"):
-        saved[field]=base64.b64encode(base64.b64decode(saved[field] or "")).decode()
-    saved["requestId"]=uuid.uuid4().hex
-    saved["expiresAtUnixMs"]=str(int((time.time()+60)*1000))
     result=paired_device.call("session", "queue","edit","--session",session,"--item",item,"synthetic authorized edit")
     assert result["command"]["status"] == "succeeded"
     accepted=scenario.dsh.process.control("gx_effect_counts")["updatePendingQueue"]
     assert accepted == before + 1
     with scenario.fixture_bearer(paired_device) as bearer:
-        paired_device.revoke()
+        scenario.revoke_from_host(paired_device)
         reads = scenario.dsh.process.control("queue_read_count")
-        with pytest.raises(RuntimeError, match="HTTP (401|403)"):
-            http("/v1/hosts/" + scenario.host + "/requests", saved, bearer)
+        code, envelopes = paired_device.invoke("session", "queue", "list", "--session", session, success=False)
+        assert code == 4 and envelopes[-1].get("error")
         assert scenario.dsh.process.control("queue_read_count") == reads
         with pytest.raises(RuntimeError, match="HTTP (401|403)"):
             scenario.replay_command(paired_device, token_override=bearer)
@@ -980,7 +963,7 @@ def test_delivery_encoded_envelope_budget(scenario, paired_device, session_id):
     assert budget["sizes"][0] < budget["sizes"][1] <= budget["wire_limit"] < budget["sizes"][2]
     assert budget["reference_fits_packet"], "a reference must fit one complete packet"
     assert budget["over"] == budget["sizes"][2]
-    executable = ROOT / "target/debug/examples/delivery_budget_driver"
+    executable = ROOT / "target/debug/examples/delivery_driver"
     env = paired_device.env()
     for offset, expected in [(-1, "succeeded"), (0, "succeeded"), (1, "payload_too_large")]:
         result = subprocess.run(

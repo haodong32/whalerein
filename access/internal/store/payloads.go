@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"hash/fnv"
+	"math"
 	"sort"
 	"time"
 
@@ -66,6 +67,12 @@ type PayloadObject struct {
 	GrantGeneration            *int64
 	RevocationGeneration       *int64
 	DeviceRevocationGeneration *int64
+	// EnrollmentGeneration, ConnectionRef and IssuedAt bind query-lane
+	// ciphertext to its admitted connection scope. They stay nil/empty for
+	// durable command and attachment objects.
+	EnrollmentGeneration *int64
+	ConnectionRef        string
+	IssuedAt             *time.Time
 }
 
 // PayloadReservation is one admission request. ReservedBytes is the charged
@@ -91,6 +98,11 @@ type PayloadReservation struct {
 	GrantGeneration            *int64
 	RevocationGeneration       *int64
 	DeviceRevocationGeneration *int64
+	// EnrollmentGeneration and ConnectionRef are set only for query-scoped
+	// ciphertext. The connection reference is the Broker-stamped instance that
+	// submitted the original query.
+	EnrollmentGeneration *int64
+	ConnectionRef        string
 }
 
 // PayloadLimits bounds one reservation. The store compares every limit inside
@@ -143,11 +155,13 @@ const payloadColumns = `object_id, node_id, owner_id, host_id, device_id, app_se
 	channel_id, request_id, message_id, event_id, purpose, part_id, state,
 	reserved_bytes, length_bytes, digest, expires_at, created_at, updated_at,
 	ready_at, reader_count, cleanup_attempts, next_attempt_at,
-	grant_generation, revocation_generation, device_revocation_generation`
+	grant_generation, revocation_generation, device_revocation_generation,
+	enrollment_generation, connection_ref, issued_at`
 
 func scanPayload(row pgx.Row) (PayloadObject, error) {
 	var object PayloadObject
-	var grant, revocation, deviceRevocation *int64
+	var grant, revocation, deviceRevocation, enrollment *int64
+	var issuedAt *time.Time
 	err := row.Scan(
 		&object.ObjectID, &object.NodeID, &object.OwnerID, &object.HostID,
 		&object.DeviceID, &object.AppSession, &object.ChannelID,
@@ -157,6 +171,7 @@ func scanPayload(row pgx.Row) (PayloadObject, error) {
 		&object.ExpiresAt, &object.CreatedAt, &object.UpdatedAt,
 		&object.ReadyAt, &object.ReaderCount, &object.CleanupTries,
 		&object.NextAttempt, &grant, &revocation, &deviceRevocation,
+		&enrollment, &object.ConnectionRef, &issuedAt,
 	)
 	if err != nil {
 		return PayloadObject{}, wrapRequestScan(err)
@@ -164,6 +179,8 @@ func scanPayload(row pgx.Row) (PayloadObject, error) {
 	object.GrantGeneration = grant
 	object.RevocationGeneration = revocation
 	object.DeviceRevocationGeneration = deviceRevocation
+	object.EnrollmentGeneration = enrollment
+	object.IssuedAt = issuedAt
 	return object, nil
 }
 
@@ -218,16 +235,17 @@ func (s *Store) ReservePayload(ctx context.Context, reservation PayloadReservati
 			channel_id, request_id, message_id, event_id, purpose, part_id,
 			state, reserved_bytes, length_bytes, digest, expires_at, created_at,
 			updated_at, grant_generation, revocation_generation,
-			device_revocation_generation)
+			device_revocation_generation, enrollment_generation, connection_ref)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-			'reserved', $13, $14, $15, $16, $17, $17, $18, $19, $20)`,
+			'reserved', $13, $14, $15, $16, $17, $17, $18, $19, $20, $21, $22)`,
 		reservation.ObjectID, reservation.NodeID, reservation.OwnerID, reservation.HostID,
 		reservation.DeviceID, reservation.AppSession, reservation.ChannelID,
 		reservation.RequestID, reservation.MessageID, reservation.EventID,
 		reservation.Purpose, reservation.PartID, reservation.ReservedBytes,
 		reservation.Length, reservation.Digest, reservation.ExpiresAt, now,
 		reservation.GrantGeneration, reservation.RevocationGeneration,
-		reservation.DeviceRevocationGeneration)
+		reservation.DeviceRevocationGeneration, reservation.EnrollmentGeneration,
+		reservation.ConnectionRef)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return PayloadAdmission{}, ErrPayloadDuplicate
@@ -633,6 +651,54 @@ type PayloadCheckScope struct {
 	Purpose    whalereinv1.PayloadPurpose
 }
 
+// PayloadIssueScope is the exact immutable query scope that may release one
+// ready result object. Every field is matched; a later grant, enrollment or
+// connection can never reissue an older result.
+type PayloadIssueScope struct {
+	ObjectID                   string
+	HostID                     string
+	DeviceID                   string
+	AppSession                 string
+	ChannelID                  string
+	RequestID                  string
+	ConnectionRef              string
+	Purpose                    string
+	GrantGeneration            uint64
+	RevocationGeneration       uint64
+	DeviceRevocationGeneration uint64
+	EnrollmentGeneration       uint64
+}
+
+// MarkPayloadIssued durably records that a query result reference became
+// releasable. The update matches the complete immutable scope, the current
+// state and the original deadline. It returns false when any field no longer
+// matches; no bytes are released in that case. Repeating the same issue is
+// idempotent.
+func (s *Store) MarkPayloadIssued(ctx context.Context, scope PayloadIssueScope, now time.Time) (bool, error) {
+	if scope.ObjectID == "" || scope.RequestID == "" || scope.ConnectionRef == "" ||
+		scope.GrantGeneration > math.MaxInt64 || scope.RevocationGeneration > math.MaxInt64 ||
+		scope.DeviceRevocationGeneration > math.MaxInt64 || scope.EnrollmentGeneration > math.MaxInt64 {
+		return false, nil
+	}
+	tag, err := s.poolExec(ctx, `
+		UPDATE temporary_ciphertext_objects
+		SET issued_at = COALESCE(issued_at, $2), updated_at = $2
+		WHERE object_id = $1 AND state = 'ready' AND expires_at > $2
+		  AND host_id = $3 AND device_id = $4 AND app_session_id = $5
+		  AND channel_id = $6 AND request_id = $7 AND connection_ref = $8
+		  AND purpose = $9 AND grant_generation = $10
+		  AND revocation_generation = $11 AND device_revocation_generation = $12
+		  AND enrollment_generation = $13`,
+		scope.ObjectID, now, scope.HostID, scope.DeviceID, scope.AppSession,
+		scope.ChannelID, scope.RequestID, scope.ConnectionRef, scope.Purpose,
+		int64(scope.GrantGeneration), int64(scope.RevocationGeneration),
+		int64(scope.DeviceRevocationGeneration), int64(scope.EnrollmentGeneration))
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // StalePayloadScopes returns a bounded batch of live objects whose original
 // grant revision or managed session no longer authorizes release. The caller
 // cancels each object through the payload service, so capacity stays charged
@@ -651,7 +717,9 @@ func (s *Store) StalePayloadScopes(ctx context.Context, limit int) ([]PayloadObj
 		           WHERE g.host_id = o.host_id AND g.device_id = o.device_id AND g.active
 		             AND g.grant_generation = o.grant_generation
 		             AND g.revocation_generation = o.revocation_generation
-		             AND d.revocation_generation = o.device_revocation_generation)
+		             AND d.revocation_generation = o.device_revocation_generation
+		             AND (o.enrollment_generation IS NULL
+		                  OR g.enrollment_generation = o.enrollment_generation))
 		       OR (o.app_session_id <> '' AND NOT EXISTS (
 		           SELECT 1 FROM device_sessions s
 		           WHERE s.session_id = o.app_session_id AND NOT s.revoked

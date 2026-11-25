@@ -7,26 +7,39 @@ import { readFileSync } from 'node:fs'
 import mqtt from 'mqtt'
 import { ConfigError, topics, PROTOCOL_VERSION } from '../config.js'
 import { PluginError } from '../errors.js'
-import {
-  BROKER_PACKET_LIMIT_BYTES,
-  PACKET_BYTES,
-  RELAY_VERSION,
-  RelayTransport,
-  publishPacketBytes,
-} from './transport.js'
+import { RelayTransport } from './transport.js'
+import { publishPacketBytes } from './packet.js'
 import { RelayObjectClient } from './relay-client.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import {
+  BROKER_PACKET_LIMIT_BYTES,
+  RELAY_VERSION,
   resolveTransportProfile,
   transportProfileBudget,
+  messageExpirySeconds,
   validateReceiveAdvertisement,
   validateTransportBudget,
   validateTransportProfiles,
 } from '../contracts/transport.js'
 
-// Kept for callers that imported the old constant; the live limit comes from
-// the resolved transport budget.
-export const MAX_MQTT_PACKET_BYTES = PACKET_BYTES
+/**
+ * Build the MQTT 5 PUBLISH properties for one deadline-bound reply and their
+ * exact encoded length. A reply never carries a Response Topic.
+ */
+export function replyProperties({ requestId = '', expirySeconds = null } = {}) {
+  const properties = {}
+  let propertiesBytes = 0
+  if (typeof requestId === 'string' && requestId !== '') {
+    const correlation = Buffer.from(requestId, 'utf8')
+    properties.correlationData = correlation
+    propertiesBytes += 1 + 2 + correlation.length
+  }
+  if (Number.isSafeInteger(expirySeconds) && expirySeconds > 0) {
+    properties.messageExpiryInterval = expirySeconds
+    propertiesBytes += 1 + 4
+  }
+  return { properties, propertiesBytes }
+}
 
 
 const TLS_TRUST_CODES = new Set([
@@ -59,6 +72,11 @@ export class MqttAccess {
   #backoffMs
   #stopped = true
   #connected = false
+  // A trust failure is definitive only before this lane ever succeeded. After a
+  // successful connection the broker may still be rotating its leaf, so a trust
+  // error during reconnect is retried with bounded backoff instead of stopping
+  // the Host's only transport permanently.
+  #everConnected = false
   #reconnects = 0
   #attempts = 0
   #published = 0
@@ -68,8 +86,6 @@ export class MqttAccess {
   #handlers = {}
   #disconnectReason = -1
   #transport
-  #relay = null
-  #brokerPacketBytes = BROKER_PACKET_LIMIT_BYTES
   #accessReceive = null
   #lastPublish = { kind: 'none', bytes: 0 }
 
@@ -101,7 +117,7 @@ export class MqttAccess {
     authorizationPrivateKey = null,
     accessOrigin = '',
     relayClient = null,
-    relayObjectTtlMs = 5 * 60 * 1000,
+    relayObjectTtlMs,
     caFile = '',
     reconnectMinMs = 500,
     reconnectMaxMs = 30_000,
@@ -126,9 +142,6 @@ export class MqttAccess {
     this.logger = logger
     this.now = now
     this.codec = resolveCodec(codec)
-    this.relayObjectTtlMs = Number.isSafeInteger(relayObjectTtlMs) && relayObjectTtlMs > 0
-      ? relayObjectTtlMs
-      : 5 * 60 * 1000
     validateTransportProfiles()
     const resolved = resolveTransportProfile(typeof transportProfile === 'string' ? transportProfile : 'default')
     this.profile = resolved.wireName
@@ -147,16 +160,14 @@ export class MqttAccess {
         logger,
       })
     }
-    this.#relay = relayClient
     this.#transport = new RelayTransport({
       codec: this.codec,
-      relay: this.#relay,
+      relay: relayClient,
       budget: this.budget,
-      brokerPacketBytes: BROKER_PACKET_LIMIT_BYTES,
       publish: (topic, bytes, options) => this.#publish(topic, bytes, options),
       now,
       logger: this.logger,
-      objectTtlMs: this.relayObjectTtlMs,
+      objectTtlMs: relayObjectTtlMs,
     })
     this.#verifyControlEnvelopes()
     this.#backoffMs = reconnectMinMs
@@ -274,8 +285,9 @@ export class MqttAccess {
     return this.topics.event
   }
 
-  get liveTopic() {
-    return this.topics.live
+  /** The authorized direct QoS 0 preview topic for one Device. */
+  deviceLiveTopic(deviceId) {
+    return this.topics.deviceLive(deviceId)
   }
 
   /** Begin connecting; reconnects continue in the background after failures. */
@@ -385,9 +397,9 @@ export class MqttAccess {
       }
       this.#onConnected(client, generation, connack)
     })
-    client.on('message', (topic, payload) => {
+    client.on('message', (topic, payload, packet) => {
       if (generation !== this.#generation) return
-      this.#onMessage(topic, payload)
+      this.#onMessage(topic, payload, packet?.properties)
     })
     client.on('error', (error) => {
       if (generation !== this.#generation) return
@@ -429,6 +441,12 @@ export class MqttAccess {
 
   #failDefinitive(code, generation) {
     if (generation !== this.#generation || this.#terminalCode !== '') return
+    if (code === 'tls_trust' && this.#everConnected && !this.#stopped) {
+      this.#lastErrorCode = code
+      this.logger?.warn('mqtt_tls_rotation_retry', { code, generation })
+      this.#scheduleReconnect()
+      return
+    }
     this.#terminalCode = code
     this.#lastErrorCode = code
     this.#stopped = true
@@ -446,12 +464,12 @@ export class MqttAccess {
   async #onConnected(client, generation, connack) {
     const maximum = connack?.properties?.maximumPacketSize
     // A smaller broker ceiling lowers the effective limit; it never raises it.
-    this.#brokerPacketBytes = Number.isSafeInteger(maximum) && maximum > 0
+    this.#transport.brokerPacketBytes = Number.isSafeInteger(maximum) && maximum > 0
       ? Math.min(maximum, BROKER_PACKET_LIMIT_BYTES)
       : BROKER_PACKET_LIMIT_BYTES
-    this.#transport.brokerPacketBytes = this.#brokerPacketBytes
     this.#accessReceive = null
     this.#connected = true
+    this.#everConnected = true
     if (this.#attempts > 1) this.#reconnects++
     this.#lastErrorCode = ''
     // The host sets revocations_pending synchronously here, before the
@@ -526,19 +544,28 @@ export class MqttAccess {
     await this.#publish(this.topics.result, result)
   }
 
-  #onMessage(topic, payload) {
+  #onMessage(topic, payload, properties) {
     if (topic === this.topics.presence) {
       let event
       try { event = JSON.parse(payload.toString('utf8')) } catch { return }
-      if (!['device_offline', 'request_stale'].includes(event?.event)) return
-      if (event.event === 'device_offline' && (typeof event?.device_id !== 'string' || !event.device_id)) return
+      if (!['connection_closed', 'request_stale'].includes(event?.event)) return
+      if (event.event === 'connection_closed' && (typeof event?.device_id !== 'string' || !event.device_id)) return
       if (event.event === 'request_stale' && (typeof event?.request_id !== 'string' || !event.request_id)) return
       try { this.#handlers.onPresence?.(event) } catch { /* presence must not break the MQTT loop */ }
       return
     }
     if (topic !== this.topics.request) return
-    this.#transport.receiveComplete(topic, payload)
-      .then((request) => this.#dispatchRequest(request))
+    const receivedAt = this.now()
+    this.#transport.receiveRequest(payload)
+      .then((request) => {
+        if (request.kind === 'REQUEST_KIND_QUERY' || request.kind === 'REQUEST_KIND_HANDSHAKE') {
+          const expiry = properties?.messageExpiryInterval
+          if (!Number.isSafeInteger(expiry) || expiry <= 0) return
+          request.replyDeadline = Math.min(Number(request.expires_at_unix_ms), receivedAt + expiry * 1000)
+          if (request.replyDeadline <= this.now()) return
+        }
+        return this.#dispatchRequest(request)
+      })
       .catch((error) => this.logger?.warn('transport_receive_failed', {
         code: typeof error?.code === 'string' ? error.code : 'invalid_argument',
         bytes: payload?.length ?? 0,
@@ -596,11 +623,11 @@ export class MqttAccess {
 
   #kindFor(topic) {
     if (topic === this.topics.result) return 'result'
-    if (topic === this.topics.live) return 'live'
+    if (typeof topic === 'string' && topic.endsWith('/live')) return 'live'
     return 'event'
   }
 
-  async #publish(topic, payload, { qos = 1 } = {}) {
+  async #publish(topic, payload, { qos = 1, properties } = {}) {
     const client = this.#client
     if (!client || !this.#connected) throw new PluginError('unavailable', 'mqtt not connected')
     if (payload.length > this.budget.envelope_bytes) {
@@ -615,10 +642,11 @@ export class MqttAccess {
     let timer
     try {
       await new Promise((resolve, reject) => {
+        const options = { qos, ...(properties && Object.keys(properties).length > 0 ? { properties } : {}) }
         if (qos === 0) {
           // Live is fire-and-forget: the packet is released when the client
           // accepts it. There is no PUBACK timer and no acknowledgement error.
-          client.publish(topic, Buffer.from(payload), { qos: 0 }, (error) => (error ? reject(error) : resolve()))
+          client.publish(topic, Buffer.from(payload), options, (error) => (error ? reject(error) : resolve()))
           return
         }
         timer = setTimeout(() => {
@@ -626,7 +654,7 @@ export class MqttAccess {
           client.end(true)
           reject(new PluginError('unavailable', 'MQTT acknowledgement timed out'))
         }, this.publishTimeoutMs)
-        client.publish(topic, Buffer.from(payload), { qos: 1 }, (error) => (error ? reject(error) : resolve()))
+        client.publish(topic, Buffer.from(payload), options, (error) => (error ? reject(error) : resolve()))
       })
       this.#published++
     } catch {
@@ -636,13 +664,34 @@ export class MqttAccess {
     } finally { clearTimeout(timer) }
   }
 
-  /** Publish one complete HostResult, inline or as a ready reference. */
+  /**
+   * Publish one complete HostResult, inline or as a ready reference.
+   *
+   * A deadline-bound reply carries Correlation Data = request_id and the
+   * positive ceiling of the remaining original deadline as Message Expiry
+   * Interval, capped by a shorter upstream value. It never carries a Response
+   * Topic. A reply whose deadline elapsed before publication is skipped.
+   */
   publishResult(payload, options = {}) {
+    const expiresAt = Number.isSafeInteger(options.expiresAt) && options.expiresAt > 0
+      ? options.expiresAt
+      : this.now() + this.#transport.objectTtlMs
+    const expirySeconds = messageExpirySeconds(expiresAt, this.now(), options.upstreamExpirySeconds)
+    if (expirySeconds === 0) {
+      this.logger?.info('mqtt_reply_skipped', { reason: 'expired' })
+      return Promise.resolve({ skipped: true, representation: 'none' })
+    }
+    const { properties, propertiesBytes } = replyProperties({
+      requestId: options.requestId,
+      expirySeconds,
+    })
     return this.#transport.sendComplete(this.topics.result, payload, {
       kind: 'result',
       receiverLimit: this.#accessReceive?.budget?.packet_bytes,
-      expiresAt: this.now() + this.relayObjectTtlMs,
       ...options,
+      expiresAt,
+      properties,
+      propertiesBytes,
     })
   }
 
@@ -651,21 +700,23 @@ export class MqttAccess {
     return this.#transport.sendComplete(this.topics.event, payload, {
       kind: 'event',
       receiverLimit: this.#accessReceive?.budget?.packet_bytes,
-      expiresAt: this.now() + this.relayObjectTtlMs,
+      expiresAt: this.now() + this.#transport.objectTtlMs,
     })
   }
 
   /**
-   * Publish one complete live preview at QoS 0 on the Host live topic.
+   * Publish one complete live preview at QoS 0 directly on the authorized
+   * Device topic.
    *
    * Resolves after the client accepts the packet, or false when the preview
    * cannot be carried. It never waits for an acknowledgement, never stages a
-   * reference and never retries.
+   * reference and never retries. Preview delivery does not depend on Access
+   * advertising receive limits; the receiving Device's own ChannelHello budget
+   * is applied by the caller's per-watch route.
    */
-  publishLive(payload) {
-    return this.#transport.sendLive(this.topics.live, payload, {
-      receiverLimit: this.#accessReceive?.budget?.packet_bytes,
-    })
+  publishLive(payload, { deviceId = '' } = {}) {
+    if (typeof deviceId !== 'string' || deviceId === '') return Promise.resolve(false)
+    return this.#transport.sendLive(this.deviceLiveTopic(deviceId), payload, {})
   }
 
   /** Wait until the first successful connect+subscribe+Ready cycle. */

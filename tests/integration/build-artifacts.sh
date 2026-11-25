@@ -36,7 +36,7 @@ for artifact in "$@"; do
         mqtt-driver|delivery-driver|wait-driver)
             case "$artifact" in
                 mqtt-driver) example=mqtt_transport_driver ;;
-                delivery-driver) example=delivery_budget_driver ;;
+                delivery-driver) example=delivery_driver ;;
                 wait-driver) example=wait_concurrency_driver ;;
             esac
             cargo_build --example "$example" -p whalerein-core --features protocol-testing

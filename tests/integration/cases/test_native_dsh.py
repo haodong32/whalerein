@@ -1282,6 +1282,7 @@ def test_native_pair_send_revoke(scenario, paired_device):
             http("/v1/hosts", token=bearer)
 
 
+@pytest.mark.relay_directory
 def test_native_stream_prefix_and_fixed_cut(scenario, paired_device):
     """When an actual native Attempt streams a large message and later history grows, intact preview prefixes match the final message and fixed-cut paging excludes the later turn."""
     session = scenario.create()
@@ -2965,7 +2966,7 @@ def test_native_queue_unpaired_and_revoked_wire_do_not_reach_source(scenario, pa
       'kind',kind,'protocolVersion',protocol_version,'channelId',channel_id,
       'relayVersion',relay_version,'body',encode(request_body,'base64'),
       'payloadDigest',encode(payload_digest,'base64')) FROM {scenario.schema}.requests
-      WHERE kind=2 AND device_id='{paired_device.identity["device_id"]}' ORDER BY created_at DESC LIMIT 1"""
+      WHERE kind=3 AND device_id='{paired_device.identity["device_id"]}' ORDER BY created_at DESC LIMIT 1"""
     row = subprocess.run(["psql", "-h", "127.0.0.1", "-p", "55432", "-U", "postgres", "-d", "whalerein_test", "-tAc", query], capture_output=True, text=True, timeout=5, check=True)
     saved = json.loads(row.stdout)
     for field in ("body", "payloadDigest"):

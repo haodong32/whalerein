@@ -2,8 +2,9 @@ package broker
 
 import (
 	"context"
-	"encoding/json"
+
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -11,11 +12,9 @@ import (
 )
 
 // Presence sources for device lifecycle events. Native broker notifications
-// are the primary source; the device last will and HostReady are the existing
-// fallbacks when a notification is lost.
+// and reconciliation snapshots supply device lifecycle evidence.
 const (
 	PresenceSourceBroker = "broker"
-	PresenceSourceWill   = "will"
 	// PresenceSourceSnapshot marks an offline edge proven by a later broker
 	// snapshot: a disconnect notification was lost or missed while Access was
 	// restarting, so the snapshot is the only current state.
@@ -26,9 +25,19 @@ const (
 	PresenceSourceExpired = "expiry"
 )
 
-// DeviceOfflineHandler runs once for each accepted online -> offline edge.
+// ConnectionClosedHandler releases work owned by one former connection.
 // observedAt is the source timestamp used for stale-event rejection.
-type DeviceOfflineHandler func(deviceID, source string, observedAt time.Time)
+type ConnectionClosedHandler func(deviceID, source string, observedAt time.Time, ref ConnectionRef)
+
+// liveConnection is one admitted device connection the presence registry can
+// target for a scoped revocation. The client id is carried because a device
+// may use the fixed id or a bounded suffixed variant.
+type liveConnection struct {
+	sessionID string
+	clientID  string
+	seq       uint64
+	closed    bool
+}
 
 type presenceEntry struct {
 	online bool
@@ -41,6 +50,9 @@ type presenceEntry struct {
 	// being refreshed and eventually expires.
 	seenAt time.Time
 	connID uint64
+	// epoch is the broker-process epoch of connID. A changed epoch invalidates
+	// the connection identity for scoped revocation.
+	epoch string
 	// connections is the set of live broker connection identities for one
 	// device. A device can hold several authenticated connections at once (for
 	// example a long-lived watch connection and a short-lived send connection);
@@ -60,19 +72,24 @@ type presenceEntry struct {
 }
 
 // Presence is the broker-derived online registry. It is seeded by ordered
-// broker connection notifications, a broker snapshot, the device last will or
+// broker connection notifications, a broker snapshot or
 // a Host Ready signal. It never queries a database heartbeat.
 type Presence struct {
-	mu                   sync.RWMutex
-	hosts                map[string]presenceEntry
-	devices              map[string]presenceEntry
-	cacheTTL             time.Duration
-	available            bool
-	lastSeq              uint64
-	metrics              *diagnostics.Metrics
-	logger               *slog.Logger
-	now                  func() time.Time
-	deviceOfflineHandler DeviceOfflineHandler
+	mu          sync.RWMutex
+	hosts       map[string]presenceEntry
+	devices     map[string]presenceEntry
+	connections map[string]map[ConnectionRef]liveConnection
+	// epoch is the broker-process epoch the current snapshot belongs to. A
+	// changed epoch invalidates every tracked connection reference.
+	epoch                   string
+	cacheTTL                time.Duration
+	available               bool
+	lastSeq                 uint64
+	metrics                 *diagnostics.Metrics
+	logger                  *slog.Logger
+	now                     func() time.Time
+	onEpochChange           func()
+	connectionClosedHandler ConnectionClosedHandler
 }
 
 // NewPresence creates an empty broker presence cache. Presence stays
@@ -85,12 +102,13 @@ func NewPresence(cacheTTL time.Duration, metrics *diagnostics.Metrics, logger *s
 		logger = slog.Default()
 	}
 	p := &Presence{
-		hosts:    make(map[string]presenceEntry),
-		devices:  make(map[string]presenceEntry),
-		cacheTTL: cacheTTL,
-		metrics:  metrics,
-		logger:   logger,
-		now:      func() time.Time { return time.Now().UTC() },
+		hosts:       make(map[string]presenceEntry),
+		devices:     make(map[string]presenceEntry),
+		connections: make(map[string]map[ConnectionRef]liveConnection),
+		cacheTTL:    cacheTTL,
+		metrics:     metrics,
+		logger:      logger,
+		now:         func() time.Time { return time.Now().UTC() },
 	}
 	p.publishCounts()
 	return p
@@ -166,40 +184,31 @@ func (p *Presence) SetHostOnline(hostID string, online bool, at time.Time) {
 	p.publishCounts()
 }
 
-// SetDeviceOnline updates broker-derived device presence. An online -> offline
-// transition invokes the registered device-offline handler exactly once.
+// SetDeviceOnline updates aggregate directory presence without naming a connection.
 func (p *Presence) SetDeviceOnline(deviceID string, online bool, at time.Time) {
-	p.applyDevice(deviceID, online, at, PresenceSourceBroker, 0, true, 0)
+	p.mu.Lock()
+	p.applyDeviceLocked(deviceID, online, at, 0, 0)
+	p.mu.Unlock()
+	p.publishCounts()
 }
 
-// SetDeviceOfflineHandler installs the callback for accepted device-offline
-// transitions. The callback runs outside the presence lock.
-func (p *Presence) SetDeviceOfflineHandler(handler DeviceOfflineHandler) {
+// SetConnectionClosedHandler installs the callback for exact connection removals.
+// The callback runs outside the presence lock.
+func (p *Presence) SetConnectionClosedHandler(handler ConnectionClosedHandler) {
 	p.mu.Lock()
-	p.deviceOfflineHandler = handler
+	p.connectionClosedHandler = handler
 	p.mu.Unlock()
 }
 
-// applyDevice records device presence and emits at most one offline callback
-// per online -> offline edge. A non-zero connID is added to or removed from the
-// device's live connection set; the device is offline only when that set becomes
-// empty. A delayed disconnect for a superseded connection therefore cannot
-// affect a newer or sibling live connection.
-//
-// allowOnlineOverride is false for a device last will. A will payload does not
-// name the connection that ended, so it cannot prove that the connection the
-// cache currently holds is gone; a delayed will from a superseded connection
-// must never mark a newer connection offline. Lost disconnect notifications are
-// repaired by the next snapshot or by cache_ttl expiry instead.
-func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, source string, connID uint64, allowOnlineOverride bool, seq uint64) {
+// applyDeviceLocked updates aggregate presence under the same lock as the connection registry.
+func (p *Presence) applyDeviceLocked(deviceID string, online bool, at time.Time, connID uint64, seq uint64) {
 	if deviceID == "" {
 		return
 	}
 	now := p.now()
-	p.mu.Lock()
 	previous, exists := p.devices[deviceID]
-	if exists && at.Before(previous.at) {
-		p.mu.Unlock()
+	if exists && (at.Before(previous.at) || (seq != 0 && previous.seq > seq)) {
+
 		return
 	}
 	connections := cloneConnections(previous.connections)
@@ -215,10 +224,9 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 			online: true, at: at, seenAt: now, connID: nextConnID,
 			connections: connections, seq: seq,
 		}
-		p.mu.Unlock()
-		p.publishCounts()
+
 		if p.metrics != nil {
-			p.metrics.PresenceEvent(source, "online")
+			p.metrics.PresenceEvent(PresenceSourceBroker, "online")
 		}
 		return
 	}
@@ -227,8 +235,8 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 			// A delayed disconnect for a superseded connection cannot remove
 			// the newer live connection or mark it offline.
 			if exists && previous.connID != 0 && previous.connID != connID {
-				p.mu.Unlock()
-				p.logger.Debug("presence event for a superseded connection ignored", "source", source)
+
+				p.logger.Debug("presence event for a superseded connection ignored", "source", PresenceSourceBroker)
 				return
 			}
 			// The entry has no tracked connection for this identity; treat it
@@ -238,14 +246,6 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 			delete(connections, connID)
 		}
 	} else {
-		// A last will names no connection. It can only prove an offline edge
-		// when no tracked connection remains; a sibling connection may still be
-		// live.
-		if !allowOnlineOverride && len(connections) > 0 {
-			p.mu.Unlock()
-			p.logger.Debug("device will could not override a live connection", "source", source)
-			return
-		}
 		clear(connections)
 	}
 	if len(connections) > 0 {
@@ -259,18 +259,12 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 			online: true, at: at, seenAt: now, connID: nextConnID,
 			connections: connections, seq: seq,
 		}
-		p.mu.Unlock()
-		p.publishCounts()
-		p.logger.Debug("presence event for a sibling connection ignored", "source", source)
+
 		return
 	}
-	transition := !exists || previous.online
 	duplicate := exists && !previous.online
 	p.devices[deviceID] = presenceEntry{online: false, at: at, seenAt: now, connID: previous.connID, seq: seq}
-	handler := p.deviceOfflineHandler
-	p.mu.Unlock()
 
-	p.publishCounts()
 	if duplicate {
 		if p.metrics != nil {
 			p.metrics.PresenceDuplicate()
@@ -278,10 +272,7 @@ func (p *Presence) applyDevice(deviceID string, online bool, at time.Time, sourc
 		return
 	}
 	if p.metrics != nil {
-		p.metrics.PresenceEvent(source, "offline")
-	}
-	if transition && handler != nil {
-		handler(deviceID, source, at)
+		p.metrics.PresenceEvent(PresenceSourceBroker, "offline")
 	}
 }
 func cloneConnections(connections map[uint64]struct{}) map[uint64]struct{} {
@@ -309,23 +300,28 @@ func (p *Presence) Expire(now time.Time) int {
 			expired++
 		}
 	}
-	var devices []string
+	var closed []closedConnection
 	for deviceID, entry := range p.devices {
 		if entry.online && p.stale(entry, now) {
 			p.devices[deviceID] = presenceEntry{online: false, at: entry.at, seenAt: now, connID: entry.connID, seq: entry.seq}
-			devices = append(devices, deviceID)
+			for ref, conn := range p.connections[deviceID] {
+				if _, belongs := entry.connections[ref.ID]; belongs && !conn.closed {
+					closed = append(closed, closedConnection{deviceID, ref})
+					delete(p.connections[deviceID], ref)
+				}
+			}
+			if p.metrics != nil {
+				p.metrics.PresenceEvent(PresenceSourceExpired, "offline")
+			}
 			expired++
 		}
 	}
-	handler := p.deviceOfflineHandler
+	handler := p.connectionClosedHandler
 	p.mu.Unlock()
 	p.publishCounts()
-	for _, deviceID := range devices {
-		if p.metrics != nil {
-			p.metrics.PresenceEvent(PresenceSourceExpired, "offline")
-		}
-		if handler != nil {
-			handler(deviceID, PresenceSourceExpired, now)
+	if handler != nil {
+		for _, c := range closed {
+			handler(c.device, PresenceSourceExpired, now, c.ref)
 		}
 	}
 	return expired
@@ -408,6 +404,124 @@ func (p *Presence) DeviceConnection(deviceID string) (connID uint64, known bool)
 	return entry.connID, true
 }
 
+// DeviceConnectionActive reports whether ref is one of the current broker
+// connections for the device. A replacement or broker-epoch change invalidates
+// every older reference, so a stale query stamp is rejected.
+func (p *Presence) DeviceConnectionActive(deviceID string, ref ConnectionRef) bool {
+	_, active := p.DeviceConnectionSession(deviceID, ref)
+	return active
+}
+
+// DeviceConnectionSession returns the authenticated managed session, or the
+// empty string for an active standalone Device connection.
+func (p *Presence) DeviceConnectionSession(deviceID string, ref ConnectionRef) (string, bool) {
+	if deviceID == "" || !ref.Valid() {
+		return "", false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	conn, ok := p.connections[deviceID][ref]
+	return conn.sessionID, ok && !conn.closed
+}
+
+// DeviceConnectionRefs returns the current broker connection references for a
+// device, for diagnostics and tests.
+func (p *Presence) DeviceConnectionRefs(deviceID string) []ConnectionRef {
+	if deviceID == "" {
+		return nil
+	}
+	connections := p.DeviceConnections(deviceID)
+	refs := make([]ConnectionRef, 0, len(connections))
+	for _, connection := range connections {
+		refs = append(refs, connection.Ref)
+	}
+	return refs
+}
+
+// DeviceConnections returns the admitted broker connections of a device with
+// their client ids, ordered deterministically so a retry issues the same
+// scoped control operations.
+func (p *Presence) DeviceConnections(deviceID string) []ScopeConnection {
+	if deviceID == "" {
+		return nil
+	}
+	p.mu.RLock()
+	live := p.connections[deviceID]
+	out := make([]ScopeConnection, 0, len(live))
+	for ref, connection := range live {
+		if connection.closed || !ref.Valid() {
+			continue
+		}
+		out = append(out, ScopeConnection{Ref: ref, ClientID: connection.clientID})
+	}
+	p.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ClientID != out[j].ClientID {
+			return out[i].ClientID < out[j].ClientID
+		}
+		return out[i].Ref.ID < out[j].Ref.ID
+	})
+	return out
+}
+
+// HostConnectionRef returns the admitted broker connection identity of one
+// Host. A Host re-add establishes a different enrollment generation and a new
+// connection instance, so a delayed revocation targets only the frozen ref.
+func (p *Presence) HostConnectionRef(hostID string) (ConnectionRef, bool) {
+	connection, ok := p.HostScopeConnection(hostID)
+	return connection.Ref, ok
+}
+
+// HostScopeConnection returns the admitted Host connection together with its
+// deterministic broker client id.
+func (p *Presence) HostScopeConnection(hostID string) (ScopeConnection, bool) {
+	if hostID == "" {
+		return ScopeConnection{}, false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	entry, ok := p.hosts[hostID]
+	if !ok || !entry.online || entry.connID == 0 {
+		return ScopeConnection{}, false
+	}
+	epoch := entry.epoch
+	if epoch == "" {
+		epoch = p.epoch
+	}
+	ref := ConnectionRef{Epoch: epoch, ID: entry.connID}
+	if !ref.Valid() {
+		return ScopeConnection{}, false
+	}
+	connection := ScopeConnection{Ref: ref, ClientID: ClientIDForHost(hostID)}
+	return connection, connection.Valid()
+}
+
+// BrokerEpoch returns the broker-process epoch of the current snapshot.
+func (p *Presence) BrokerEpoch() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.epoch
+}
+
+type closedConnection struct {
+	device string
+	ref    ConnectionRef
+}
+
+func (p *Presence) noteConnectionLocked(deviceID string, ref ConnectionRef, clientID, sessionID string, online bool, sequence uint64) bool {
+	if !ref.Valid() {
+		return false
+	}
+	if p.connections[deviceID] == nil {
+		p.connections[deviceID] = make(map[ConnectionRef]liveConnection)
+	}
+	old, tracked := p.connections[deviceID][ref]
+	// Keep a disconnect until a snapshot includes its sequence. Otherwise a
+	// snapshot already in flight could put a closed connection back into use.
+	p.connections[deviceID][ref] = liveConnection{clientID: clientID, sessionID: sessionID, seq: sequence, closed: !online}
+	return !online && tracked && !old.closed
+}
+
 // HandleNotification applies one ordered broker connection notification.
 func (p *Presence) HandleNotification(notification *Notification) {
 	if notification == nil || notification.Sequence == 0 {
@@ -418,6 +532,10 @@ func (p *Presence) HandleNotification(notification *Notification) {
 		at = time.UnixMilli(notification.AtUnixMilli).UTC()
 	}
 	p.mu.Lock()
+	if p.epoch != "" && notification.Epoch != "" && notification.Epoch != p.epoch {
+		p.mu.Unlock()
+		return
+	}
 	if notification.Sequence <= p.lastSeq {
 		p.mu.Unlock()
 		return
@@ -440,22 +558,74 @@ func (p *Presence) HandleNotification(notification *Notification) {
 					// HostReady confirmation.
 					ready = previous.ready
 				}
+				epoch := notification.Epoch
+				if epoch == "" {
+					epoch = p.epoch
+				}
 				p.hosts[notification.HostID] = presenceEntry{
 					online: online, at: at, seenAt: p.now(),
-					connID: notification.ConnID, ready: ready, seq: notification.Sequence,
+					connID: notification.ConnID, epoch: epoch, ready: ready, seq: notification.Sequence,
 				}
 			}
 		}
-	case "device":
-		if notification.DeviceID != "" {
-			connID := notification.ConnID
+	case "device", "session":
+		device := notification.DeviceID
+		if device != "" {
+			if previous, ok := p.devices[device]; notification.Kind == "device" && ok && at.Before(previous.at) {
+				break
+			}
+			if online && notification.Kind == "session" && notification.SessionID == "" {
+				break
+			}
+			epoch := notification.Epoch
+			if epoch == "" {
+				epoch = p.epoch
+			}
+			ref := ConnectionRef{Epoch: epoch, ID: notification.ConnID}
+			closed := p.noteConnectionLocked(device, ref, notification.ClientID, notification.SessionID, online, notification.Sequence)
+			handler := p.connectionClosedHandler
+			if notification.Kind == "device" {
+				p.applyDeviceLocked(device, online, at, ref.ID, notification.Sequence)
+			}
 			p.mu.Unlock()
-			p.applyDevice(notification.DeviceID, online, at, PresenceSourceBroker, connID, true, notification.Sequence)
+			p.publishCounts()
+			if closed && handler != nil {
+				handler(device, PresenceSourceBroker, at, ref)
+			}
 			return
 		}
 	}
 	p.mu.Unlock()
 	p.publishCounts()
+}
+
+// SetBrokerEpoch records the broker-process epoch of the current snapshot.
+// A change invalidates every tracked connection reference, so delayed events
+// from the previous process cannot affect the rebuilt presence. It returns
+// true when the epoch changed.
+func (p *Presence) SetBrokerEpoch(epoch string) bool {
+	if epoch == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.epoch == epoch {
+		return false
+	}
+	if p.epoch != "" {
+		// Sequence numbers and connection ids start again at broker boot.
+		// The new snapshot must never merge entries from an earlier process.
+		if p.onEpochChange != nil {
+			p.onEpochChange()
+		}
+		clear(p.hosts)
+		clear(p.devices)
+		clear(p.connections)
+		p.lastSeq = 0
+		p.available = false
+	}
+	p.epoch = epoch
+	return true
 }
 
 // ApplySnapshot replaces presence with the broker's current connection set at
@@ -500,7 +670,11 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 				if exists {
 					ready = previous.ready && (previous.connID == client.ConnID || previous.connID == 0)
 				}
-				hosts[client.HostID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, ready: ready, seq: boundary}
+				epoch := client.Epoch
+				if epoch == "" {
+					epoch = p.epoch
+				}
+				hosts[client.HostID] = presenceEntry{online: true, at: at, seenAt: now, connID: client.ConnID, epoch: epoch, ready: ready, seq: boundary}
 			}
 		case "device":
 			if client.DeviceID != "" {
@@ -543,37 +717,58 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 		previous.seenAt = now
 		hosts[hostID] = previous
 	}
-	var recovered []string
 	for deviceID, previous := range p.devices {
-		if !previous.online {
-			continue
-		}
 		if previous.seq > boundary {
 			previous.seenAt = now
 			devices[deviceID] = previous
+		} else if previous.online && !devices[deviceID].online && p.metrics != nil {
+			p.metrics.PresenceEvent(PresenceSourceSnapshot, "offline")
+		}
+	}
+	connections := make(map[string]map[ConnectionRef]liveConnection)
+	for _, client := range clients {
+		if (client.Kind != "device" && client.Kind != "session") || (client.Kind == "session" && client.SessionID == "") || client.State != "connected" || client.DeviceID == "" {
 			continue
 		}
-		next, ok := devices[deviceID]
-		if ok && next.online {
+		epoch := client.Epoch
+		if epoch == "" {
+			epoch = p.epoch
+		}
+		ref := ConnectionRef{Epoch: epoch, ID: client.ConnID}
+		if !ref.Valid() {
 			continue
 		}
-		recovered = append(recovered, deviceID)
+		if connections[client.DeviceID] == nil {
+			connections[client.DeviceID] = make(map[ConnectionRef]liveConnection)
+		}
+		connections[client.DeviceID][ref] = liveConnection{clientID: client.ClientID, sessionID: client.SessionID, seq: boundary}
+	}
+	var closed []closedConnection
+	for device, refs := range p.connections {
+		for ref, conn := range refs {
+			if conn.seq > boundary {
+				if connections[device] == nil {
+					connections[device] = make(map[ConnectionRef]liveConnection)
+				}
+				connections[device][ref] = conn
+			} else if _, present := connections[device][ref]; !present && !conn.closed {
+				closed = append(closed, closedConnection{device, ref})
+			}
+		}
 	}
 	p.hosts = hosts
 	p.devices = devices
+	p.connections = connections
 	if boundary > p.lastSeq {
 		p.lastSeq = boundary
 	}
 	p.available = true
-	handler := p.deviceOfflineHandler
+	handler := p.connectionClosedHandler
 	p.mu.Unlock()
 	p.publishCounts()
-	for _, deviceID := range recovered {
-		if p.metrics != nil {
-			p.metrics.PresenceEvent(PresenceSourceSnapshot, "offline")
-		}
-		if handler != nil {
-			handler(deviceID, PresenceSourceSnapshot, now)
+	if handler != nil {
+		for _, c := range closed {
+			handler(c.device, PresenceSourceSnapshot, now, c.ref)
 		}
 	}
 }
@@ -582,40 +777,6 @@ func (p *Presence) ApplySnapshot(clients []SnapshotClient, boundary uint64) {
 // heartbeat calls it so a stalled reconcile cannot leave a stale online entry
 // until the next successful snapshot.
 func (p *Presence) Sweep() int { return p.Expire(p.now()) }
-
-// deviceWillHint is the only information Access uses from a last-will payload.
-type deviceWillHint struct {
-	Event    string `json:"event"`
-	DeviceID string `json:"device_id"`
-}
-
-const deviceOfflineEventName = "device_offline"
-
-// HandleDeviceWill consumes a broker-published device last will. Unknown or
-// invalid payloads are dropped and counted; they never invent a device or host.
-func (p *Presence) HandleDeviceWill(topic string, payload []byte) {
-	deviceID, ok := ParseDeviceWillTopic(topic)
-	if !ok {
-		if p.metrics != nil {
-			p.metrics.PresenceInvalid()
-		}
-		return
-	}
-	var hint deviceWillHint
-	if err := json.Unmarshal(payload, &hint); err != nil || hint.Event != deviceOfflineEventName {
-		if p.metrics != nil {
-			p.metrics.PresenceInvalid()
-		}
-		return
-	}
-	if hint.DeviceID != "" && hint.DeviceID != deviceID {
-		if p.metrics != nil {
-			p.metrics.PresenceInvalid()
-		}
-		return
-	}
-	p.applyDevice(deviceID, false, p.now(), PresenceSourceWill, 0, false, 0)
-}
 
 // ConnectedCounts returns the last broker-derived online counts, excluding
 // observations that outlived cache_ttl.

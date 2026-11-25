@@ -24,16 +24,26 @@ receipt, resolves the confirmed canonical message through Core's public history
 read, and renders its typed blocks in the original command under one remaining
 deadline.
 
-`host status` is the explicit connection probe: it opens the Host
-connection, waits a bounded time for a usable state, and reports the
-authoritative `state`, terminal `code` and `since_unix_ms`. It needs no
-session and never reads a cached value; a Host that cannot be reached keeps
-its current state instead of failing the command.
+`host list` reports directory presence derived by Access from Broker lifecycle
+events and snapshots. It answers whether the Host is ready in the deployment,
+not whether this client can reach it.
+
+`host status` is the explicit local connection probe: it opens this client's
+Host connection, waits a bounded time for a usable state, and reports the
+authoritative `state`, terminal `code` and `since_unix_ms`. It needs no session
+and never reads a cached value; a Host that cannot be reached keeps its current
+state instead of failing the command. A device-only network loss changes this
+local status without changing `host list` presence.
 
 `session show` stays the finite metadata summary. `session history` is the
 independent committed-history entry point. It performs one bounded Core page
 read with no watch lease, MQTT subscription or cache write, starts with the
 latest page and walks older pages only through the opaque Core continuation.
+The first visible page packs the largest in-order prefix that fits the encoded
+MQTT result packet; when the leading record alone does not fit, Core returns it
+through the authorized ciphertext reference without changing the command. The
+CLI renders the same page either way, and bulk history may carry a larger page
+by reference.
 `--cache` selects the eligible encrypted local view explicitly. `--message`
 resolves one scoped committed-message reference through the same history module.
 Pages identify their source, keep messages chronological within the page and

@@ -73,7 +73,7 @@ name = "mqtt_transport_driver"
 required-features = ["protocol-testing"]
 
 [[example]]
-name = "delivery_budget_driver"
+name = "delivery_driver"
 required-features = ["protocol-testing"]
 
 [[example]]

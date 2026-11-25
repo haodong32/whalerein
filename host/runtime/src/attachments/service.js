@@ -9,8 +9,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { AdapterError, isErrorCode } from '../errors.js'
 import { validateAttachmentMetadata, validateAttachmentPolicy } from '../contracts/source.js'
 import { validateId } from '../contracts/ids.js'
-import { transportProfileBudget, DEFAULT_TRANSPORT_PROFILE } from '../contracts/transport.js'
-import { MESSAGE_BYTES } from '../access/transport.js'
+import { DEFAULT_ENVELOPE_BYTES, DEFAULT_TRANSPORT_PROFILE, transportProfileBudget } from '../contracts/transport.js'
 import {
   AttachmentReader,
   RESULT_ENVELOPE_OVERHEAD_BYTES,
@@ -156,8 +155,8 @@ export class AttachmentService {
     this.policy = validateAttachmentPolicy({ ...base, ...overrides })
     const configuredEnvelope = isPositive(envelopeBytes)
       ? envelopeBytes
-      : (profileBudget?.envelope_bytes ?? MESSAGE_BYTES)
-    this.envelopeBytes = Math.min(configuredEnvelope, MESSAGE_BYTES)
+      : (profileBudget?.envelope_bytes ?? DEFAULT_ENVELOPE_BYTES)
+    this.envelopeBytes = Math.min(configuredEnvelope, DEFAULT_ENVELOPE_BYTES)
     this.#maxActive = isPositive(maxActive)
       ? maxActive
       : this.policy.max_concurrent * ACTIVE_MULTIPLIER

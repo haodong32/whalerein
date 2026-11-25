@@ -238,6 +238,7 @@ pub async fn run(
         crate::signal::registered_interrupt(),
         diagnostics,
         context,
+        &mut std::io::stdout(),
     )
     .await
 }
@@ -248,6 +249,7 @@ pub(crate) async fn run_with_signal<S>(
     signal: S,
     diagnostics: &CliDiagnosticSink,
     context: DiagnosticContext,
+    output: &mut (impl std::io::Write + Send),
 ) -> CliOutcome
 where
     S: std::future::Future<Output = ()>,
@@ -346,7 +348,7 @@ where
     let mut signal = std::pin::pin!(signal);
     let cancellation = Cancellation::new();
     let result = if matches!(command, Command::Answer { .. }) {
-        dispatch(&core, &cli, &command, key, deadline, &cancellation).await
+        dispatch(&core, &cli, &command, key, deadline, &cancellation, output).await
     } else if matches!(command, Command::SessionDownload { .. }) {
         // A download owns a local cancellation token so Core drops its Host
         // transfer, releases reservations and removes staging before the
@@ -359,6 +361,7 @@ where
             key,
             deadline,
             &cancellation,
+            output,
         ));
         let interrupted = tokio::select! {
             result = &mut work => Some(result),
@@ -389,6 +392,7 @@ where
             key,
             deadline,
             &cancellation,
+            output,
         ));
         tokio::select! {
             result = &mut work => result,
@@ -575,6 +579,7 @@ async fn dispatch(
     key: Option<&SessionKey>,
     deadline: Option<tokio::time::Instant>,
     cancellation: &Cancellation,
+    output: &mut (impl std::io::Write + Send),
 ) -> Result<CliOutcome, CoreError> {
     let result = match command {
         Command::Login
@@ -930,16 +935,7 @@ async fn dispatch(
             // Resolution already ran inside the same budget, so tail gets only
             // what is left of the original deadline.
             let timeout = remaining_budget(deadline)?;
-            tail(
-                core,
-                command,
-                cli.json,
-                cli.show_reasoning,
-                key,
-                *once,
-                timeout,
-            )
-            .await
+            tail(core, command, cli, key, *once, timeout, output).await
         }
         Command::Wait {
             fail_on_timeout, ..
@@ -1868,12 +1864,14 @@ fn render_tail_event(
 async fn tail(
     core: &Core,
     command: &Command,
-    json_output: bool,
-    show_reasoning: bool,
+    cli: &Execution,
     key: &SessionKey,
     once: bool,
     timeout: Option<Duration>,
+    output: &mut (impl std::io::Write + Send),
 ) -> Result<CliOutcome, CoreError> {
+    let json_output = cli.json;
+    let show_reasoning = cli.show_reasoning;
     let session = key.session_id.as_str();
     let mut renderer = TailRenderer::new(show_reasoning);
     let mut visible = false;
@@ -1902,7 +1900,7 @@ async fn tail(
             }
             let text = render_tail_event(json_output, &mut renderer, key, &update, show_reasoning);
             visible |= is_tail_output(&update, show_reasoning);
-            match crate::stream::to_stdout(text.as_bytes()) {
+            match crate::stream::write_all(output, text.as_bytes()) {
                 Ok(()) => {
                     if once && visible {
                         stopped = true;
@@ -1945,7 +1943,7 @@ async fn tail(
     }
     if !json_output {
         let tail = renderer.finish_line();
-        let _ = crate::stream::to_stdout(tail.as_bytes());
+        let _ = crate::stream::write_all(output, tail.as_bytes());
     }
     if !finished && emitted == 0 {
         return Err(observation
@@ -2492,6 +2490,7 @@ mod instance_command_tests {
             std::future::pending(),
             &diagnostics,
             DiagnosticContext::new(diagnostics.clone()),
+            &mut std::io::sink(),
         ))
         .await
     }
@@ -2723,10 +2722,10 @@ mod instance_command_tests {
             execute(&config, secrets.clone(), &["session", "wait", "session-1"]).await;
         assert_eq!(default_wait.exit, 0);
         assert_eq!(default_wait.to_json()["data"]["reason"], "idle");
-        // The slice leaves a small response allowance inside the 30s
-        // transport budget; one millisecond of scheduling drift is allowed.
+        // A default 30-second wait leaves time for lost-waiter recovery.
+        // The Host receives a bounded slice under that same command deadline.
         let slice = access.host.lock().unwrap().wait_last_timeout_ms;
-        assert!((27_900..=28_000).contains(&slice), "wait slice {slice}");
+        assert!((1..=5_000).contains(&slice), "wait slice {slice}");
         access.host.lock().unwrap().wait_timeouts = usize::MAX;
         for (extra, exit) in [(false, 0), (true, 7)] {
             // One second leaves room for Host discovery under parallel test load

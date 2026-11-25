@@ -10,7 +10,14 @@
 // derives its own `block_id` from it and keeps reasoning and answer blocks in
 // separate namespaces. Unsupported chunks are never coerced into text.
 export function assistantStreamEvent({ agent, frame } = {}, now = Date.now) {
-  const sessionId = agent?.session?.id
+  // Native DSH emits `{ frame }` scoped to one Agent; older harness builds also
+  // attach the Agent. The attempt id embeds the Session as `<session>:<n>`, so
+  // recover the owning Session when only the scoped frame is delivered.
+  let sessionId = agent?.session?.id
+  if ((typeof sessionId !== 'string' || !sessionId) && typeof frame?.attemptId === 'string') {
+    const cut = frame.attemptId.lastIndexOf(':')
+    if (cut > 0) sessionId = frame.attemptId.slice(0, cut)
+  }
   if (typeof sessionId !== 'string' || !sessionId || !frame ||
       typeof frame.attemptId !== 'string' || frame.attemptId.length > 512 ||
       !Number.isSafeInteger(frame.revision) || frame.revision < 0) return null

@@ -455,7 +455,7 @@ def _expected_paths(artifacts):
             "tests/integration/drivers/protobuf/rust-peer/target/debug/whalerein-proto-peer"
         ],
         "mqtt-driver": ["target/debug/examples/mqtt_transport_driver"],
-        "delivery-driver": ["target/debug/examples/delivery_budget_driver"],
+        "delivery-driver": ["target/debug/examples/delivery_driver"],
         "wait-driver": ["target/debug/examples/wait_concurrency_driver"],
         "broker-tests": [".verification/bin/broker-tests"],
         "server-tests": [".verification/bin/server-tests"],

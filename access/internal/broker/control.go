@@ -26,6 +26,9 @@ type ControlReply struct {
 	Fields   map[string]string
 	Clients  []SnapshotClient
 	Sequence uint64
+	// Epoch is the broker-process epoch reported by the snapshot, every
+	// lifecycle event and the readiness ping.
+	Epoch string
 }
 
 // SnapshotClient is one broker connection at the snapshot boundary.
@@ -40,10 +43,14 @@ type SnapshotClient struct {
 	State     string
 	Sequence  uint64
 	Connected int64
+	// Epoch is the broker-process epoch of this connection; with ConnID it
+	// forms the Broker-issued connection reference.
+	Epoch string
 }
 
 // Notification is one ordered connection lifecycle event.
 type Notification struct {
+	SessionID   string
 	Sequence    uint64
 	Event       string
 	ClientID    string
@@ -51,6 +58,7 @@ type Notification struct {
 	HostID      string
 	DeviceID    string
 	ConnID      uint64
+	Epoch       string
 	AtUnixMilli int64
 	Reason      int
 }
@@ -189,6 +197,7 @@ func (c *Control) handleReply(payload []byte) {
 	if sequence, err := strconv.ParseUint(reply.Fields["seq"], 10, 64); err == nil {
 		reply.Sequence = sequence
 	}
+	reply.Epoch = reply.Fields["epoch"]
 	for _, line := range fields["client"] {
 		parts := strings.Split(line, " ")
 		if len(parts) < 9 {
@@ -200,6 +209,15 @@ func (c *Control) handleReply(payload []byte) {
 			HostID:   parts[2],
 			DeviceID: parts[3],
 			State:    parts[6],
+		}
+		if len(parts) > 10 {
+			if ref, ok := ParseConnectionRef(parts[10]); ok {
+				client.Epoch = ref.Epoch
+				client.ConnID = ref.ID
+			}
+		}
+		if client.Epoch == "" {
+			client.Epoch = reply.Epoch
 		}
 		client.ConnID, _ = strconv.ParseUint(parts[4], 10, 64)
 		client.Revision, _ = strconv.ParseUint(parts[5], 10, 64)
@@ -230,14 +248,20 @@ func (c *Control) handleReply(payload []byte) {
 func (c *Control) handleNotification(payload []byte) {
 	fields := parseControlLines(payload)
 	notification := &Notification{
-		Event:    firstField(fields, "event"),
-		ClientID: firstField(fields, "client"),
-		Kind:     firstField(fields, "kind"),
-		HostID:   firstField(fields, "host"),
-		DeviceID: firstField(fields, "device"),
+		Event:     firstField(fields, "event"),
+		SessionID: firstField(fields, "session"),
+		ClientID:  firstField(fields, "client"),
+		Kind:      firstField(fields, "kind"),
+		HostID:    firstField(fields, "host"),
+		DeviceID:  firstField(fields, "device"),
+		Epoch:     firstField(fields, "epoch"),
 	}
 	notification.Sequence, _ = strconv.ParseUint(firstField(fields, "seq"), 10, 64)
 	notification.ConnID, _ = strconv.ParseUint(firstField(fields, "conn"), 10, 64)
+	if ref, ok := ParseConnectionRef(firstField(fields, "ref")); ok {
+		notification.Epoch = ref.Epoch
+		notification.ConnID = ref.ID
+	}
 	notification.AtUnixMilli, _ = strconv.ParseInt(firstField(fields, "at"), 10, 64)
 	reason, _ := strconv.Atoi(firstField(fields, "reason"))
 	notification.Reason = reason

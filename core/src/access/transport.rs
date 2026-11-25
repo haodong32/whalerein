@@ -1,6 +1,6 @@
 //! Complete-message relay transport.
 //!
-//! One coordinated relay epoch (`relay_version = 4`) carries a complete
+//! One coordinated relay epoch (`relay_version = 5`) carries a complete
 //! application message as exactly one MQTT PUBLISH. Each hop selects the
 //! representation for its own outgoing packet:
 //!
@@ -27,7 +27,7 @@ use whalerein_proto::{
 };
 
 /// The only accepted MQTT relay epoch.
-pub const RELAY_EPOCH_V4: u32 = 4;
+pub const RELAY_EPOCH_V5: u32 = 5;
 
 /// Default logical envelope retained for callers that only need the baseline.
 pub const MESSAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -250,7 +250,7 @@ impl TransportBudget {
             profile: self.profile.wire() as i32,
             budget: Some(self.wire_budget()),
             connection_generation: generation,
-            relay_version: RELAY_EPOCH_V4,
+            relay_version: RELAY_EPOCH_V5,
         })
     }
 
@@ -277,7 +277,7 @@ impl TransportBudget {
         if advertisement.connection_generation == 0 {
             return Err("receive advertisement generation missing".into());
         }
-        if advertisement.relay_version != RELAY_EPOCH_V4 {
+        if advertisement.relay_version != RELAY_EPOCH_V5 {
             return Err("receive advertisement relay epoch is not supported".into());
         }
         let profile = match whalerein_proto::TransportProfile::try_from(advertisement.profile) {
@@ -315,7 +315,7 @@ pub fn resolve_transport_settings(settings: &TransportSettings) -> Result<Transp
     TransportBudget::resolve(settings)
 }
 
-/// A peer that does not advertise epoch 4 is rejected explicitly. There is no
+/// A peer that does not advertise epoch 5 is rejected explicitly. There is no
 /// unframed v2 acceptance, no fragment fallback and no mixed-epoch route.
 pub fn protocol_incompatible(detail: &'static str) -> AccessError {
     AccessError {
@@ -347,13 +347,13 @@ fn payload_too_large(detail: &'static str) -> AccessError {
     }
 }
 
-/// Reject a relay envelope whose epoch is not the coordinated epoch 4.
+/// Reject a relay envelope whose epoch is not the coordinated epoch 5.
 pub fn require_relay_epoch(version: u32) -> Result<(), AccessError> {
-    if version == RELAY_EPOCH_V4 {
+    if version == RELAY_EPOCH_V5 {
         Ok(())
     } else {
         Err(protocol_incompatible(
-            "unsupported MQTT relay epoch; upgrade the peer to relay epoch 4",
+            "unsupported MQTT relay epoch; upgrade the peer to relay epoch 5",
         ))
     }
 }
@@ -410,6 +410,59 @@ pub fn validate_request_representation(request: &HostRequest) -> Result<(), Acce
         }
     }
     Ok(())
+}
+
+/// Validate the per-hop representation rule for an epoch-5 query reply.
+///
+/// A reply carries the original request identity, the coordinated epoch and
+/// exactly one complete body representation. A bodyless reply is a legitimate
+/// packet-sized terminal status, so absence of both carriers is accepted here
+/// and rejected later by the payload contract.
+pub fn validate_host_result_representation(
+    result: &whalerein_proto::HostResult,
+) -> Result<(), AccessError> {
+    require_relay_epoch(result.relay_version)?;
+    if result.request_id.is_empty() {
+        return Err(invalid("query reply request identity is required"));
+    }
+    let has_body = !result.result_body.is_empty();
+    let has_reference = result.result_reference.is_some();
+    if has_body && has_reference {
+        return Err(invalid(
+            "exactly one of result_body and result_reference may be set",
+        ));
+    }
+    if let Some(reference) = &result.result_reference {
+        if reference.sha256.len() != 32
+            || reference.ciphertext_bytes == 0
+            || reference.object_id.len() != 32
+            || !reference
+                .object_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(invalid("invalid query reply payload reference"));
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a query `HostResult` to its complete verified body bytes. The
+/// original admitted result bound still applies: a reference that declares
+/// more is refused before any fetch.
+pub async fn resolve_query_reply_body(
+    client: &AccessClient,
+    result: &whalerein_proto::HostResult,
+    max_ciphertext_bytes: u64,
+) -> Result<Option<Vec<u8>>, AccessError> {
+    validate_host_result_representation(result)?;
+    match &result.result_reference {
+        Some(reference) => Ok(Some(
+            resolve_reference(client, reference, max_ciphertext_bytes).await?,
+        )),
+        None if result.result_body.is_empty() => Ok(None),
+        None => Ok(Some(result.result_body.clone())),
+    }
 }
 
 /// Validate the per-hop representation rule for a live event. The nonce is
@@ -583,7 +636,7 @@ mod tests {
             host_id: "h".into(),
             device_id: "d".into(),
             kind: kind as i32,
-            relay_version: RELAY_EPOCH_V4,
+            relay_version: RELAY_EPOCH_V5,
             ..Default::default()
         }
     }
@@ -633,11 +686,11 @@ mod tests {
     #[test]
     fn only_epoch_four_is_accepted() {
         // Epoch 3 is reserved: it is never accepted and has no dual path.
-        for version in [0u32, 2, RELAY_EPOCH_V4 - 1] {
+        for version in [0u32, 2, RELAY_EPOCH_V5 - 1] {
             let error = require_relay_epoch(version).unwrap_err();
             assert_eq!(error.code, Some(ErrorCode::ProtocolVersionIncompatible));
         }
-        assert!(require_relay_epoch(RELAY_EPOCH_V4).is_ok());
+        assert!(require_relay_epoch(RELAY_EPOCH_V5).is_ok());
 
         let mut request = request(RequestKind::Command);
         request.body = b"abc".to_vec();
@@ -657,7 +710,7 @@ mod tests {
             channel_id: "c".into(),
             nonce: vec![1; 12],
             ciphertext: vec![2; 4],
-            relay_version: RELAY_EPOCH_V4,
+            relay_version: RELAY_EPOCH_V5,
             ..Default::default()
         };
         assert!(validate_event_representation(&inline).is_ok());
@@ -670,7 +723,7 @@ mod tests {
         assert!(validate_event_representation(&inline_only).is_ok());
         let mut neither = EventEnvelope {
             nonce: vec![1; 12],
-            relay_version: RELAY_EPOCH_V4,
+            relay_version: RELAY_EPOCH_V5,
             ..Default::default()
         };
         assert!(validate_event_representation(&neither).is_err());
@@ -692,7 +745,7 @@ mod tests {
         let mut live = EventEnvelope {
             nonce: vec![1; 12],
             ciphertext: vec![2; 4],
-            relay_version: RELAY_EPOCH_V4,
+            relay_version: RELAY_EPOCH_V5,
             ..Default::default()
         };
         assert!(validate_live_event_representation(&live).is_ok());

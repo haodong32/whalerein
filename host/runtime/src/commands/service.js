@@ -10,10 +10,9 @@ import { summaryToProto } from '../contracts/serialization.js'
 import { validateMessageReply } from '../contracts/source.js'
 import { AdapterError, DefinitiveExecutionError, PluginError, publicMessage } from '../errors.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
-import { MESSAGE_BYTES } from '../access/transport.js'
 import { QuestionPager } from './question-pager.js'
 import { AttachmentService } from '../attachments/service.js'
-import { transportProfileBudget, DEFAULT_TRANSPORT_PROFILE } from '../contracts/transport.js'
+import { DEFAULT_ENVELOPE_BYTES, DEFAULT_TRANSPORT_PROFILE, transportProfileBudget } from '../contracts/transport.js'
 
 const COMMAND_STATUS_TO_PROTO = Object.freeze({
   accepted: 'host_accepted',
@@ -140,7 +139,10 @@ function preflightReason(code) {
   return `PREFLIGHT_${typeof code === 'string' && code !== '' ? code.toUpperCase() : 'INTERNAL'}`
 }
 
-function waitStateToProto(state) {
+function waitStateToProto(state, envelopeBytes) {
+  // Each packed enum occupies at least one byte before the reply envelope.
+  // Reject an impossible result before allocating its encoded enum array.
+  if ((state.pendingInput?.length ?? 0) >= envelopeBytes) throw new AdapterError('payload_too_large')
   const kinds = { approval: 'INPUT_APPROVAL', question: 'INPUT_QUESTION', other: 'INPUT_OTHER' }
   return { active: state.active, running: state.running, queue_available: state.queueAvailable,
     pending_input: (state.pendingInput ?? []).map(kind => kinds[kind] ?? kinds.other) }
@@ -200,6 +202,7 @@ export class CommandService {
         ).envelope_bytes
       } catch { envelopeBytes = 0 }
     }
+    this.envelopeBytes = envelopeBytes || DEFAULT_ENVELOPE_BYTES
     this.attachments = attachments ?? new AttachmentService({
       hostId,
       adapter,
@@ -262,7 +265,12 @@ export class CommandService {
 
   #cancelScopes(matches, reason) {
     for (const entry of this.requests) {
-      if (matches(entry)) entry.controller.abort('unavailable')
+      // Losing the observing Device connection only ends its transient reads.
+      // Revocation, Host channel replacement and exact command cancellation
+      // still fence preflight and native execution.
+      if (matches(entry) && (reason !== 'connection_closed' || entry.kind === 'REQUEST_KIND_QUERY')) {
+        entry.controller.abort('unavailable')
+      }
     }
     for (const entry of this.modelQueries.values()) {
       if (matches(entry)) entry.controller.abort('unavailable')
@@ -424,9 +432,12 @@ export class CommandService {
    * Handle one decrypted RequestPayload.
    * @returns {Promise<{status: string, response?: object, resultPayload?: Buffer, errorCode?: string}>}
    */
-  async handle({ request, payload, questionResponseBudget = MESSAGE_BYTES }) {
+  async handle({ request, payload, questionResponseBudget = DEFAULT_ENVELOPE_BYTES }) {
     if (request.kind !== 'REQUEST_KIND_COMMAND' && request.kind !== 'REQUEST_KIND_QUERY') throw new PluginError('invalid_argument', 'request kind invalid')
-    const scope={requestId:request.request_id,deviceId:request.device_id,channelId:request.channel_id,controller:new AbortController()}
+    const scope = {
+      kind: request.kind, requestId: request.request_id, deviceId: request.device_id,
+      channelId: request.channel_id, controller: new AbortController(),
+    }
     // Native wait owns its own deadline. Other requests stop waiting at the
     // already-existing HostRequest expiry, even if a source ignores cancellation.
     let expiryTimer
@@ -636,8 +647,17 @@ export class CommandService {
           },
         }
       }
-      if (payload.refresh_watches) {
-        return { status: 'succeeded', response: { watch_states: await this.events.refresh(request.device_id, request.channel_id, payload.refresh_watches.watch_ids??[], scope.controller.signal) } }
+      if (payload.check_versions) {
+        const check = payload.check_versions
+        if (typeof check.session_id !== 'string' || check.session_id === '') return failed('invalid_argument')
+        return {
+          status: 'succeeded',
+          response: {
+            version_checks: await this.events.versions(
+              request.device_id, request.channel_id, check.session_id, scope.controller.signal,
+            ),
+          },
+        }
       }
       if (payload.unwatch_session) {
         this.events.unwatch(request.device_id, request.channel_id, payload.unwatch_session.watch_id)
@@ -720,7 +740,7 @@ export class CommandService {
       const state = await Promise.race([this.adapter.readWaitState(read.session_id, controller.signal), aborted])
       if (controller.signal.aborted) return failed(cancelledObservationCode(entry, this.now(), request.expires_at_unix_ms))
       if (this.now() >= Number(request.expires_at_unix_ms)) return failed('expired')
-      return { status: 'succeeded', response: { session_wait_state_result: { session_id: read.session_id, state: waitStateToProto(state) } } }
+      return { status: 'succeeded', response: { session_wait_state_result: { session_id: read.session_id, state: waitStateToProto(state, this.envelopeBytes) } } }
     } catch (error) {
       if (controller.signal.aborted) return failed(cancelledObservationCode(entry, this.now(), request.expires_at_unix_ms))
       throw error
@@ -738,7 +758,7 @@ export class CommandService {
     const lifetime = Number(request.expires_at_unix_ms) - this.now()
     // Reserve room for encoding and relaying the response. Expiry always
     // remains an error even if the native operation does not observe abort.
-    const timeout = Math.min(wait.timeout_ms, lifetime - 1000)
+    const timeout = Math.min(wait.timeout_ms, lifetime - Math.min(1000, Math.floor(lifetime / 5)))
     if (!Number.isSafeInteger(lifetime) || timeout <= 0) return failed('expired')
     const key = JSON.stringify(['wait', request.device_id, request.channel_id, wait.session_id, wait.wait_id])
     if (this.waits.has(key)) return failed('conflict')
@@ -760,7 +780,7 @@ export class CommandService {
       if (!reasons[result?.reason] || !result.state) return failed('internal')
       return { status: 'succeeded', response: { session_wait_result: {
         session_id: wait.session_id, wait_id: wait.wait_id, reason: reasons[result.reason],
-        state: waitStateToProto(result.state),
+        state: waitStateToProto(result.state, this.envelopeBytes),
       } } }
     } catch (error) {
       if (controller.signal.aborted) return failed(cancelledObservationCode(entry, this.now(), request.expires_at_unix_ms))

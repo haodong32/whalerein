@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/store"
@@ -21,14 +22,16 @@ type Store interface {
 	DisableEnrollment(ctx context.Context, hostID string, at time.Time) (store.DisabledEnrollment, error)
 	DisableEnrollmentWithTarget(ctx context.Context, hostID, removalOperationID string, expected *store.RemovalTarget, at time.Time) (store.DisabledEnrollment, error)
 	MarkRemovalEnforced(ctx context.Context, removalOperationID string, at time.Time) error
+	MarkRemovalEnforcedAt(ctx context.Context, removalOperationID string, applied *store.ConnectionRef, at time.Time) error
 	ReplaceHostCredential(ctx context.Context, operation store.ExternalOperation) (store.ExternalEnrollment, string, error)
 	ConsumeHostProofNonce(ctx context.Context, nonceHash []byte, purpose string, at time.Time) (bool, error)
 }
 
 // HostEnforcer applies the realtime side of a durable Host removal: local
-// admission and the live broker line.
+// admission and the frozen Broker scope. It reports the connection instances
+// the Broker confirmed so the receipt can record the applied evidence.
 type HostEnforcer interface {
-	DisableHostScope(ctx context.Context, hostID string, grantGenerations map[string]uint64) error
+	DisableHostScope(ctx context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error)
 }
 
 // IssuedCredential is the one-time broker credential for a Host. It is never
@@ -437,11 +440,29 @@ func (s *Service) RemoveHost(ctx context.Context, hostID string, request Removal
 	if s.enforcer == nil {
 		return receipt, fmt.Errorf("%w: no Host enforcement is configured", ErrEnforcementUnavailable)
 	}
-	if err := s.enforcer.DisableHostScope(ctx, disabled.HostID, disabled.Revocations); err != nil {
+	scope := store.RevocationScope{
+		HostID:               disabled.HostID,
+		EnrollmentGeneration: disabled.Generation,
+	}
+	devices := make([]string, 0, len(disabled.Revocations))
+	for deviceID := range disabled.Revocations {
+		devices = append(devices, deviceID)
+	}
+	sort.Strings(devices)
+	for _, deviceID := range devices {
+		scope.Grants = append(scope.Grants, store.ScopeGrant{
+			HostID:               disabled.HostID,
+			DeviceID:             deviceID,
+			EnrollmentGeneration: disabled.Generation,
+			GrantGeneration:      disabled.Revocations[deviceID],
+		})
+	}
+	enforcement, err := s.enforcer.DisableHostScope(ctx, scope)
+	if err != nil {
 		return receipt, fmt.Errorf("%w: %v", ErrEnforcementUnavailable, err)
 	}
 	enforcedAt := s.now()
-	if err := s.store.MarkRemovalEnforced(ctx, disabled.RemovalOperationID, enforcedAt); err != nil {
+	if err := s.store.MarkRemovalEnforcedAt(ctx, disabled.RemovalOperationID, enforcement.Primary(), enforcedAt); err != nil {
 		return receipt, fmt.Errorf("record removal enforcement: %w", err)
 	}
 	receipt.State = "enforced"

@@ -51,33 +51,12 @@ func TestSubmitRejectsForeignEpochAndInvalidRepresentations(t *testing.T) {
 			r.PayloadDigest = r.BodyReference.Sha256
 		}, ErrInvalidRequest},
 		{"command neither representation", func(r *whalereinv1.HostRequest) { r.Body = nil }, ErrInvalidRequest},
-		{"query both representations", func(r *whalereinv1.HostRequest) {
+		{"retired query route", func(r *whalereinv1.HostRequest) {
 			r.Kind = whalereinv1.RequestKind_REQUEST_KIND_QUERY
-			r.CommandId = ""
-			r.PayloadDigest = nil
-			r.BodyReference = testReference(whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_REQUEST, r.Body)
-			r.PayloadDigest = r.BodyReference.Sha256
-		}, ErrInvalidRequest},
-		{"query neither representation", func(r *whalereinv1.HostRequest) {
-			r.Kind = whalereinv1.RequestKind_REQUEST_KIND_QUERY
-			r.CommandId = ""
-			r.PayloadDigest = nil
-			r.Body = nil
-		}, ErrInvalidRequest},
-		{"query reference without digest", func(r *whalereinv1.HostRequest) {
-			r.Kind = whalereinv1.RequestKind_REQUEST_KIND_QUERY
-			r.CommandId = ""
-			r.PayloadDigest = nil
-			r.Body = nil
-			r.BodyReference = testReference(whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_REQUEST, []byte("payload"))
-		}, ErrInvalidRequest},
-		{"handshake reference", func(r *whalereinv1.HostRequest) {
+		}, ErrProtocolVersion},
+		{"retired handshake route", func(r *whalereinv1.HostRequest) {
 			r.Kind = whalereinv1.RequestKind_REQUEST_KIND_HANDSHAKE
-			r.CommandId = ""
-			r.PayloadDigest = nil
-			r.Body = nil
-			r.BodyReference = testReference(whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_REQUEST, []byte("handshake"))
-		}, ErrInvalidRequest},
+		}, ErrProtocolVersion},
 		{"reference digest differs from payload_digest", func(r *whalereinv1.HostRequest) {
 			r.Body = nil
 			r.BodyReference = testReference(whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_REQUEST, []byte("payload"))

@@ -93,6 +93,20 @@ adapter.waitSession = (...args) => {
 const keepAlive = setInterval(() => {}, 1 << 30)
 try {
   await host.start()
+  // Test-only transport trace: the harness reads this file to distinguish a
+  // stopped lane from a connected lane that is still replaying revocations.
+  if (process.env.WHALEREIN_TRANSPORT_TRACE === '1') {
+    const tracePath = path.join(process.env.WHALEREIN_STATE_DIR, 'transport-trace.json')
+    setInterval(() => {
+      try {
+        fs.writeFileSync(tracePath, JSON.stringify({
+          at: Date.now(),
+          ...host.access.describe(),
+          revocationsPending: host.security.revocationsPending,
+        }))
+      } catch { /* diagnostics only */ }
+    }, 500).unref?.()
+  }
   // Isolated fixture fault: fail exactly one terminal success journal write.
   const updateCommand = host.store.setCommandStatus.bind(host.store)
   host.store.setCommandStatus = fields => {
@@ -106,7 +120,7 @@ try {
   // Drop exactly one terminal command result after its journal commit.
   const publishResult = host.access.publishResult.bind(host.access)
   const protocol = codec()
-  host.access.publishResult = async bytes => {
+  host.access.publishResult = async (bytes, options = {}) => {
     const marker = path.join(process.env.WHALEREIN_STATE_DIR, 'gx-drop-terminal')
     const result = protocol.decode('whalerein.v1.HostResult', bytes)
     // Test-only metadata for exact encrypted response budget assertions; no body is persisted.
@@ -131,9 +145,9 @@ try {
       result.error_code = 'expired'
       result.error_message = 'expired'
       result.result_body = new Uint8Array()
-      return publishResult(protocol.encode('whalerein.v1.HostResult', result))
+      return publishResult(protocol.encode('whalerein.v1.HostResult', result), options)
     }
-    return publishResult(bytes)
+    return publishResult(bytes, options)
   }
 
   // Do not call the host ready before its broker connection and subscription

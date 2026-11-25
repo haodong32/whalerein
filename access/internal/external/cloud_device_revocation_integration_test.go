@@ -23,25 +23,27 @@ type lostAckEnforcer struct {
 	effective int
 }
 
-func (e *lostAckEnforcer) RevokeHostGrant(ctx context.Context, hostID, deviceID string) error {
+func (e *lostAckEnforcer) EnforceRevocationScope(ctx context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
 	e.calls++
-	var revoked bool
-	err := e.data.Pool().QueryRow(ctx, `SELECT COALESCE(revoked_at IS NOT NULL,true)
-		FROM grants WHERE host_id=$1 AND device_id=$2`, hostID, deviceID).Scan(&revoked)
-	if err != nil {
-		return err
-	}
-	if !revoked {
-		e.effective++
-		if err := e.data.RevokeGrant(ctx, hostID, deviceID, time.Now().UTC()); err != nil {
-			return err
+	for _, grant := range scope.Grants {
+		var revoked bool
+		err := e.data.Pool().QueryRow(ctx, `SELECT COALESCE(revoked_at IS NOT NULL,true)
+			FROM grants WHERE host_id=$1 AND device_id=$2`, grant.HostID, grant.DeviceID).Scan(&revoked)
+		if err != nil {
+			return store.EnforcementReceipt{Scope: scope}, err
+		}
+		if !revoked {
+			e.effective++
+			if err := e.data.RevokeGrant(ctx, grant.HostID, grant.DeviceID, time.Now().UTC()); err != nil {
+				return store.EnforcementReceipt{Scope: scope}, err
+			}
 		}
 	}
 	if e.loseAck {
 		e.loseAck = false
-		return errors.New("simulated lost regional acknowledgement")
+		return store.EnforcementReceipt{Scope: scope}, errors.New("simulated lost regional acknowledgement")
 	}
-	return nil
+	return store.EnforcementReceipt{Scope: scope, Absent: true}, nil
 }
 
 func enrollIntegrationHost(t *testing.T, data *store.Store, workspace, hostID, revision, operationID string, now time.Time) {

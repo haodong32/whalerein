@@ -15,11 +15,11 @@ import (
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 )
 
-type publishFunc func(ctx context.Context, topic string, payload []byte) error
+type publishFunc func(ctx context.Context, message Message) error
 
 type sendItem struct {
 	ctx       context.Context
-	payload   []byte
+	message   Message
 	size      int64
 	done      chan error
 	cancelled bool
@@ -82,6 +82,10 @@ func flowLabel(topic string) string {
 		return "device_event"
 	case KindDeviceNotice:
 		return "notice"
+	case KindDeviceQuery:
+		return "query"
+	case KindDeviceReply:
+		return "reply"
 	case KindPresence:
 		return "presence"
 	default:
@@ -106,16 +110,24 @@ func (p *publisher) setMetrics(kind string, flow *sendFlow) {
 	p.metrics.TransportInFlightCount(label, inflight)
 }
 
-// Submit enqueues one complete prepared packet and waits for its publication.
-// It never splits or retries a packet.
+// Submit enqueues one payload on one topic. It is the property-free shorthand
+// used by internal control and notices.
 func (p *publisher) Submit(ctx context.Context, topic string, payload []byte) error {
+	return p.SubmitMessage(ctx, Message{Topic: topic, Payload: payload, QoS: 1})
+}
+
+// SubmitMessage enqueues one complete prepared packet, including its MQTT 5
+// properties, and waits for its publication. It never splits or retries a
+// packet.
+func (p *publisher) SubmitMessage(ctx context.Context, message Message) error {
 	if p == nil {
 		return ErrQueueClosed
 	}
-	if len(payload) == 0 {
+	if len(message.Payload) == 0 {
 		return transportReject(transportCodeHeader, ErrMessageBudget)
 	}
-	size := int64(len(payload))
+	topic := message.Topic
+	size := int64(len(message.Payload))
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -148,7 +160,7 @@ func (p *publisher) Submit(ctx context.Context, topic string, payload []byte) er
 		}
 		return ErrQueueBytes
 	}
-	item := &sendItem{ctx: ctx, payload: payload, size: size, done: make(chan error, 1)}
+	item := &sendItem{ctx: ctx, message: message, size: size, done: make(chan error, 1)}
 	flow.items = append(flow.items, item)
 	if !flow.active {
 		flow.active = true
@@ -219,7 +231,8 @@ func (f *sendFlow) drain() {
 			f.fail(item, item.ctx.Err())
 			continue
 		}
-		if err := p.publish(item.ctx, f.key, item.payload); err != nil {
+		item.message.Topic = f.key
+		if err := p.publish(item.ctx, item.message); err != nil {
 			if p.metrics != nil {
 				p.metrics.TransportRejected(transportCodeQueue, item.size, 0)
 			}
@@ -228,7 +241,7 @@ func (f *sendFlow) drain() {
 			item.done <- nil
 		}
 		<-p.inFlight
-		item.payload = nil
+		item.message.Payload = nil
 		f.reclaim(item)
 	}
 }
@@ -238,7 +251,7 @@ func (f *sendFlow) fail(item *sendItem, err error) {
 	if err == nil {
 		err = ErrQueueClosed
 	}
-	item.payload = nil
+	item.message.Payload = nil
 	f.reclaim(item)
 	item.done <- err
 }

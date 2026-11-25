@@ -108,6 +108,7 @@
     "whalerein.v1.CapabilitySet",
     "whalerein.v1.ChannelHello",
     "whalerein.v1.ChannelReady",
+    "whalerein.v1.CheckVersions",
     "whalerein.v1.CloseAttachment",
     "whalerein.v1.CloseAttachmentResult",
     "whalerein.v1.CommandAccepted",
@@ -201,7 +202,6 @@
     "whalerein.v1.ReadWaitState",
     "whalerein.v1.ReasoningContent",
     "whalerein.v1.ReceiveAdvertisement",
-    "whalerein.v1.RefreshWatches",
     "whalerein.v1.RelayObject",
     "whalerein.v1.RelayObjectDeleteResult",
     "whalerein.v1.RelayObjectFinishRequest",
@@ -234,21 +234,22 @@
     "whalerein.v1.TransportBudget",
     "whalerein.v1.UnwatchSession",
     "whalerein.v1.UpdatePendingQueue",
+    "whalerein.v1.VersionCheck",
+    "whalerein.v1.VersionChecks",
     "whalerein.v1.WaitSession",
     "whalerein.v1.WatchClosed",
-    "whalerein.v1.WatchLease",
     "whalerein.v1.WatchReady",
-    "whalerein.v1.WatchSession",
-    "whalerein.v1.WatchStates"
+    "whalerein.v1.WatchSession"
   ],
   "mqttTopics": [
     "whalerein/v1/h/{host_id}/request",
     "whalerein/v1/h/{host_id}/result",
     "whalerein/v1/h/{host_id}/event",
-    "whalerein/v1/h/{host_id}/live",
     "whalerein/v1/h/{host_id}/d/{device_id}/event",
     "whalerein/v1/h/{host_id}/d/{device_id}/notice",
     "whalerein/v1/h/{host_id}/d/{device_id}/ready",
+    "whalerein/v1/h/{host_id}/d/{device_id}/query",
+    "whalerein/v1/h/{host_id}/d/{device_id}/reply",
     "whalerein/v1/h/{host_id}/d/{device_id}/live"
   ],
   "protocolWindow": {

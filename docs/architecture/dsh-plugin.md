@@ -139,35 +139,38 @@ verified behavior on every environment.
 
 ## Presence and claim release
 
-Access resolves a device last will or `$SYS` disconnect into a host-scoped
-`whalerein/v1/h/<host_id>/presence` event. Host subscribes only to its exact
-presence topic. On `device_offline` it clears that Device's MQTT observations.
-Concurrent HTTP channels and requests keep their own lifetimes. An admitted
-answer keeps its exact request authority until cancellation, lease expiry or
-the hard request deadline. Applicable grant/device
-revocation remains stronger and fences both observation and execution. The
-adapter's existing `finally` releases the native question `attachWait`; there is
-no separate claim registry, lease, token or protocol claim field. TTL remains the
-fallback when presence is absent. The broker-to-Access presence edge is unit-tested but not yet verified
-end-to-end against Mosquitto in the integration harness.
+Access applies ordered Broker lifecycle events and a sequence-bounded snapshot
+to derive scoped disconnects, and exposes them on the Host's presence topic.
+Host subscribes only to its exact presence topic. On a connection-scoped close it
+clears only that Device's observations bound to the exact Broker connection
+reference. A device Will is not a presence source and cannot identify the
+connection instance it replaced. Concurrent HTTPS commands and query-lane
+channels keep their own lifetimes. An admitted answer keeps its exact request
+authority until cancellation, lease expiry or the hard request deadline.
+Applicable grant/device revocation remains stronger and fences both observation
+and execution. The adapter's existing `finally` releases the native question
+`attachWait`; there is no separate claim registry, lease, token or protocol
+claim field.
 
 
 ## HTTP claim lease
 
-One-shot CLI commands submit and poll through the Access HTTP API; they do not
-hold a device MQTT session. Liveness is exact and durable on the request row:
-only the authenticated device's own `GET /v1/requests/{id}` or
+One-shot CLI commands submit and read results through the Access HTTP API; they
+do not depend on a renewable MQTT lease. Liveness is exact and durable on the
+request row: only the authenticated device's own
 `POST /v1/requests/{id}/heartbeat` renews that request's 10-second lease, bounded
-by its original deadline, using database time. Other requests, other devices and
-observation traffic cannot renew it. A bounded sweep atomically expires an
-elapsed lease exactly once, records retryable cancellation metadata on the same
-row, stops forwarding a closed request, and publishes a bounded exact-scope
-`request_stale` notice on the host's presence topic. Publication alone is not
-proof of native release; pending notices replay after restart or broker failure.
-Host validates the exact host/device/request/command/digest/deadline binding,
-fences a not-yet-admitted request through its command journal, and cancels only
-that execution. MQTT will/keepalive remains for long-lived event connections
-only, and the hard request deadline remains the final fallback.
+by its original deadline, using database time. A status `GET`, another request,
+another device and observation or query traffic cannot renew it. A bounded
+sweep atomically expires an elapsed lease exactly once, records retryable
+cancellation metadata on the same row, stops forwarding a closed request, and
+publishes a bounded exact-scope `request_stale` notice on the Host's presence
+topic. Publication alone is not proof of native release; pending notices replay
+after restart or broker failure. Host validates the exact
+host/device/request/command/digest/deadline binding, fences a not-yet-admitted
+request through its command journal, and cancels only that execution. The hard
+request deadline remains the final fallback. Notice handling may share the Host's
+MQTT connection owner, but a command lifetime is independent of any observation
+and of MQTT keepalive.
 
 ## Profile-owned connection configuration
 

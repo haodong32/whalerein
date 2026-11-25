@@ -69,7 +69,7 @@ External traffic is safe when:
 `/readyz` on Access reports these conditions. A broker that never receives a
 policy confirmation does not authorize external clients. `/readyz` does not
 report a Host's or client's relay epoch; use the Host/client diagnostics and the
-[cutover gate](../README.md#coordinated-relay-cutover-epoch-4).
+[cutover gate](../README.md#coordinated-relay-cutover-epoch-5).
 
 ## Operations
 
@@ -83,8 +83,8 @@ report a Host's or client's relay epoch; use the Host/client diagnostics and the
 - Revocation is complete only after PostgreSQL commit, a broker acknowledgement
   and the connection closure. `$CONTROL/whalerein/v1` returns the applied
   generation and the number of matched connections.
-- Schema rollback: the broker itself keeps its schema, but relay epoch 4
-  adds Access migrations for temporary ciphertext and request notices. The
+- Schema rollback: the broker itself keeps its schema, but relay epoch 5
+  adds Access migrations for query-scoped temporary ciphertext. The
   older Access binary rejects the newer ledger, so rollback is a whole-release
   restore, not a broker-only restart against the migrated database.
 
@@ -96,21 +96,34 @@ connection and the same per-connection policy:
 
 | Principal | Publish | Subscribe |
 |---|---|---|
-| Access | `.../request`, `.../d/{device_id}/event`, `.../d/{device_id}/notice`, `.../d/{device_id}/live`, `.../presence`, `$CONTROL/whalerein/v1` | `.../result`, `.../event`, `.../live`, `.../d/{device_id}/ready`, device last wills, control replies/events |
-| Host | own `.../result`, own `.../event`, own `.../live` | own `.../request`, own `.../presence` |
-| Device | own `.../d/{device_id}/ready`, own last will | own `.../d/{device_id}/event`, own `.../d/{device_id}/notice`, own `.../d/{device_id}/live` |
+| Access | `.../request`, `.../d/{device_id}/event`, `.../d/{device_id}/notice`, `.../d/{device_id}/reply`, `.../presence`, `$CONTROL/whalerein/v1` | `.../result`, `.../event`, `.../d/{device_id}/query`, `.../d/{device_id}/ready`, control replies/events |
+| Host | own `.../result`, own `.../event`, own `.../d/{device_id}/live` for granted devices | own `.../request`, own `.../presence` |
+| Device | own `.../d/{device_id}/ready`, own `.../d/{device_id}/query` | own `.../d/{device_id}/event`, own `.../d/{device_id}/notice`, own `.../d/{device_id}/reply`, own `.../d/{device_id}/live` |
 
-The control topics use QoS 1 and the Host live topic `.../live` and Device live
-topic `.../d/{device_id}/live` use QoS 0. The plugin ACL is topic-based: it
-authorizes the topic entry, while the client selects the publish/subscribe QoS.
-Live traffic uses only QoS 0: Access subscribes `h/+/live` and publishes the
-authenticated Device's `.../d/{device_id}/live`; a Host publishes only its own
-`.../live`; a Device subscribes only its own `.../live`. Access republishes the
-opaque live `EventEnvelope` without a durable row, outbox entry, receipt, notice
-or retry. A full Access live handoff slot or a failed QoS 0 publish drops the
-preview instead of blocking control traffic. The live class adds no broker
-volume, TLS route or service: it is the same connection with two extra topic
-shapes.
+Query and control topics use QoS 1; device previews use QoS 0. The plugin ACL
+is topic-based: it authorizes the topic entry, while the client selects the
+publish/subscribe QoS.
+
+The query lane is `.../d/{device_id}/query` -> Access admission -> existing
+`.../request` -> Host -> existing `.../result` -> Access -> `.../d/{device_id}/reply`.
+Access admits a query only with the Broker-stamped `whalerein-connection`
+property, the fixed reply topic, a matching Correlation Data and an unexpired
+deadline, and keeps the admitted connection and grant/enrollment scope without a
+durable request row. The Broker stamps the connection reference on external
+ingress and rejects a client-supplied copy. Directed replies carry
+`whalerein-target`; the plugin re-checks the target and current policy at final
+delivery, so a queued reply cannot reach a same-ID replacement or outlive a
+revoked grant.
+
+Previews are fire-and-forget from the Host directly to the granted Device's
+`.../d/{device_id}/live`; Access does not subscribe to or republish them. A
+failed QoS 0 publish drops the preview instead of blocking control traffic. The
+live class adds no broker volume, TLS route or service: it is the same
+connection with one topic shape.
+
+Device last wills are not a presence or revocation source. Ordered Broker
+lifecycle events, the broker epoch and snapshot reconciliation own scoped
+disconnects; a Will cannot identify the connection instance it replaced.
 
 The former `.../d/{device_id}/ack` topic does not exist and is denied in both
 directions. A grant revision change removes the old ACL entries, so a revoked
@@ -120,7 +133,8 @@ sibling reconnect does not clear another receiver's limits. Access publishes
 `notice` only from a durably committed status change, and a notice is not an
 execution acknowledgement.
 
-There is no fragment or transfer-receipt topic. A PUBLISH larger than
+No `.../live` Host topic exists in epoch 5. There is no fragment or
+transfer-receipt topic. A PUBLISH larger than
 `max_packet_size` is a broker/protocol error; Access must select inline or a
 reference before publishing, never truncate.
 

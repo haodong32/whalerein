@@ -1,16 +1,18 @@
-// Calculate the exact encoded epoch-4 request budget for fixture identities.
+// Calculate the exact encoded epoch-5 request budget for fixture identities.
 // No message contents, ciphertext or credential material are emitted.
 //
-// Epoch 4 keeps a small complete request inline and uploads a larger one as a
+// Epoch 5 keeps a small complete request inline and uploads a larger one as a
 // packet-sized body_reference. The admission bound is the complete sealed body
 // (the EncryptedFrame), not the plaintext. The reference envelope itself is
 // modeled too so a case can prove it is packet-sized and purpose-bound.
 import { codec } from '../../../../host/runtime/src/protocol.js'
-import { MESSAGE_BYTES, RELAY_VERSION, publishPacketBytes } from '../../../../host/runtime/src/access/transport.js'
+import { DEFAULT_TRANSPORT_PROFILE, RELAY_VERSION, transportProfileBudget } from '../../../../host/runtime/src/contracts/transport.js'
+import { maxPlaintextBytes, publishPacketBytes } from '../../../../host/runtime/src/access/packet.js'
 
 const [hostId, deviceId, sessionId, itemId] = process.argv.slice(2)
 const wire = codec()
-const RESULT_OVERHEAD_BYTES = 2048
+const budget = transportProfileBudget(DEFAULT_TRANSPORT_PROFILE)
+const HTTPS_BODY_OVERHEAD_BYTES = 1024 * 1024
 
 function encryptedFrame(size) {
   const request = itemId
@@ -34,7 +36,7 @@ function requestSize(size) {
     kind: 'REQUEST_KIND_COMMAND', command_id: 'b'.repeat(32), payload_digest: Buffer.alloc(32),
     expires_at_unix_ms: Date.now() + 30000, trace_id: 'c'.repeat(32), protocol_version: 1,
     channel_id: 'a'.repeat(32), relay_version: RELAY_VERSION, body: encryptedFrame(size),
-    transport: { result_max_bytes: Math.ceil(size / 3) * 4 + RESULT_OVERHEAD_BYTES, grant_generation: 1 },
+    transport: { result_max_bytes: Math.ceil(budget.envelope_bytes * 4 / 3) + HTTPS_BODY_OVERHEAD_BYTES },
   }).length
 }
 
@@ -56,31 +58,17 @@ function referenceSize(size) {
   return publishPacketBytes(`whalerein/v1/h/${hostId}/request`, header.length)
 }
 
-// The host builds the exact envelope with a fixed two-byte framing difference
-// from this planning model (measured against the Core admission check); remove
-// it so the reported boundary is the real one, not a conservative estimate.
-const ADMISSION_FRAMING_BYTES = 2
-const admittedSize = (size) => requestSize(size) - ADMISSION_FRAMING_BYTES
-
 // Largest plaintext whose complete inline request still fits the envelope bound.
-let low = 0
-let high = MESSAGE_BYTES
-while (low < high) {
-  const middle = Math.ceil((low + high) / 2)
-  if (admittedSize(middle) <= MESSAGE_BYTES) low = middle
-  else high = middle - 1
-}
-const at = low
-const sizes = [at - 1, at, at + 1].map(admittedSize)
-if (!(sizes[0] < sizes[1] && sizes[1] <= MESSAGE_BYTES && sizes[2] > MESSAGE_BYTES)) process.exit(1)
+const at = maxPlaintextBytes(requestSize, budget.envelope_bytes)
+const sizes = [at - 1, at, at + 1].map(requestSize)
+if (!(sizes[0] < sizes[1] && sizes[1] <= budget.envelope_bytes && sizes[2] > budget.envelope_bytes)) process.exit(1)
 const referencePacketBytes = referenceSize(at)
-const inlineAt = admittedSize(at)
 process.stdout.write(JSON.stringify({
   at,
-  wire_limit: MESSAGE_BYTES,
+  wire_limit: budget.envelope_bytes,
   sizes,
   over: sizes[2],
-  inline_request_bytes: inlineAt,
+  inline_request_bytes: sizes[1],
   reference_packet_bytes: referencePacketBytes,
-  reference_fits_packet: referencePacketBytes <= 65536,
+  reference_fits_packet: referencePacketBytes <= budget.packet_bytes,
 }) + '\n')

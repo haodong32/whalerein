@@ -17,12 +17,19 @@ if (!password) {
   process.exit(2)
 }
 
+function headerValue(payload, name) {
+  for (const line of payload.split('\n')) {
+    if (line.startsWith(`${name} `)) return line.slice(name.length + 1)
+  }
+  return ''
+}
+
 function parseClients(payload) {
   const clients = []
   for (const line of payload.split('\n')) {
     if (!line.startsWith('client ')) continue
     const parts = line.slice('client '.length).split(' ')
-    if (parts.length < 9) continue
+    if (parts.length < 11) continue
     clients.push({
       client_id: parts[0],
       kind: parts[1],
@@ -33,6 +40,8 @@ function parseClients(payload) {
       state: parts[6],
       sequence: Number(parts[7]),
       connected_at: Number(parts[8]),
+      session_id: parts[9],
+      ref: parts[10],
     })
   }
   return clients
@@ -67,7 +76,12 @@ try {
     { qos: 1 },
   )
   const payload = await reply
-  process.stdout.write(JSON.stringify({ clients: parseClients(payload) }))
+  process.stdout.write(JSON.stringify({
+    clients: parseClients(payload),
+    epoch: headerValue(payload, 'epoch'),
+    seq: Number(headerValue(payload, 'seq')),
+    revision: Number(headerValue(payload, 'revision')),
+  }))
 } catch {
   console.error('broker snapshot query failed')
   process.exitCode = 1

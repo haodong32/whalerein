@@ -80,8 +80,13 @@ func (e regionalGrantEnforcement) ApplyPairing(ctx context.Context, host, device
 	return err
 }
 
-func (e regionalGrantEnforcement) RevokeHostGrant(ctx context.Context, host, device string) error {
-	return e.data.RevokeGrant(ctx, host, device, time.Now().UTC())
+func (e regionalGrantEnforcement) EnforceRevocationScope(ctx context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	for _, grant := range scope.Grants {
+		if err := e.data.RevokeGrant(ctx, grant.HostID, grant.DeviceID, time.Now().UTC()); err != nil {
+			return store.EnforcementReceipt{Scope: scope}, err
+		}
+	}
+	return store.EnforcementReceipt{Scope: scope, Absent: true}, nil
 }
 
 // A Cloud-signed pairing survives a lost activation response, and Access denies

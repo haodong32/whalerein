@@ -1,6 +1,5 @@
 //! Read-only native wait slices with an overall monotonic deadline.
 use super::*;
-use crate::access::http::TransportObservation;
 use crate::api::types::{WaitInput, WaitObservation, WaitReason, WaitState};
 use tokio::time::{timeout, timeout_at, Instant};
 use whalerein_proto::{
@@ -26,75 +25,72 @@ fn wait_state(source: SessionWaitState) -> CoreResult<WaitState> {
     })
 }
 
-struct ObservationGuard {
-    core: Core,
-    host: String,
-    session: String,
+// A lost transient waiter cannot signal a Host or Access restart. Bound one
+// read so a new channel and read can still fit the user's original deadline.
+const MAX_WAIT_SLICE: Duration = Duration::from_secs(5);
+
+/// Cancellation uses the same Noise channel as the native wait. It cannot
+/// create a replacement channel or cancel a sibling observation during recovery.
+struct RemoteWait {
+    commands: Arc<CommandService>,
+    channel: crate::security::SecureChannel,
+    session_id: String,
     wait_id: String,
-    armed: bool,
+    active: bool,
 }
-impl Drop for ObservationGuard {
+
+impl RemoteWait {
+    async fn observe(&mut self, deadline: Instant) -> CoreResult<ResponsePayload> {
+        let payload = RequestPayload {
+            payload: Some(request_payload::Payload::WaitSession(WaitSession {
+                session_id: self.session_id.clone(),
+                wait_id: self.wait_id.clone(),
+                ..Default::default()
+            })),
+        };
+        let response = self
+            .commands
+            .query_wait(
+                self.channel.host_id(),
+                self.channel.device_id(),
+                &self.channel,
+                payload,
+                deadline,
+            )
+            .await;
+        // Dropping the in-flight future still triggers cancellation. A terminal
+        // reply, channel replacement or transport expiry owns its own cleanup.
+        self.active = false;
+        response
+    }
+}
+
+impl Drop for RemoteWait {
     fn drop(&mut self) {
-        if !self.armed {
+        if !self.active {
             return;
         }
-        let core = self.core.clone();
-        let host = self.host.clone();
-        let session_id = self.session.clone();
-        let wait_id = self.wait_id.clone();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            // The Host expiry remains the cleanup fallback after runtime exit.
             return;
         };
-        runtime.spawn(async move {
-            let cleanup = core.query(
-                &host,
-                RequestPayload {
-                    payload: Some(request_payload::Payload::CancelSessionWait(
-                        CancelSessionWait {
-                            session_id,
-                            wait_id,
-                        },
-                    )),
+        let commands = self.commands.clone();
+        let channel = self.channel.clone();
+        let payload = RequestPayload {
+            payload: Some(request_payload::Payload::CancelSessionWait(
+                CancelSessionWait {
+                    session_id: self.session_id.clone(),
+                    wait_id: self.wait_id.clone(),
                 },
-            );
-            let _ = timeout(Duration::from_millis(500), cleanup).await;
+            )),
+        };
+        runtime.spawn(async move {
+            let cancel = commands.query(channel.host_id(), channel.device_id(), &channel, payload);
+            let _ = timeout(Duration::from_millis(500), cancel).await;
         });
     }
 }
 
 impl Core {
-    async fn wait_slice_query(
-        &self,
-        host_id: &str,
-        payload: RequestPayload,
-        fresh: bool,
-        stale_channel_id: Option<&str>,
-        deadline: Instant,
-        transport: Arc<TransportObservation>,
-    ) -> Result<ResponsePayload, (CoreError, Option<String>)> {
-        let expected_session = self.cloud_session_id().map_err(|error| (error, None))?;
-        let config = self.require_config().map_err(|error| (error, None))?;
-        let channel = self
-            .ensure_wait_channel(host_id, fresh, stale_channel_id, transport.clone())
-            .await
-            .map_err(|error| (error, None))?;
-        let channel_id = channel.channel_id().to_owned();
-        self.command_service_for_session(expected_session.as_deref())
-            .await
-            .map_err(|error| (error, Some(channel_id.clone())))?
-            .query_wait(
-                host_id,
-                &config.device_id,
-                &channel,
-                payload,
-                deadline,
-                &transport,
-            )
-            .await
-            .map_err(|error| (error, Some(channel_id)))
-    }
-
     /// Read source state without activating a cold Agent.
     pub async fn read_wait_state(&self, key: &SessionKey) -> CoreResult<WaitState> {
         self.authorized_session(key)?;
@@ -137,118 +133,89 @@ impl Core {
         self.authorized_session(key)?;
         let session_id = key.session_id.as_str();
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let mut last = None;
-        let mut fresh = false;
-        let mut stale_channel_id = None;
+        let return_allowance = Duration::from_millis((timeout_ms / 5).min(500));
+        let mut stale_channel_id: Option<String> = None;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return last
-                    .map(|state| WaitObservation {
-                        session_id: session_id.into(),
-                        reason: WaitReason::Timeout,
-                        state,
-                    })
-                    .ok_or(CoreError::Timeout);
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(CoreError::Timeout);
             }
+            let slice_deadline = deadline.min(now + MAX_WAIT_SLICE);
             let wait_id = crate::util::random_id(16);
-            let transport = Arc::new(TransportObservation::default());
-            let mut guard = ObservationGuard {
-                core: self.clone(),
-                host: key.host_id.clone(),
-                session: session_id.into(),
-                wait_id: wait_id.clone(),
-                armed: true,
-            };
-            let payload = RequestPayload {
-                payload: Some(request_payload::Payload::WaitSession(WaitSession {
+            let mut attempted_channel = None;
+            let slice = async {
+                let expected_session = self.cloud_session_id()?;
+                let channel = self
+                    .ensure_channel_inner(
+                        &key.host_id,
+                        stale_channel_id.is_some(),
+                        stale_channel_id.as_deref(),
+                    )
+                    .await?;
+                attempted_channel = Some(channel.channel_id().to_owned());
+                let commands = self
+                    .command_service_for_session(expected_session.as_deref())
+                    .await?;
+                RemoteWait {
+                    commands: Arc::new(commands),
+                    channel,
                     session_id: session_id.into(),
                     wait_id: wait_id.clone(),
-                    // The command service derives this immediately before
-                    // sending, after channel acquisition and handshake.
-                    timeout_ms: 1,
-                })),
+                    active: true,
+                }
+                .observe(slice_deadline)
+                .await
             };
-            let response = match timeout_at(
-                deadline,
-                self.wait_slice_query(
-                    &key.host_id,
-                    payload,
-                    fresh,
-                    stale_channel_id.as_deref(),
-                    deadline,
-                    transport.clone(),
-                ),
-            )
-            .await
-            {
+            let response = match timeout_at(slice_deadline, slice).await {
                 Ok(Ok(result)) => {
-                    fresh = false;
                     stale_channel_id = None;
                     result
                 }
-                Ok(Err((error, failed_channel)))
+                Ok(Err(error))
                     if error.host_channel_replaced()
-                        || (!fresh
+                        || (stale_channel_id.is_none()
+                            && attempted_channel.is_some()
                             && (matches!(error, CoreError::ChannelMismatch)
                                 || error.device_authorization_lost())) =>
                 {
-                    // The old channel is no longer usable for a scoped cancel.
-                    // Its Host-side channel cleanup or expiry owns the old wait;
-                    // opening a second recovery handshake here can race the retry.
-                    guard.armed = false;
                     if error.device_authorization_lost() {
                         let checked: CoreResult<()> = timeout_at(deadline, self.settle(Err(error)))
                             .await
                             .unwrap_or(Err(CoreError::Timeout));
-                        if matches!(
-                            checked,
-                            Err(CoreError::Revoked | CoreError::RevokedRetentionUnverified)
-                        ) {
-                            return Err(checked.expect_err("revocation result"));
-                        }
-                        if matches!(checked, Err(CoreError::Timeout)) {
-                            return Err(CoreError::Timeout);
+                        if let Err(
+                            error @ (CoreError::Revoked
+                            | CoreError::RevokedRetentionUnverified
+                            | CoreError::Timeout),
+                        ) = checked
+                        {
+                            return Err(error);
                         }
                     }
-                    if fresh {
+                    if stale_channel_id.is_some() {
                         let delay = self.runtime.next_reconnect_delay(&key.host_id);
                         if timeout_at(deadline, tokio::time::sleep(delay))
                             .await
                             .is_err()
                         {
-                            return last
-                                .map(|state| WaitObservation {
-                                    session_id: session_id.into(),
-                                    reason: WaitReason::Timeout,
-                                    state,
-                                })
-                                .ok_or(CoreError::Timeout);
+                            return Err(CoreError::Timeout);
                         }
                     }
-                    fresh = true;
-                    stale_channel_id = failed_channel;
+                    stale_channel_id = attempted_channel;
                     continue;
                 }
-                Ok(Err((error, _))) => {
+                Ok(Err(CoreError::Timeout)) | Err(_) if slice_deadline < deadline => {
+                    if attempted_channel.is_some() {
+                        stale_channel_id = attempted_channel;
+                    }
+                    continue;
+                }
+                Ok(Err(error)) => {
                     return timeout_at(deadline, self.settle(Err(error)))
                         .await
                         .unwrap_or(Err(CoreError::Timeout));
                 }
-                Err(_) => {
-                    if let Some(error) = transport.latest_error() {
-                        return Err(error.into());
-                    }
-                    return last
-                        .map(|state| WaitObservation {
-                            session_id: session_id.into(),
-                            reason: WaitReason::Timeout,
-                            state,
-                        })
-                        .ok_or(CoreError::Timeout);
-                }
+                Err(_) => return Err(CoreError::Timeout),
             };
-            guard.armed = false;
             let Some(response_payload::Payload::SessionWaitResult(result)) = response.payload
             else {
                 return Err(CoreError::Internal("invalid wait response".into()));
@@ -260,24 +227,23 @@ impl Core {
                 .state
                 .ok_or_else(|| CoreError::Internal("missing wait state".into()))?;
             let state = wait_state(source)?;
-            match WireReason::try_from(result.reason) {
-                Ok(WireReason::WaitIdle) => {
-                    return Ok(WaitObservation {
-                        session_id: session_id.into(),
-                        reason: WaitReason::Idle,
-                        state,
-                    });
+            let reason = match WireReason::try_from(result.reason) {
+                Ok(WireReason::WaitIdle) => WaitReason::Idle,
+                Ok(WireReason::WaitInputRequired) => WaitReason::InputRequired,
+                Ok(WireReason::WaitTimeout) => {
+                    if deadline.saturating_duration_since(Instant::now()) > return_allowance {
+                        continue;
+                    }
+                    tokio::time::sleep_until(deadline).await;
+                    WaitReason::Timeout
                 }
-                Ok(WireReason::WaitInputRequired) => {
-                    return Ok(WaitObservation {
-                        session_id: session_id.into(),
-                        reason: WaitReason::InputRequired,
-                        state,
-                    });
-                }
-                Ok(WireReason::WaitTimeout) => last = Some(state),
                 _ => return Err(CoreError::Internal("invalid wait reason".into())),
-            }
+            };
+            return Ok(WaitObservation {
+                session_id: result.session_id,
+                reason,
+                state,
+            });
         }
     }
 }

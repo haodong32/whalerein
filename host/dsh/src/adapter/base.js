@@ -1,4 +1,5 @@
 import { mapAdapterError } from './errors.js'
+import { createHash } from 'node:crypto'
 // The DSH adapter boundary. Every DSH conversation API call, projection,
 // and subscription lives behind this interface; the rest of the plugin only
 // sees these plugin-owned types. Implementations throw AdapterError with a
@@ -11,6 +12,20 @@ import { AdapterError, DefinitiveExecutionError, PluginError } from 'whalerein-h
 
 export * from './native.js'
 export { summaryToProto } from 'whalerein-host/contracts/serialization.js'
+
+// A stable content-derived observation marker. It changes exactly when one of
+// the requested facet values changes, never on a mere read.
+function stableMarker(parts) {
+  const digest = createHash('sha256').update(JSON.stringify(parts)).digest()
+  const value = digest.readBigUInt64BE(0)
+  return String(value === 0n ? 1n : value)
+}
+
+function approvalMarker(approvals) {
+  return stableMarker((approvals ?? []).map(approval => [
+    approval.approvalId ?? '', String(approval.version ?? ''), approval.state ?? '',
+  ]))
+}
 
 export class DshAdapter extends SourceAdapter {
   #watchers = new Map()
@@ -192,6 +207,38 @@ export class DshAdapter extends SourceAdapter {
 
   readHistory(sessionId, read, options) { return this.conversation.history.read(sessionId, read, options) }
   readState(sessionId, options) { return this.conversation.state(sessionId, options) }
+
+  /**
+   * Cheap read-only version markers. It deliberately avoids the full state
+   * read, whose revision increments on every call: the returned revision is
+   * derived from the authoritative facet values instead.
+   */
+  async readVersionMarkers(sessionId, facets = {}, { signal } = {}) {
+    const markers = {}
+    if (facets.conversation === true) {
+      const head = await this.conversation.history.head(sessionId, { signal })
+      if (signal?.aborted) throw new AdapterError('unavailable')
+      const projection = this.conversation.history.projection(sessionId) ?? ''
+      const runPhase = await this.versionRunPhase(sessionId, { signal })
+      if (signal?.aborted) throw new AdapterError('unavailable')
+      const approvalsRevision = approvalMarker(await this.listApprovals(sessionId))
+      if (signal?.aborted) throw new AdapterError('unavailable')
+      markers.history_head = head
+      markers.projection_id = projection
+      markers.live_epoch = this.conversation.epoch
+      markers.run_phase = runPhase
+      markers.revision = stableMarker([head, projection, this.conversation.epoch, runPhase, approvalsRevision])
+    }
+    if (facets.questions === true) {
+      markers.questions = await this.readQuestionStamp(sessionId, { signal })
+    }
+    return markers
+  }
+
+  async versionRunPhase(sessionId, { signal } = {}) {
+    const summary = await this.getSession(sessionId, { signal })
+    return summary?.running ? 'RUNNING' : 'IDLE'
+  }
 
   // --- bounded native observation ----------------------------------------
   // Every native history/attachment/reply path consumes these hooks. The base

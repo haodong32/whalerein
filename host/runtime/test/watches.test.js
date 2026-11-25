@@ -5,7 +5,7 @@ import { WatchedEvents } from '../src/events/watches.js'
 import { StateStore } from '../src/state/store.js'
 import { SecurityManager } from '../src/security/manager.js'
 import { transportProfileBudget } from '../src/contracts/transport.js'
-import { publishPacketBytes } from '../src/access/transport.js'
+import { publishPacketBytes } from '../src/access/packet.js'
 import { generateKeypair } from '../src/security/noise.js'
 import { codec } from '../src/protocol.js'
 import { establishChannel, openEventEnvelope } from './support/channel.js'
@@ -18,14 +18,14 @@ class Source extends SourceAdapter {
   watch(id,sink){this.sinks.set(id,sink);return {close:()=>{this.closed++;this.sinks.delete(id)}}}
   async readHistory(id){return {session:{session_id:id},batch:{from_cursor:'bookmark:start',to_cursor:'bookmark:alpha',batch_id:'record:alpha',changes:[]},cut_cursor:'bookmark:alpha',complete:true}}
 }
-function fixture(access={connected:true,published:[],liveTopic:'whalerein/v1/h/h/live',async publishEvent(value){this.published.push(value)},async publishLive(value){this.published.push(value);return true}},source=new Source(),config={}) {
+function fixture(access={connected:true,published:[],liveTopic:'whalerein/v1/h/h/live',async publishEvent(value){this.published.push(value)},async publishLive(value){this.published.push(value);return true}},source=new Source(),config={},identity=generateKeypair()) {
   let now=100
   const store=new StateStore({path:':memory:'})
   const security=new SecurityManager({hostId:'h',identity:generateKeypair(),store,codec:codec(),now:()=>now})
-  const channel=establishChannel({hostId:'h',deviceId:'d',security,store})
+  const channel=establishChannel({hostId:'h',deviceId:'d',security,store,identity})
   const events=new WatchedEvents({hostId:'h',store,security,adapter:source,access,config,codec:codec(),now:()=>now})
   events.start()
-  return {events,source,store,security,channel,access,config,advance:ms=>{now+=ms}}
+  return {events,source,store,security,channel,access,config,identity,advance:ms=>{now+=ms}}
 }
 const CONV={conversation:true,questions:false}
 const settle=()=>new Promise(r=>setTimeout(r,30))
@@ -43,13 +43,17 @@ test('connected devices require a current observation and are deduplicated by De
   assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
   ctx.events.unwatch('d', ctx.channel.channelId, first.watch_id)
   assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
-  ctx.advance(first.lease_ms - 100)
+  // Epoch 5 observations are connection-owned: elapsed wall time alone never
+  // ends one. A channel replacement (or exact connection close) does.
+  ctx.advance(first.lease_ms)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
+  ctx.events.onChannelsCleared([{ deviceId: 'd', channelId: ctx.channel.channelId }])
   assert.deepEqual(ctx.events.observingDeviceIds(), ['second'])
   ctx.events.onChannelsCleared([{ deviceId: 'second', channelId: other.channelId }])
   assert.deepEqual(ctx.events.observingDeviceIds(), [])
 })
 
-test('an abrupt watcher exit expires only its lease while the Host and another watcher stay connected', async (t) => {
+test('a replaced channel ends only its own observation while another connection stays usable', async (t) => {
   const ctx = fixture()
   t.after(async () => { await ctx.events.stop(); ctx.store.close() })
   const other = establishChannel({ hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store })
@@ -58,13 +62,45 @@ test('an abrupt watcher exit expires only its lease while the Host and another w
   await ctx.events.watch('second', other.channelId, 's', undefined, CONV)
   assert.equal(ctx.access.connected, true, 'the Host transport stays connected')
   assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'])
-  // The first CLI exits without unwatch. Only its lease lapses.
-  ctx.advance(29_900)
+  // The first CLI exits without unwatch. Its connection close (not wall time)
+  // ends exactly its own observation.
+  ctx.advance(60_000)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d', 'second'], 'elapsed time does not renew or end an observation')
+  ctx.events.onConnectionClosed('d', ctx.channel.connectionRef)
   assert.deepEqual(ctx.events.observingDeviceIds(), ['second'])
-  assert.equal(ctx.access.connected, true, 'lease expiry does not disconnect the Host')
+  assert.equal(ctx.access.connected, true, 'a connection close does not disconnect the Host')
   assert.equal(ctx.events.describe().watches, 1, 'the other watcher still holds an active observation')
-  ctx.advance(200)
-  assert.deepEqual(ctx.events.observingDeviceIds(), [], 'every expired lease leaves no active observation')
+  ctx.events.onConnectionClosed('second', other.connectionRef)
+  assert.deepEqual(ctx.events.observingDeviceIds(), [], 'each connection close leaves no active observation')
+})
+
+test('a rotated client key replaces the observation of its retired channel only', async (t) => {
+  const ctx = fixture()
+  t.after(async () => { await ctx.events.stop(); ctx.store.close() })
+  const retired = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d'])
+  // Re-pairing persists the rotated public key, so only the new channel can
+  // handshake for this Device.
+  const rotatedIdentity = generateKeypair()
+  const rotated = establishChannel({
+    hostId: 'h', deviceId: 'd', security: ctx.security, store: ctx.store,
+    identity: rotatedIdentity, connectionRef: '0123456789abcdef:2',
+  })
+  // The retired key can no longer handshake for this Device.
+  assert.throws(() => establishChannel({
+    hostId: 'h', deviceId: 'd', security: ctx.security, store: ctx.store,
+    identity: ctx.identity, persistPeer: false, channelId: '0123456789abcdef',
+    connectionRef: '0123456789abcdef:3',
+  }), (error) => error.code === 'unauthorized')
+  const current = await ctx.events.watch('d', rotated.channelId, 's', undefined, CONV)
+  assert.notEqual(current.watch_id, retired.watch_id, 'a rotated key gets its own observation')
+  // The retired Broker connection closes; that ends exactly its observation and
+  // the rotated one keeps delivering.
+  ctx.events.onConnectionClosed('d', ctx.channel.connectionRef)
+  assert.equal(ctx.events.describe().watches, 1, 'the rotated observation survives')
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d'])
+  ctx.events.onConnectionClosed('d', rotated.connectionRef)
+  assert.deepEqual(ctx.events.observingDeviceIds(), [], 'closing the rotated connection ends it too')
 })
 
 function deferred() {
@@ -95,7 +131,7 @@ test('watch registration precedes the baseline, shares native watches, and deliv
  assert.equal(payload.update.live.delta.text.length,1)
  const page=await ctx.events.readHistory('s',{})
  assert.equal(page.session.host_id,'h')
- await ctx.events.refresh('d',ctx.channel.channelId,[ready.watch_id])
+ await ctx.events.versions('d', ctx.channel.channelId, 's')
  assert.throws(()=>ctx.events.unwatch('other',ctx.channel.channelId,ready.watch_id),e=>e.code==='expired')
  ctx.events.unwatch('d',ctx.channel.channelId,ready.watch_id)
  assert.equal(ctx.source.closed,1)
@@ -123,13 +159,15 @@ test('a stalled preview does not block committed updates, and a changed channel 
  release();await ctx.events.stop()
 })
 
-test('watch leases and source resource bounds reject invalid or expired selections without revoking identity',async()=>{
+test('version checks enforce their own scope without renewing or ending an observation',async()=>{
  const ctx=fixture(),ready=await ctx.events.watch('d',ctx.channel.channelId,'s',undefined,CONV)
  await assert.rejects(ctx.events.watch('other',ctx.channel.channelId,'s',undefined,CONV),e=>e.code==='unauthorized')
- await assert.rejects(ctx.events.refresh('d',ctx.channel.channelId,[ready.watch_id,ready.watch_id]),e=>e.code==='invalid_argument')
+ await assert.rejects(ctx.events.versions('d', ctx.channel.channelId, ''),e=>e.code==='invalid_argument')
  ctx.advance(30001)
- await assert.rejects(ctx.events.refresh('d',ctx.channel.channelId,[ready.watch_id]),e=>e.code==='expired')
+ assert.equal((await ctx.events.versions('d', ctx.channel.channelId, 's')).checks[0].watch_id, ready.watch_id)
  assert.ok(ctx.store.getPeerKey('d'))
+ ctx.events.onChannelsCleared([{ deviceId: 'd', channelId: ctx.channel.channelId }])
+ await assert.rejects(ctx.events.versions('d', ctx.channel.channelId, 's'),e=>e.code==='expired')
  await ctx.events.stop()
 })
 
@@ -181,25 +219,25 @@ test('while Access is offline, a committed publication stays queued and an unsuc
   assert.equal(ctx.store.countOutbox(), 1)
 })
 
-test('when refresh exceeds eight IDs or watch admission exceeds eight sessions, the host rejects without removing valid watches', async (t) => {
+test('watch admission rejects beyond eight sessions while a version check still returns markers', async (t) => {
   const ctx = fixture()
   t.after(() => ctx.events.stop())
   const ready = await ctx.events.watch('d', ctx.channel.channelId, 's',undefined,CONV)
-  await assert.rejects(ctx.events.refresh('d', ctx.channel.channelId, Array(9).fill(ready.watch_id)), error => error.code === 'invalid_argument')
+  await assert.rejects(ctx.events.versions('d', ctx.channel.channelId, ''), error => error.code === 'invalid_argument')
   for (let index = 0; index < 7; index++) await ctx.events.watch('d', ctx.channel.channelId, `other-${index}`,undefined,CONV)
   await assert.rejects(ctx.events.watch('d', ctx.channel.channelId, 'limit',undefined,CONV), error => error.code === 'rate_limited')
   assert.equal(ctx.events.describe().watches, 8)
-  const refreshed = await ctx.events.refresh('d', ctx.channel.channelId, [ready.watch_id])
-  assert.ok(refreshed)
+  const refreshed = await ctx.events.versions('d', ctx.channel.channelId, 's')
+  assert.equal(refreshed.checks[0].watch_id, ready.watch_id)
   assert.ok(ctx.store.getPeerKey('d'))
 })
 
-test('when its channel has been cleared, refreshing an existing watch rejects expired without revoking the peer', async (t) => {
+test('when its channel has been cleared, a version check rejects expired without revoking the peer', async (t) => {
   const ctx = fixture()
   t.after(() => ctx.events.stop())
   const ready = await ctx.events.watch('d', ctx.channel.channelId, 's',undefined,CONV)
   ctx.security.clearChannels()
-  await assert.rejects(ctx.events.refresh('d', ctx.channel.channelId, [ready.watch_id]), error => error.code === 'expired')
+  await assert.rejects(ctx.events.versions('d', ctx.channel.channelId, 's'), error => error.code === 'expired')
   assert.ok(ctx.store.getPeerKey('d'))
 })
 
@@ -478,8 +516,8 @@ test('session-observation/AC-06.unchanged refresh keeps the stamp without a cont
   const ready=await ctx.events.watch('d',ctx.channel.channelId,'s',undefined,QUESTIONS)
   source.sinks.get('s')({session:{session_id:'s'},questions_changed:true})
   await settle()
-  const refreshed=await ctx.events.refresh('d',ctx.channel.channelId,[ready.watch_id])
-  assert.deepEqual(refreshed.watches[0].questions.stamp,{observation_epoch:'epoch-one',revision:1})
+  const refreshed=await ctx.events.versions('d', ctx.channel.channelId, 's')
+  assert.deepEqual(refreshed.checks[0].questions.stamp,{observation_epoch:'epoch-one',revision:1})
   assert.equal(source.listCalls,0,'unchanged refresh performs no question-content page query')
   assert.equal(questionUpdates(ctx).length,0,'an unchanged stamp does not retransmit question content')
 })
@@ -489,8 +527,8 @@ test('session-observation/AC-09.lost final hint is repaired by the existing refr
   t.after(()=>ctx.events.stop())
   const ready=await ctx.events.watch('d',ctx.channel.channelId,'s',undefined,QUESTIONS)
   source.stamp={observation_epoch:'epoch-one',revision:2}
-  const refreshed=await ctx.events.refresh('d',ctx.channel.channelId,[ready.watch_id])
-  assert.equal(refreshed.watches[0].questions.stamp.revision,2)
+  const refreshed=await ctx.events.versions('d', ctx.channel.channelId, 's')
+  assert.equal(refreshed.checks[0].questions.stamp.revision,2)
   assert.equal(source.listCalls,0)
   assert.equal(questionUpdates(ctx).length,0,'refresh carries the new stamp without new history output')
 })
@@ -569,8 +607,8 @@ test('session-observation/AC-08.a failed reconciliation is explicit and later co
   const repaired=questionUpdates(ctx).at(-1)
   assert.equal(repaired.availability,'QUESTION_AVAILABILITY_AVAILABLE')
   assert.equal(repaired.stamp.revision,2)
-  const refreshed=await ctx.events.refresh('d',ctx.channel.channelId,[ready.watch_id])
-  assert.deepEqual(refreshed.watches[0].questions.stamp,{observation_epoch:'epoch-one',revision:2})
+  const refreshed=await ctx.events.versions('d', ctx.channel.channelId, 's')
+  assert.deepEqual(refreshed.checks[0].questions.stamp,{observation_epoch:'epoch-one',revision:2})
 })
 
 test('a source that no longer has the session closes the watch with a terminal event', async (t) => {
@@ -582,7 +620,7 @@ test('a source that no longer has the session closes the watch with a terminal e
     error.code = 'not_found'
     throw error
   }
-  await assert.rejects(ctx.events.refresh('d', ctx.channel.channelId, [watch.watch_id]), error => error.code === 'not_found')
+  await assert.rejects(ctx.events.versions('d', ctx.channel.channelId, 's'), error => error.code === 'not_found')
   assert.equal(ctx.access.published.length, 1, 'the terminal close must be delivered')
   const outer = codec().decode('whalerein.v1.EventEnvelope', ctx.access.published[0])
   const payload = openEventEnvelope({ envelope: outer, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
@@ -717,7 +755,7 @@ test('a shared event route uses a relation-valid overridden receive budget as it
   }
   const other = establishChannel({
     hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store,
-    receive: { profile: 'TRANSPORT_PROFILE_DEFAULT', budget: override, connection_generation: 9, relay_version: 4 },
+    receive: { profile: 'TRANSPORT_PROFILE_DEFAULT', budget: override, connection_generation: 9, relay_version: 5 },
   })
   assert.equal(ctx.security.getChannelReceive(other.channelId).budget.envelope_bytes, 2048)
   await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
@@ -759,14 +797,14 @@ test('an oversized live delta is split before sealing into packet-sized previews
   })
   await settle()
   assert.ok(ctx.access.published.length > 1, 'a 8 KiB delta cannot be one 2 KiB packet')
-  const topic = 'whalerein/v1/h/h/live'
+  const topic = 'whalerein/v1/h/h/d/d/live'
   const intervals = []
   const texts = []
   for (const bytes of ctx.access.published) {
     const packetSize = publishPacketBytes(topic, bytes.length, { qos: 0 })
     assert.ok(packetSize <= transportBudget.packet_bytes, `${packetSize} > ${transportBudget.packet_bytes}`)
     const envelope = codec().decode('whalerein.v1.EventEnvelope', bytes)
-    assert.equal(envelope.relay_version, 4)
+    assert.equal(envelope.relay_version, 5)
     assert.equal((envelope.ciphertext ?? new Uint8Array(0)).length > 0, true, 'previews stay inline on MQTT')
     const payload = openEventEnvelope({ envelope, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
     assert.equal(payload.update.reset, undefined, 'a live preview never becomes a HistoryReset')
@@ -784,7 +822,7 @@ test('an oversized live delta is split before sealing into packet-sized previews
   }
 })
 
-test('a shared route uses the smallest authenticated receive budget for every preview', async (t) => {
+test('each device receive budget governs its own direct preview route', async (t) => {
   const ctx = fixture()
   t.after(async () => { await ctx.events.stop(); ctx.store.close() })
   const override = {
@@ -797,7 +835,7 @@ test('a shared route uses the smallest authenticated receive budget for every pr
     hostId: 'h', deviceId: 'second', security: ctx.security, store: ctx.store,
     receive: {
       profile: 'TRANSPORT_PROFILE_DEFAULT', budget: override,
-      connection_generation: 9, relay_version: 4,
+      connection_generation: 9, relay_version: 5,
     },
   })
   await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
@@ -813,13 +851,12 @@ test('a shared route uses the smallest authenticated receive budget for every pr
   })
   await settle()
   assert.ok(ctx.access.published.length >= 2, 'both recipients receive bounded previews')
-  const topic = 'whalerein/v1/h/h/live'
-  for (const bytes of ctx.access.published) {
-    assert.ok(publishPacketBytes(topic, bytes.length, { qos: 0 }) <= 3000, 'the smaller receiver budget governs the shared route')
-  }
   const perDevice = new Map()
+  const budgets = { d: transportProfileBudget('default').packet_bytes, second: override.packet_bytes }
   for (const bytes of ctx.access.published) {
     const envelope = codec().decode('whalerein.v1.EventEnvelope', bytes)
+    const topic = `whalerein/v1/h/h/d/${envelope.device_id}/live`
+    assert.ok(publishPacketBytes(topic, bytes.length, { qos: 0 }) <= budgets[envelope.device_id], `${envelope.device_id} obeys its own receive budget`)
     perDevice.set(envelope.device_id, (perDevice.get(envelope.device_id) ?? 0) + 1)
   }
   assert.equal(perDevice.get('d') > 0, true)
@@ -1062,7 +1099,7 @@ test('context or unknown authorship cannot smuggle a user body into a watch', as
   assert.equal(ctx.access.published.length, 0)
 })
 
-test('a lease answer carries transition markers only, never session state', async (t) => {
+test('a version check carries transition markers only, never session state', async (t) => {
   const ctx = fixture()
   t.after(() => ctx.events.stop())
   const baseline = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
@@ -1075,14 +1112,14 @@ test('a lease answer carries transition markers only, never session state', asyn
       reason: 'x'.repeat(200), digest: new Uint8Array([1]), version: 1, expires_at_unix_ms: 1,
     })),
   })
-  const refreshed = await ctx.events.refresh('d', ctx.channel.channelId, [baseline.watch_id])
-  const lease = refreshed.watches[0]
-  assert.equal(lease.state, undefined, 'a lease never repeats the baseline')
-  assert.equal(lease.watch_id, baseline.watch_id)
-  assert.ok(lease.revision !== undefined)
-  assert.ok(lease.live_epoch)
-  assert.equal(lease.projection_id, 'projection-1')
-  assert.ok(JSON.stringify(lease).length < 512, 'lease size does not grow with the session')
+  const refreshed = await ctx.events.versions('d', ctx.channel.channelId, 's')
+  const check = refreshed.checks[0]
+  assert.equal(check.state, undefined, 'a version check never repeats the baseline')
+  assert.equal(check.watch_id, baseline.watch_id)
+  assert.ok(check.revision !== undefined)
+  assert.ok(check.live_epoch)
+  assert.equal(check.projection_id, 'projection-1')
+  assert.ok(JSON.stringify(check).length < 512, 'version markers do not grow with the session')
 })
 
 test('a session state never carries approvals, in a baseline or in a delivered update', async (t) => {
@@ -1104,4 +1141,61 @@ test('a session state never carries approvals, in a baseline or in a delivered u
   const delivered = deliveredUpdates(ctx).find(update => update.state)
   assert.ok(delivered, 'the state update is delivered')
   assert.equal(delivered.state.approvals, undefined, 'an update carries markers, not approvals')
+})
+
+test('overlapping version checks coalesce one authoritative read per session and facet', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  const gate = Promise.withResolvers()
+  const reads = []
+  ctx.source.readVersionMarkers = async (sessionId, facets) => {
+    reads.push(facets)
+    await gate.promise
+    return { revision: 7, run_phase: 'IDLE', live_epoch: 'run-native', history_head: 'bookmark:alpha', projection_id: 'p1' }
+  }
+  const ready = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  const first = ctx.events.versions('d', ctx.channel.channelId, 's')
+  const second = ctx.events.versions('d', ctx.channel.channelId, 's')
+  await tick()
+  assert.equal(reads.length, 1, 'one shared conversation read')
+  assert.deepEqual(reads[0], { conversation: true })
+  gate.resolve()
+  const [left, right] = await Promise.all([first, second])
+  assert.equal(left.checks[0].watch_id, ready.watch_id)
+  assert.equal(right.checks[0].watch_id, ready.watch_id)
+  assert.equal(left.checks[0].revision, 7)
+  assert.equal(reads.length, 1, 'the overlapping check never repeats the read')
+})
+
+test('a questions-only version check never reads conversation facets', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  const reads = []
+  let conversationReads = 0
+  ctx.source.readVersionMarkers = async (sessionId, facets) => {
+    reads.push(facets)
+    if (facets.conversation) conversationReads++
+    return facets.questions
+      ? { questions: { availability: 'available', stamp: { observation_epoch: 'e', revision: 2 } } }
+      : { revision: 1 }
+  }
+  ctx.source.readQuestionStamp = async () => ({ availability: 'available', stamp: { observation_epoch: 'e', revision: 2 } })
+  const ready = await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, QUESTIONS)
+  const result = await ctx.events.versions('d', ctx.channel.channelId, 's')
+  assert.deepEqual(reads, [{ questions: true }])
+  assert.equal(conversationReads, 0, 'questions-only checks never touch conversation')
+  assert.equal(result.checks[0].watch_id, ready.watch_id)
+  assert.deepEqual(result.checks[0].questions.stamp, { observation_epoch: 'e', revision: 2 })
+})
+
+test('a transient version failure leaves the observation active and its data stale', async (t) => {
+  const ctx = fixture()
+  t.after(() => ctx.events.stop())
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.source.readVersionMarkers = async () => {
+    throw Object.assign(new Error('temporary'), { code: 'unavailable' })
+  }
+  await assert.rejects(ctx.events.versions('d', ctx.channel.channelId, 's'), error => error.code === 'unavailable')
+  assert.equal(ctx.events.describe().watches, 1, 'a transient failure never closes the observation')
+  assert.deepEqual(ctx.events.observingDeviceIds(), ['d'])
 })

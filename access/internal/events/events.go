@@ -23,10 +23,10 @@ type Admission interface {
 	Check(hostID, deviceID string) (allowed bool, known bool)
 }
 
-// Broker publishes control events and lossy live previews to the device topic.
+// Broker publishes validated control events to the device topic. Previews are
+// published directly by the Host and never pass through Access.
 type Broker interface {
 	PublishDeviceEvent(ctx context.Context, hostID, deviceID string, payload []byte) error
-	PublishDeviceLive(ctx context.Context, hostID, deviceID string, payload []byte) error
 }
 
 // Dependencies wires the event router.
@@ -82,20 +82,6 @@ func (h *Handler) Handle(ctx context.Context, topicHost string, payload []byte) 
 	}
 	if err := h.broker.PublishDeviceEvent(ctx, hostID, deviceID, payload); err != nil {
 		return fmt.Errorf("events: publish: %w", err)
-	}
-	return nil
-}
-
-// HandleLive uses the same envelope validation and admission check as control
-// events, then republishes the exact QoS 0 preview. It never persists, queues or
-// retries: a broker-level drop is a normal nil outcome.
-func (h *Handler) HandleLive(ctx context.Context, topicHost string, payload []byte) error {
-	hostID, deviceID, err := h.route(topicHost, payload, "live preview")
-	if err != nil || hostID == "" {
-		return err
-	}
-	if err := h.broker.PublishDeviceLive(ctx, hostID, deviceID, payload); err != nil {
-		return fmt.Errorf("events: live publish: %w", err)
 	}
 	return nil
 }

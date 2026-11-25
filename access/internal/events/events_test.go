@@ -30,13 +30,11 @@ func (f *fakeAdmission) Check(hostID, deviceID string) (bool, bool) {
 }
 
 type fakeBroker struct {
-	hostID    string
-	deviceID  string
-	payload   []byte
-	err       error
-	calls     int
-	liveCalls int
-	liveErr   error
+	hostID   string
+	deviceID string
+	payload  []byte
+	err      error
+	calls    int
 }
 
 func (f *fakeBroker) PublishDeviceEvent(_ context.Context, hostID, deviceID string, payload []byte) error {
@@ -45,14 +43,6 @@ func (f *fakeBroker) PublishDeviceEvent(_ context.Context, hostID, deviceID stri
 	f.deviceID = deviceID
 	f.payload = append([]byte(nil), payload...)
 	return f.err
-}
-
-func (f *fakeBroker) PublishDeviceLive(_ context.Context, hostID, deviceID string, payload []byte) error {
-	f.liveCalls++
-	f.hostID = hostID
-	f.deviceID = deviceID
-	f.payload = append([]byte(nil), payload...)
-	return f.liveErr
 }
 
 func envelope(t *testing.T, hostID, deviceID string) []byte {
@@ -153,35 +143,5 @@ func TestHandleRejectsMalformedEventEnvelopes(t *testing.T) {
 	broker.err = errors.New("mqtt down")
 	if err := handler.Handle(context.Background(), "h1", envelope(t, "h1", "d1")); err == nil {
 		t.Fatal("publish error")
-	}
-}
-
-func TestHandleLiveUsesTheSameGrantCheckAndOnlyTheLivePublisher(t *testing.T) {
-	handler, admission, broker := newHandler(t)
-	payload := envelope(t, "h1", "d1")
-	if err := handler.HandleLive(context.Background(), "h1", payload); err != nil {
-		t.Fatal(err)
-	}
-	if broker.liveCalls != 1 || broker.calls != 0 || broker.hostID != "h1" || broker.deviceID != "d1" ||
-		string(broker.payload) != string(payload) {
-		t.Fatalf("broker = %+v", broker)
-	}
-	admission.grants["h1|d1"] = admissionState{allowed: false, known: true}
-	if err := handler.HandleLive(context.Background(), "h1", envelope(t, "h1", "d1")); err != nil {
-		t.Fatalf("denied live preview returned an error: %v", err)
-	}
-	if broker.liveCalls != 1 || broker.calls != 0 {
-		t.Fatal("denied live preview was published")
-	}
-	admission.grants["h1|d1"] = admissionState{allowed: true, known: true}
-	if err := handler.HandleLive(context.Background(), "h1", []byte("bad")); err == nil {
-		t.Fatal("malformed live envelope accepted")
-	}
-	if err := handler.HandleLive(context.Background(), "h1", envelope(t, "h2", "d1")); err == nil {
-		t.Fatal("live host mismatch accepted")
-	}
-	broker.liveErr = errors.New("mqtt down")
-	if err := handler.HandleLive(context.Background(), "h1", payload); err == nil {
-		t.Fatal("live publish error ignored")
 	}
 }

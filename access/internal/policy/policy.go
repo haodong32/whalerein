@@ -22,8 +22,8 @@ const (
 
 // Topic grammar shared with the wire contract.
 const (
-	topicRoot     = "whalerein/v1/h/"
-	presenceRoot  = "whalerein/v1/presence/device/"
+	topicRoot = "whalerein/v1/h/"
+
 	controlPrefix = "$CONTROL/whalerein/v1"
 )
 
@@ -70,10 +70,30 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 			{Access: "read", Filter: topicRoot + hostID + "/presence"},
 			{Access: "write", Filter: topicRoot + hostID + "/result"},
 			{Access: "write", Filter: topicRoot + hostID + "/event"},
-			{Access: "write", Filter: topicRoot + hostID + "/live"},
+			// Direct previews target a granted device. The publisher filter is
+			// scoped to this Host's device subtree; Broker delivery still
+			// requires the receiving device's own grant, so an unscoped topic
+			// cannot reach a device without one.
+			{Access: "write", Filter: topicRoot + hostID + "/d/+/live"},
+		}
+		// Direct QoS 0 previews are published by the Host for each Device it
+		// is currently authorized for. The retired h/{host}/live relay entry
+		// is never projected again.
+		for _, grant := range grants {
+			if !grant.Active || grant.HostID != hostID || grant.DeviceID == "" {
+				continue
+			}
+			revision := Revision(grant)
+			connection.Entries = append(connection.Entries,
+				Entry{Access: "write", Revision: revision, HostID: hostID,
+					Filter: topicRoot + hostID + "/d/" + grant.DeviceID + "/live"})
+			if revision > connection.Revision {
+				connection.Revision = revision
+			}
 		}
 	case KindDevice:
-		connection.Will = presenceRoot + deviceID
+		// Epoch 5 derives presence from Broker lifecycle notifications; no
+		// Device Will is published or ingested.
 		seen := map[string]struct{}{}
 		for _, grant := range grants {
 			if !grant.Active || grant.HostID == "" {
@@ -87,6 +107,8 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 			eventTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/event"
 			noticeTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/notice"
 			liveTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/live"
+			queryTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/query"
+			replyTopic := topicRoot + grant.HostID + "/d/" + deviceID + "/reply"
 			connection.Entries = append(connection.Entries,
 				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: eventTopic},
 				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: eventTopic},
@@ -94,14 +116,15 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: noticeTopic},
 				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: liveTopic},
 				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: liveTopic},
+				Entry{Access: "subscribe", Revision: revision, HostID: grant.HostID, Filter: replyTopic},
+				Entry{Access: "read", Revision: revision, HostID: grant.HostID, Filter: replyTopic},
+				Entry{Access: "write", Revision: revision, HostID: grant.HostID, Filter: queryTopic},
 				Entry{Access: "write", Revision: revision, HostID: grant.HostID, Filter: topicRoot + grant.HostID + "/d/" + deviceID + "/ready"},
 			)
 			if revision > connection.Revision {
 				connection.Revision = revision
 			}
 		}
-		connection.Entries = append(connection.Entries,
-			Entry{Access: "write", Revision: connection.Revision, Filter: presenceRoot + deviceID})
 	case KindProbe:
 		// Probe clients prove credential acceptance only and receive no topic.
 	case KindAccess:
@@ -122,13 +145,10 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 
 // WillAllowed reports whether a CONNECT Will topic is inside the policy.
 func (c Connection) WillAllowed(topic string) bool {
-	if topic == "" {
-		return true
-	}
-	if c.Kind != KindDevice || c.Will == "" || topic != c.Will {
-		return false
-	}
-	return true
+	// The epoch-5 cohort has no Device Will. A CONNECT without one is allowed;
+	// a CONNECT that asks for one is rejected rather than accepted as a hidden
+	// presence fallback.
+	return topic == ""
 }
 
 // Format renders the versioned broker policy response.

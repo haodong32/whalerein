@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Exercise the supported adjacent-version upgrade window against a scratch
-# PostgreSQL instance, plus the static epoch-4 deployment prerequisites.
+# PostgreSQL instance, plus the static epoch-5 deployment prerequisites.
 #
 # Usage:
 #   deploy/tests/rolling-upgrade-matrix.sh --static
@@ -15,7 +15,7 @@
 #
 # It verifies:
 #   0. static prerequisites: payload volume/config, broker/profile alignment,
-#      relay epoch 4, relay topics, storage readiness and no legacy ack topic;
+#      relay epoch 5, relay topics, storage readiness and no legacy ack topic;
 #   1. the rendered standalone transport/storage settings validate and invalid
 #      profiles are rejected before any listener opens;
 #   2. an old binary migrates an empty database;
@@ -80,27 +80,35 @@ deny_static_file() {
   fi
 }
 
-echo "==> static preflight: relay epoch 4"
+echo "==> static preflight: relay epoch 5"
 require_static_file "broker relay epoch constant" \
-  '^const RelayEpoch uint32 = 4$' "$ROOT_DIR/access/internal/broker/budget.go"
+  '^const RelayEpoch uint32 = 5$' "$ROOT_DIR/access/internal/broker/budget.go"
 require_static_file "proto relay epoch value" \
-  'RELAY_EPOCH_V4 = 4;' "$ROOT_DIR/proto/v1/whalerein.proto"
-require_static_file "wire contract requires relay_version=4" \
-  'relay_version=4' "$ROOT_DIR/proto/v1/WIRE.md"
-if grep -qE 'RELAY_EPOCH_V3 = 3;' "$ROOT_DIR/proto/v1/whalerein.proto"; then
-  fail "retired relay epoch 3 is still accepted"
+  'RELAY_EPOCH_V5 = 5;' "$ROOT_DIR/proto/v1/whalerein.proto"
+require_static_file "wire contract requires relay_version=5" \
+  'epoch 5' "$ROOT_DIR/proto/v1/WIRE.md"
+if grep -qE 'RELAY_EPOCH_V[34] = [34];' "$ROOT_DIR/proto/v1/whalerein.proto"; then
+  fail "retired relay epoch 3 or 4 is still accepted"
 fi
 
 echo "==> static preflight: complete-message topics and retired ack topic"
 require_static_file "device notice topic" 'func DeviceNoticeTopic' "$ROOT_DIR/access/internal/broker/topics.go"
 require_static_file "device ready topic" 'func DeviceReadyTopic' "$ROOT_DIR/access/internal/broker/topics.go"
-require_static_file "host live topic" 'func LiveTopic' "$ROOT_DIR/access/internal/broker/topics.go"
+require_static_file "device query topic" 'func DeviceQueryTopic' "$ROOT_DIR/access/internal/broker/topics.go"
+require_static_file "device reply topic" 'func DeviceReplyTopic' "$ROOT_DIR/access/internal/broker/topics.go"
 require_static_file "device live topic" 'func DeviceLiveTopic' "$ROOT_DIR/access/internal/broker/topics.go"
 require_static_file "readiness rejects foreign epoch" \
   'ErrRelayEpoch' "$ROOT_DIR/access/internal/broker/budget.go"
-for topic in request result event "/notice" "/ready" "/live"; do
+for topic in request result event "/notice" "/ready" "/query" "/reply" "/live"; do
   require_static_file "wire topic $topic" "$topic" "$ROOT_DIR/proto/v1/WIRE.md"
 done
+if grep -qE '^func LiveTopic' "$ROOT_DIR/access/internal/broker/topics.go"; then
+  fail "retired Host live topic is still published"
+fi
+require_static_file "broker-stamped connection property" \
+  'whalerein-connection' "$ROOT_DIR/deploy/mosquitto/plugin/whalerein.c"
+require_static_file "read-only observation version check" \
+  'CheckVersions' "$ROOT_DIR/proto/v1/whalerein.proto"
 deny_static_file "ACK topic in the broker topic parser" '"ack"' "$ROOT_DIR/access/internal/broker/topics.go"
 deny_static_file "legacy WRMQTT2 framing" 'WRMQTT2' "$ROOT_DIR/access/internal/broker"
 

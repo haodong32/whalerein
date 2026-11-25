@@ -330,7 +330,6 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 				t.Fatal(err)
 			}
 			authHash := bytes.Repeat([]byte{5}, 32)
-			seedLegacyDevice(t, s, "host", "device")
 			// The pre-010 schema has no Cloud-session trigger or authority
 			// view. Create disposable stand-ins so this test can rewind them
 			// while exercising the production migration path.
@@ -349,6 +348,13 @@ func TestPairingCommitProofMigrationPreservesLegacyState(t *testing.T) {
 			op, notice := fixturePairingOperation(t, s, hash, "host", "device", "claim", now, nil)
 			if accepted, err := s.CommitPairing(ctx, hash, "host", "device", fixtureKeyPin(3), authHash, now, notice, &op); err != nil || !accepted {
 				t.Fatalf("seed legacy commit: accepted=%v err=%v", accepted, err)
+			}
+			ack, err := proto.Marshal(&whalereinv1.PairingClaimResult{Authorized: true, DeviceId: "device"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Pool().Exec(ctx, `UPDATE requests SET status='succeeded',result_body=$2,updated_at=$3 WHERE request_id=$1`, notice.RequestId, ack, now); err != nil {
+				t.Fatal(err)
 			}
 			if missingBody {
 				if _, err := s.Pool().Exec(ctx, `UPDATE requests SET request_body=''::bytea WHERE request_id=$1`, notice.RequestId); err != nil {

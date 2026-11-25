@@ -11,30 +11,10 @@ import {
   BROKER_PACKET_LIMIT_BYTES,
   RELAY_VERSION,
   transportProfileBudget,
-  validateReceiveAdvertisement,
   validateTransportBudget,
 } from '../contracts/transport.js'
-import {
-  effectivePacketBytes,
-  maxPlaintextBytes,
-  publishPacketBytes,
-  varintBytes,
-} from './packet.js'
+import { effectivePacketBytes, publishPacketBytes } from './packet.js'
 import { validatePayloadReference } from './relay-client.js'
-
-export {
-  BROKER_PACKET_LIMIT_BYTES,
-  RELAY_VERSION,
-  effectivePacketBytes,
-  maxPlaintextBytes,
-  publishPacketBytes,
-  varintBytes,
-}
-
-// Compatibility exports for the packaged default profile. Live code takes the
-// value from the resolved transport budget instead of these constants.
-export const PACKET_BYTES = 64 * 1024
-export const MESSAGE_BYTES = 16 * 1024 * 1024
 
 const EMPTY = new Uint8Array(0)
 const DEFAULT_OBJECT_TTL_MS = 5 * 60 * 1000
@@ -42,28 +22,19 @@ const DEFAULT_OBJECT_TTL_MS = 5 * 60 * 1000
 const DESCRIPTORS = Object.freeze({
   result: Object.freeze({
     type: 'whalerein.v1.HostResult',
+    validate: assertResultRepresentation,
     inline: 'result_body',
     reference: 'result_reference',
     purpose: 'PAYLOAD_PURPOSE_RESULT',
   }),
   event: Object.freeze({
     type: 'whalerein.v1.EventEnvelope',
+    validate: assertEventRepresentation,
     inline: 'ciphertext',
     reference: 'payload_reference',
     purpose: 'PAYLOAD_PURPOSE_EVENT',
   }),
-  request: Object.freeze({
-    type: 'whalerein.v1.HostRequest',
-    purpose: 'PAYLOAD_PURPOSE_REQUEST',
-  }),
 })
-
-function descriptorFor(kind, topic = '') {
-  if (kind && DESCRIPTORS[kind]) return DESCRIPTORS[kind]
-  if (typeof topic === 'string' && topic.endsWith('/result')) return DESCRIPTORS.result
-  if (typeof topic === 'string' && topic.endsWith('/event')) return DESCRIPTORS.event
-  return DESCRIPTORS.request
-}
 
 function present(value) {
   return value instanceof Uint8Array && value.length > 0
@@ -73,7 +44,7 @@ function present(value) {
 export function assertRelayEpoch(envelope) {
   const epoch = envelope?.relay_version
   if (Number(epoch) !== RELAY_VERSION) {
-    throw new PluginError('protocol_version_incompatible', 'relay epoch is not 4')
+    throw new PluginError('protocol_version_incompatible', `relay epoch is not ${RELAY_VERSION}; upgrade the sender`)
   }
   return envelope
 }
@@ -181,10 +152,6 @@ export class RelayTransport {
     this.objectTtlMs = Number.isSafeInteger(objectTtlMs) && objectTtlMs > 0 ? objectTtlMs : DEFAULT_OBJECT_TTL_MS
   }
 
-  get envelopeBytes() {
-    return this.budget.envelope_bytes
-  }
-
   /** Effective packet limit for the Host -> Access hop in one direction. */
   effectivePacketLimit(receiverLimit) {
     return effectivePacketBytes(this.budget.packet_bytes, this.brokerPacketBytes, receiverLimit)
@@ -212,17 +179,23 @@ export class RelayTransport {
   /**
    * Publish one complete serialized envelope.
    *
-   * options.kind selects the envelope contract (`result`, `event` or
-   * `request`). options.receiverLimit is the authenticated Access
+   * options.kind selects the outgoing envelope contract (`result` or
+   * `event`). options.receiverLimit is the authenticated Access
    * advertisement for this hop. options.expiresAt, sessionId, partId and
    * deviceId/channelId describe the relay-object scope for a reference.
+   * options.properties (MQTT 5 PUBLISH properties) and options.propertiesBytes
+   * (their exact encoded length) are carried on every representation so packet
+   * accounting includes Correlation Data and Message Expiry.
    */
   sendComplete(topic, envelopeBytes, options = {}) {
     if (!(envelopeBytes instanceof Uint8Array) || envelopeBytes.length === 0) {
       return Promise.reject(new PluginError('invalid_argument', 'empty relay envelope'))
     }
+    const propertiesBytes = Number.isSafeInteger(options.propertiesBytes) && options.propertiesBytes > 0
+      ? options.propertiesBytes
+      : 0
     const bytes = Buffer.from(envelopeBytes)
-    return this.#chain(topic, () => this.#sendComplete(topic, bytes, options))
+    return this.#chain(topic, () => this.#sendComplete(topic, bytes, { ...options, propertiesBytes }))
   }
 
   /**
@@ -293,33 +266,31 @@ export class RelayTransport {
 
   async #sendComplete(topic, envelopeBytes, options) {
     const generation = this.#generation
-    const descriptor = descriptorFor(options.kind, topic)
-    if (descriptor.inline === undefined) {
+    if (!Object.hasOwn(DESCRIPTORS, options.kind)) {
       throw new PluginError('invalid_argument', 'unsupported relay envelope kind')
     }
+    const descriptor = DESCRIPTORS[options.kind]
     const envelope = this.codec.decode(descriptor.type, envelopeBytes)
     assertRelayEpoch(envelope)
-    if (descriptor.type === 'whalerein.v1.HostResult') assertResultRepresentation(envelope)
-    else assertEventRepresentation(envelope)
+    descriptor.validate(envelope)
 
     const limit = this.effectivePacketLimit(options.receiverLimit)
     const envelopeLimit = Number.isSafeInteger(options.envelopeLimit) && options.envelopeLimit > 0
       ? Math.min(this.budget.envelope_bytes, options.envelopeLimit)
       : this.budget.envelope_bytes
-    const encoded = publishPacketBytes(topic, envelopeBytes.length)
+    const { propertiesBytes } = options
+    const publishOptions = options.properties === undefined ? undefined : { properties: options.properties }
+    const encoded = publishPacketBytes(topic, envelopeBytes.length, { propertiesBytes })
     const referenced = envelope[descriptor.reference] != null
-    if (options.inlineOnly === true && encoded > limit) {
-      throw new PluginError('payload_too_large', 'inline message exceeds the hop packet budget')
-    }
     if (referenced) {
       if (encoded > limit) {
         throw new PluginError('payload_too_large', 'reference packet exceeds the hop packet budget')
       }
-      await this.publish(topic, envelopeBytes)
+      await this.publish(topic, envelopeBytes, publishOptions)
       return { representation: 'reference', packetBytes: encoded }
     }
     if (encoded <= limit && envelopeBytes.length <= envelopeLimit) {
-      await this.publish(topic, envelopeBytes)
+      await this.publish(topic, envelopeBytes, publishOptions)
       return { representation: 'inline', packetBytes: encoded }
     }
     if (envelopeBytes.length > this.budget.envelope_bytes) {
@@ -353,6 +324,9 @@ export class RelayTransport {
       partId: scope.partId,
       ciphertext: body,
       expiresAt: scope.expiresAt,
+      requestId: scope.requestId,
+      connectionRef: scope.connectionRef,
+      enrollmentGeneration: scope.enrollmentGeneration,
     })
     let finished = false
     try {
@@ -369,7 +343,7 @@ export class RelayTransport {
       }
       const candidate = { ...envelope, [descriptor.inline]: EMPTY, [descriptor.reference]: reference }
       const candidateBytes = this.codec.encode(descriptor.type, candidate)
-      const referencePacket = publishPacketBytes(topic, candidateBytes.length)
+      const referencePacket = publishPacketBytes(topic, candidateBytes.length, { propertiesBytes })
       if (referencePacket > limit) {
         throw new PluginError('payload_too_large', 'reference packet exceeds the hop packet budget')
       }
@@ -379,7 +353,7 @@ export class RelayTransport {
       finished = true
       if (generation !== this.#generation) throw new PluginError('unavailable', 'relay interrupted')
       // Verification is complete before any reference is published.
-      await this.publish(topic, candidateBytes)
+      await this.publish(topic, candidateBytes, publishOptions)
       this.logger?.debug('relay_reference_published', {
         purpose: descriptor.purpose, bytes: body.length, envelope: candidateBytes.length,
       })
@@ -410,72 +384,49 @@ export class RelayTransport {
       sessionId: typeof options.sessionId === 'string' ? options.sessionId : '',
       partId: typeof options.partId === 'string' ? options.partId : '',
       expiresAt,
+      // Access binds a result to its durable command or transient query.
+      requestId: options.requestId ?? '',
+      connectionRef: envelope.command_id ? '' : (options.connectionRef ?? ''),
+      enrollmentGeneration: !envelope.command_id && Number.isSafeInteger(options.enrollmentGeneration)
+        ? options.enrollmentGeneration
+        : 0,
     }
   }
 
   /**
-   * Resolve one complete received request or event body. An inline body is
+   * Resolve one complete HostRequest. An inline body is
    * returned unchanged; a reference is fetched over Host-authority HTTPS and
    * verified by exact length and SHA-256 before it reaches business handling.
    * A partial, truncated or mismatched fetch is a terminal failure.
    */
-  async receiveComplete(topic, bytes, options = {}) {
+  async receiveRequest(bytes) {
     if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
       throw new PluginError('invalid_argument', 'empty relay envelope')
     }
     if (bytes.length > this.budget.envelope_bytes) {
       throw new PluginError('payload_too_large', 'complete message exceeds the envelope budget')
     }
-    const descriptor = descriptorFor(options.kind, topic)
     let envelope
     try {
-      envelope = this.codec.decode(descriptor.type, bytes)
+      envelope = this.codec.decode('whalerein.v1.HostRequest', bytes)
     } catch (error) {
       if (error instanceof PluginError) throw error
       throw new PluginError('invalid_argument', 'relay envelope is not decodable')
     }
     assertRelayEpoch(envelope)
-    if (descriptor.type === 'whalerein.v1.HostRequest') {
-      assertRequestRepresentation(envelope)
-      if (envelope.body_reference != null) {
-        if (!this.relay) throw new PluginError('unavailable', 'no relay object route is configured')
-        const reference = validatePayloadReference(envelope.body_reference, {
-          envelopeBytes: this.budget.envelope_bytes,
-          now: this.now,
-        })
-        const body = await this.relay.fetch({
-          reference,
-          envelopeBytes: this.budget.envelope_bytes,
-          purpose: descriptor.purpose,
-        })
-        envelope.body = body
-        delete envelope.body_reference
-        assertRequestRepresentation(envelope)
-      }
-      return envelope
-    }
-    if (descriptor.type === 'whalerein.v1.EventEnvelope') {
-      assertEventRepresentation(envelope)
-      if (envelope.payload_reference != null) {
-        if (!this.relay) throw new PluginError('unavailable', 'no relay object route is configured')
-        const reference = validatePayloadReference(envelope.payload_reference, {
-          envelopeBytes: this.budget.envelope_bytes,
-          now: this.now,
-        })
-        envelope.ciphertext = await this.relay.fetch({
-          reference,
-          envelopeBytes: this.budget.envelope_bytes,
-          purpose: descriptor.purpose,
-        })
-        delete envelope.payload_reference
-        assertEventRepresentation(envelope)
-      }
-      return envelope
-    }
-    return envelope
+    assertRequestRepresentation(envelope)
+    if (envelope.body_reference == null) return envelope
+    if (!this.relay) throw new PluginError('unavailable', 'no relay object route is configured')
+    const reference = validatePayloadReference(envelope.body_reference, {
+      envelopeBytes: this.budget.envelope_bytes,
+      now: this.now,
+    })
+    envelope.body = await this.relay.fetch({
+      reference,
+      envelopeBytes: this.budget.envelope_bytes,
+      purpose: 'PAYLOAD_PURPOSE_REQUEST',
+    })
+    delete envelope.body_reference
+    return assertRequestRepresentation(envelope)
   }
 }
-
-// Re-export the receive-advertisement validator beside the adapter so callers
-// do not import a second transport seam.
-export { validateReceiveAdvertisement }

@@ -18,26 +18,30 @@ import (
 )
 
 type fakeStore struct {
-	hosts         map[string]store.Host
-	devices       map[string]store.Device
-	grants        map[string]bool // host|device
-	keys          map[string][]byte
-	keyErr        error
-	revokeErr     error
-	pending       []store.Revocation
-	pendingErr    error
-	markErr       error
-	markCalls     []string
-	revokeHosts   []string
-	revokeExists  bool
-	ensureErr     error
-	activeErr     error
-	credentialErr error
-	grantErr      error
-	listGrantErr  error
-	listCalls     int
-	credentials   map[string]store.EnrollmentCredential
-	events        *[]string
+	hosts               map[string]store.Host
+	devices             map[string]store.Device
+	grants              map[string]bool // host|device
+	keys                map[string][]byte
+	keyErr              error
+	revokeErr           error
+	pending             []store.Revocation
+	pendingErr          error
+	markErr             error
+	markCalls           []string
+	revokeHosts         []string
+	revokeExists        bool
+	ensureErr           error
+	activeErr           error
+	credentialErr       error
+	grantErr            error
+	listGrantErr        error
+	listCalls           int
+	credentials         map[string]store.EnrollmentCredential
+	events              *[]string
+	grantGens           map[string]store.AdmissionGrant
+	enrollments         map[string]store.ExternalEnrollment
+	enrollmentErr       error
+	revokeGenerationErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -47,6 +51,8 @@ func newFakeStore() *fakeStore {
 		grants:      map[string]bool{},
 		keys:        map[string][]byte{},
 		credentials: map[string]store.EnrollmentCredential{},
+		grantGens:   map[string]store.AdmissionGrant{},
+		enrollments: map[string]store.ExternalEnrollment{},
 	}
 }
 
@@ -134,6 +140,24 @@ func (f *fakeStore) HasActiveGrant(_ context.Context, hostID, deviceID string) (
 	return f.grants[grantKey(hostID, deviceID)], nil
 }
 
+func (f *fakeStore) ListHostGrants(_ context.Context, hostID string) ([]store.AdmissionGrant, error) {
+	f.listCalls++
+	if f.listGrantErr != nil {
+		return nil, f.listGrantErr
+	}
+	var grants []store.AdmissionGrant
+	for key, active := range f.grants {
+		parts := strings.Split(key, "|")
+		if len(parts) != 2 || parts[0] != hostID {
+			continue
+		}
+		grants = append(grants, store.AdmissionGrant{
+			HostID: hostID, DeviceID: parts[1], Active: active, GrantGeneration: 1,
+		})
+	}
+	return grants, nil
+}
+
 func (f *fakeStore) ListDeviceGrants(_ context.Context, deviceID string) ([]store.AdmissionGrant, error) {
 	f.listCalls++
 	if f.listGrantErr != nil {
@@ -215,6 +239,50 @@ func (f *fakeStore) HostBrokerCredential(_ context.Context, hostID string) (stor
 	return credential, nil
 }
 
+func (f *fakeStore) AdmissionGrantFor(_ context.Context, hostID, deviceID string) (store.AdmissionGrant, error) {
+	key := grantKey(hostID, deviceID)
+	if grant, ok := f.grantGens[key]; ok {
+		return grant, nil
+	}
+	active, ok := f.grants[key]
+	if !ok {
+		return store.AdmissionGrant{}, store.ErrNotFound
+	}
+	return store.AdmissionGrant{HostID: hostID, DeviceID: deviceID, Active: active, GrantGeneration: 1}, nil
+}
+
+func (f *fakeStore) RevokeGrantGeneration(_ context.Context, hostID, deviceID string, grantGeneration uint64, _ time.Time) (bool, error) {
+	if f.revokeGenerationErr != nil {
+		return false, f.revokeGenerationErr
+	}
+	if f.events != nil {
+		*f.events = append(*f.events, "store.revoke_generation")
+	}
+	key := grantKey(hostID, deviceID)
+	current := uint64(1)
+	if grant, ok := f.grantGens[key]; ok {
+		current = grant.GrantGeneration
+	}
+	if _, ok := f.grants[key]; !ok {
+		return false, nil
+	}
+	if current != grantGeneration {
+		return false, nil
+	}
+	f.grants[key] = false
+	return true, nil
+}
+
+func (f *fakeStore) Enrollment(_ context.Context, hostID string) (store.ExternalEnrollment, error) {
+	if f.enrollmentErr != nil {
+		return store.ExternalEnrollment{}, f.enrollmentErr
+	}
+	if enrollment, ok := f.enrollments[hostID]; ok {
+		return enrollment, nil
+	}
+	return store.ExternalEnrollment{}, store.ErrNotFound
+}
+
 func (f *fakeStore) RevokeGrant(_ context.Context, hostID, deviceID string, _ time.Time) error {
 	if f.events != nil {
 		*f.events = append(*f.events, "store.revoke_grant")
@@ -260,8 +328,10 @@ func (f *fakeStore) MarkRevocationsReplayed(_ context.Context, hostID string, de
 }
 
 type fakePresence struct {
-	online map[string]bool
-	err    error
+	online      map[string]bool
+	err         error
+	connections map[string][]store.ScopeConnection
+	hostConns   map[string]store.ScopeConnection
 }
 
 func (f *fakePresence) IsHostOnline(_ context.Context, hostID string) bool {
@@ -269,6 +339,15 @@ func (f *fakePresence) IsHostOnline(_ context.Context, hostID string) bool {
 		return false
 	}
 	return f.online[hostID]
+}
+
+func (f *fakePresence) DeviceConnections(deviceID string) []store.ScopeConnection {
+	return append([]store.ScopeConnection(nil), f.connections[deviceID]...)
+}
+
+func (f *fakePresence) HostScopeConnection(hostID string) (store.ScopeConnection, bool) {
+	connection, ok := f.hostConns[hostID]
+	return connection, ok
 }
 
 // fakeAdmission mimics the bounded local grant authority.
@@ -338,24 +417,32 @@ func (f *fakeAdmission) Allow(_ context.Context, hostID, deviceID string) error 
 type fakeEnforcer struct {
 	err   error
 	calls []string
+	scope store.RevocationScope
+	// applied is returned as the confirmed connection evidence.
+	applied []store.ScopeConnection
 }
 
-func (f *fakeEnforcer) RevokeGrant(_ context.Context, hostID, deviceID string) error {
-	f.calls = append(f.calls, "grant:"+hostID+":"+deviceID)
-	return f.err
+func (f *fakeEnforcer) receipt(scope store.RevocationScope) store.EnforcementReceipt {
+	f.scope = scope
+	return store.EnforcementReceipt{Scope: scope, Applied: append([]store.ScopeConnection(nil), f.applied...), Absent: len(f.applied) == 0}
 }
 
-func (f *fakeEnforcer) RevokeDevice(_ context.Context, deviceID string) error {
-	f.calls = append(f.calls, "device:"+deviceID)
-	return f.err
+func (f *fakeEnforcer) RevokeGrant(_ context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	f.calls = append(f.calls, "grant:"+scope.HostID+":"+scope.DeviceID)
+	return f.receipt(scope), f.err
 }
 
-func (f *fakeEnforcer) RevokeHost(_ context.Context, hostID string, generations map[string]uint64) error {
-	f.calls = append(f.calls, "host:"+hostID)
-	for deviceID := range generations {
-		f.calls = append(f.calls, "host-grant:"+hostID+":"+deviceID)
+func (f *fakeEnforcer) RevokeDevice(_ context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	f.calls = append(f.calls, "device:"+scope.DeviceID)
+	return f.receipt(scope), f.err
+}
+
+func (f *fakeEnforcer) RevokeHost(_ context.Context, scope store.RevocationScope) (store.EnforcementReceipt, error) {
+	f.calls = append(f.calls, "host:"+scope.HostID)
+	for _, grant := range scope.Grants {
+		f.calls = append(f.calls, "host-grant:"+scope.HostID+":"+grant.DeviceID)
 	}
-	return f.err
+	return f.receipt(scope), f.err
 }
 
 type fakeTransport struct {
@@ -647,15 +734,17 @@ func TestAuthorizeACLAllowsOnlyPrincipalOwnedTopics(t *testing.T) {
 	}{
 		{"allows Access to subscribe to host results", access, ActionSubscribe, "whalerein/v1/h/+/result", true},
 		{"allows Access to subscribe to host events", access, ActionSubscribe, "whalerein/v1/h/+/event", true},
-		{"allows Access to subscribe to host live previews", access, ActionSubscribe, "whalerein/v1/h/+/live", true},
+		{"denies Access to subscribe to retired host live previews", access, ActionSubscribe, "whalerein/v1/h/+/live", false},
+		{"allows Access to subscribe to device queries", access, ActionSubscribe, "whalerein/v1/h/+/d/+/query", true},
 		{"allows Access to subscribe to broker connect events", access, ActionSubscribe, "$SYS/brokers/+/clients/+/connected", true},
 		{"allows Access to subscribe to broker disconnect events", access, ActionSubscribe, "$SYS/brokers/+/clients/+/disconnected", true},
-		{"allows Access to subscribe to device last wills", access, ActionSubscribe, "whalerein/v1/presence/device/+", true},
+		{"denies retired device will subscriptions", access, ActionSubscribe, "whalerein/v1/presence/device/+", false},
 		{"denies Access subscription to host requests", access, ActionSubscribe, "whalerein/v1/h/h1/request", false},
 		{"allows Access to publish host requests", access, ActionPublish, "whalerein/v1/h/h1/request", true},
 		{"allows Access to publish device events", access, ActionPublish, "whalerein/v1/h/h1/d/d1/event", true},
 		{"allows Access to publish device notices", access, ActionPublish, "whalerein/v1/h/h1/d/d1/notice", true},
-		{"allows Access to publish device live previews", access, ActionPublish, "whalerein/v1/h/h1/d/d1/live", true},
+		{"denies Access to publish device live previews", access, ActionPublish, "whalerein/v1/h/h1/d/d1/live", false},
+		{"allows Access to publish device query replies", access, ActionPublish, "whalerein/v1/h/h1/d/d1/reply", true},
 		{"denies Access publication to host live previews", access, ActionPublish, "whalerein/v1/h/h1/live", false},
 		{"allows Access to subscribe to device advertisements", access, ActionSubscribe, "whalerein/v1/h/+/d/+/ready", true},
 		{"denies Access device acknowledgement publishes", access, ActionPublish, "whalerein/v1/h/h1/d/d1/ack", false},
@@ -672,13 +761,17 @@ func TestAuthorizeACLAllowsOnlyPrincipalOwnedTopics(t *testing.T) {
 		{"denies host publication to presence", host, ActionPublish, "whalerein/v1/h/h1/presence", false},
 		{"allows host publication to its own results", host, ActionPublish, "whalerein/v1/h/h1/result", true},
 		{"allows host publication to its own events", host, ActionPublish, "whalerein/v1/h/h1/event", true},
-		{"allows host publication to its own live previews", host, ActionPublish, "whalerein/v1/h/h1/live", true},
-		{"denies host publication to another host live previews", host, ActionPublish, "whalerein/v1/h/h2/live", false},
+		{"denies host publication to the retired host live topic", host, ActionPublish, "whalerein/v1/h/h1/live", false},
+		{"allows host publication to a device live preview", host, ActionPublish, "whalerein/v1/h/h1/d/d1/live", true},
+		{"denies host publication to another host device live preview", host, ActionPublish, "whalerein/v1/h/h2/d/d1/live", false},
 		{"denies host subscription to live previews", host, ActionSubscribe, "whalerein/v1/h/h1/live", false},
 		{"denies host publication to request topics", host, ActionPublish, "whalerein/v1/h/h1/request", false},
 		{"denies host publication to device event topics", host, ActionPublish, "whalerein/v1/h/h1/d/d1/event", false},
 		{"allows device subscription to its granted event topic", device, ActionSubscribe, "whalerein/v1/h/h1/d/d1/event", true},
 		{"allows device subscription to its granted live topic", device, ActionSubscribe, "whalerein/v1/h/h1/d/d1/live", true},
+		{"allows device subscription to its query replies", device, ActionSubscribe, "whalerein/v1/h/h1/d/d1/reply", true},
+		{"allows device publication of its own query", device, ActionPublish, "whalerein/v1/h/h1/d/d1/query", true},
+		{"denies device publication of another device query", device, ActionPublish, "whalerein/v1/h/h1/d/d2/query", false},
 		{"denies device subscription to another device live topic", device, ActionSubscribe, "whalerein/v1/h/h1/d/d2/live", false},
 		{"denies device subscription to host live topic", device, ActionSubscribe, "whalerein/v1/h/h1/live", false},
 		{"denies device publication to live previews", device, ActionPublish, "whalerein/v1/h/h1/d/d1/live", false},
@@ -686,7 +779,7 @@ func TestAuthorizeACLAllowsOnlyPrincipalOwnedTopics(t *testing.T) {
 		{"denies device subscription to host event topic", device, ActionSubscribe, "whalerein/v1/h/h1/event", false},
 		{"denies device wildcard subscriptions", device, ActionSubscribe, "whalerein/v1/h/h1/d/+/event", false},
 		{"denies device subscription to last wills", device, ActionSubscribe, "whalerein/v1/presence/device/+", false},
-		{"allows device publication to its own last will", device, ActionPublish, "whalerein/v1/presence/device/d1", true},
+		{"denies publication to the retired device will topic", device, ActionPublish, "whalerein/v1/presence/device/d1", false},
 		{"denies device publication to another device last will", device, ActionPublish, "whalerein/v1/presence/device/d2", false},
 		{"denies device publication to a will wildcard", device, ActionPublish, "whalerein/v1/presence/device/+", false},
 		{"denies device publication to request topic", device, ActionPublish, "whalerein/v1/h/h1/request", false},
@@ -725,7 +818,7 @@ func successAck(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
 }
 
 func TestRevokeDeviceDeniesAccessAndReplaysHostNotices(t *testing.T) {
-	service, fs, presence, transport := newService(t)
+	service, fs, _, presence, transport, enforcer := newServiceWithFakes(t)
 	ctx := context.Background()
 	fs.devices["d1"] = store.Device{DeviceID: "d1"}
 	fs.hosts["h1"] = store.Host{HostID: "h1"}
@@ -738,8 +831,11 @@ func TestRevokeDeviceDeniesAccessAndReplaysHostNotices(t *testing.T) {
 	if err := service.RevokeDevice(ctx, "d1"); err != nil {
 		t.Fatal(err)
 	}
-	if len(transport.disconnected) != 1 || transport.disconnected[0] != "d1" {
-		t.Fatalf("disconnected = %v", transport.disconnected)
+	if len(transport.disconnected) != 0 {
+		t.Fatalf("authorization revocation used an unfenced username disconnect: %v", transport.disconnected)
+	}
+	if len(enforcer.calls) != 1 || enforcer.calls[0] != "device:d1" {
+		t.Fatalf("scoped enforcer calls = %v", enforcer.calls)
 	}
 	if len(fs.markCalls) != 1 || fs.markCalls[0] != "h1:d1" {
 		t.Fatalf("mark calls = %v", fs.markCalls)
@@ -980,14 +1076,15 @@ func TestDeviceCanOnlyPublishItsOwnReadyAdvertisement(t *testing.T) {
 	}
 }
 
-type repairDuringDisconnect struct {
-	*fakeTransport
+type repairDuringRevoke struct {
+	*fakeStore
 	repair func()
 }
 
-func (r *repairDuringDisconnect) DisconnectDevice(context.Context, string) error {
+func (r *repairDuringRevoke) RevokeDeviceGrants(ctx context.Context, deviceID string, at time.Time) ([]string, bool, error) {
+	hosts, exists, err := r.fakeStore.RevokeDeviceGrants(ctx, deviceID, at)
 	r.repair()
-	return nil
+	return hosts, exists, err
 }
 
 func TestRevocationAfterConcurrentRepairDoesNotSendAnOldGrantNotice(t *testing.T) {
@@ -996,10 +1093,11 @@ func TestRevocationAfterConcurrentRepairDoesNotSendAnOldGrantNotice(t *testing.T
 	fs.hosts["h"] = store.Host{HostID: "h"}
 	fs.grants[grantKey("h", "d")] = true
 	presence.online["h"] = true
-	service.transport = &repairDuringDisconnect{fakeTransport: transport, repair: func() {
+	repairing := &repairDuringRevoke{fakeStore: fs, repair: func() {
 		fs.grants[grantKey("h", "d")] = true
 		fs.pending = nil
 	}}
+	service.store = repairing
 	if err := service.RevokeDevice(context.Background(), "d"); err != nil {
 		t.Fatal(err)
 	}
@@ -1111,11 +1209,20 @@ func TestAuthenticateBrokerKeepsStandaloneHostProvisioning(t *testing.T) {
 }
 
 func TestDisableHostScopeFencesAdmissionAndClosesTheHost(t *testing.T) {
-	service, fs, admission, _, _, enforcer := newServiceWithFakes(t)
+	service, fs, admission, presence, _, enforcer := newServiceWithFakes(t)
 	ctx := context.Background()
 	fs.grants[grantKey("h1", "d1")] = true
 	fs.grants[grantKey("h1", "d2")] = true
-	if err := service.DisableHostScope(ctx, "h1", map[string]uint64{"d1": 4, "d2": 7}); err != nil {
+	hostConnection := store.ScopeConnection{
+		Ref: store.ConnectionRef{Epoch: "epoch", ID: 9}, ClientID: "whalerein-host-h1",
+	}
+	presence.hostConns = map[string]store.ScopeConnection{"h1": hostConnection}
+	scope := store.RevocationScope{HostID: "h1", Grants: []store.ScopeGrant{
+		{HostID: "h1", DeviceID: "d1", GrantGeneration: 4},
+		{HostID: "h1", DeviceID: "d2", GrantGeneration: 7},
+	}}
+	_, err := service.DisableHostScope(ctx, scope)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if !admission.denied[grantKey("h1", "d1")] || !admission.denied[grantKey("h1", "d2")] {
@@ -1131,11 +1238,14 @@ func TestDisableHostScopeFencesAdmissionAndClosesTheHost(t *testing.T) {
 	if !seen["host-grant:h1:d1"] || !seen["host-grant:h1:d2"] {
 		t.Fatalf("the revoked grants were not denied: %v", enforcer.calls)
 	}
-	if err := service.DisableHostScope(ctx, "", nil); !errors.Is(err, ErrBadRequest) {
+	if enforcer.scope.HostConnection == nil || *enforcer.scope.HostConnection != hostConnection {
+		t.Fatalf("frozen Host connection lost: %+v", enforcer.scope)
+	}
+	if _, err := service.DisableHostScope(ctx, store.RevocationScope{}); !errors.Is(err, ErrBadRequest) {
 		t.Fatalf("an empty host id must be refused, got %v", err)
 	}
 	enforcer.err = errors.New("line unavailable")
-	if err := service.DisableHostScope(ctx, "h1", nil); err == nil {
+	if _, err := service.DisableHostScope(ctx, scope); err == nil {
 		t.Fatal("an enforcement failure must be surfaced")
 	}
 }

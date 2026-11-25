@@ -21,12 +21,13 @@ func TestFlowLabelCoversEveryWireKind(t *testing.T) {
 		RequestTopic("h1"):            "request",
 		ResultTopic("h1"):             "result",
 		EventTopic("h1"):              "event",
-		LiveTopic("h1"):               "other",
 		DeviceEventTopic("h1", "d1"):  "device_event",
 		DeviceLiveTopic("h1", "d1"):   "other",
 		DeviceNoticeTopic("h1", "d1"): "notice",
 		PresenceTopic("h1"):           "presence",
 		DeviceReadyTopic("h1", "d1"):  "other",
+		DeviceQueryTopic("h1", "d1"):  "query",
+		DeviceReplyTopic("h1", "d1"):  "reply",
 		"not-a-wire-topic":            "other",
 	}
 	for topic, want := range cases {
@@ -249,26 +250,26 @@ func TestAccessReceiveAdvertisementBindsEpochAndGeneration(t *testing.T) {
 	}
 }
 
-func TestConnectorDeliverMarksOnlyEpochFourResultsAsCapable(t *testing.T) {
+func TestConnectorDeliverMarksOnlyEpochFiveResultsAsCapable(t *testing.T) {
 	var delivered int
-	connector := &pahoConnector{dispatch: func(string, []byte) { delivered++ }, peers: sync.Map{}}
+	connector := &pahoConnector{dispatch: func(Message) { delivered++ }, peers: sync.Map{}}
 	capable, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r1", HostId: "h1", ProtocolVersion: 1, RelayVersion: RelayEpoch})
-	connector.deliver(ResultTopic("h1"), capable)
+	connector.deliver(Message{Topic: ResultTopic("h1"), Payload: capable})
 	if value, ok := connector.peers.Load(RequestTopic("h1")); !ok || value != true {
-		t.Fatal("valid epoch-4 result did not establish capability")
+		t.Fatal("valid epoch-5 result did not establish capability")
 	}
 	foreign, _ := proto.Marshal(&whalereinv1.HostResult{RequestId: "r2", HostId: "h2", ProtocolVersion: 1, RelayVersion: 2})
-	connector.deliver(ResultTopic("h2"), foreign)
+	connector.deliver(Message{Topic: ResultTopic("h2"), Payload: foreign})
 	if _, ok := connector.peers.Load(RequestTopic("h2")); ok {
 		t.Fatal("foreign epoch established capability")
 	}
 	readyBody, _ := proto.Marshal(&whalereinv1.HostReady{HostId: "h3", RelayVersion: RelayEpoch})
 	ready, _ := proto.Marshal(&whalereinv1.HostResult{HostId: "h3", Status: whalereinv1.OnlineStatus_succeeded, ResultBody: readyBody, RelayVersion: RelayEpoch})
-	connector.deliver(ResultTopic("h3"), ready)
+	connector.deliver(Message{Topic: ResultTopic("h3"), Payload: ready})
 	if _, ok := connector.peers.Load(RequestTopic("h3")); ok {
 		t.Fatal("HostReady alone established pairing capability")
 	}
-	connector.deliver("bogus", nil)
+	connector.deliver(Message{Topic: "bogus"})
 	if delivered != 4 {
 		t.Fatalf("dispatch count = %d", delivered)
 	}
@@ -280,13 +281,13 @@ func TestOrderedPublisherFailReleasesOneItem(t *testing.T) {
 		done: make(chan struct{}), flows: map[string]*sendFlow{},
 	}
 	flow := &sendFlow{key: "flow", parent: publisher}
-	item := &sendItem{done: make(chan error, 1), payload: []byte("x"), size: 3}
+	item := &sendItem{done: make(chan error, 1), message: Message{Payload: []byte("x")}, size: 3}
 	publisher.waiting = 3
 	flow.fail(item, nil)
 	if err := <-item.done; !errors.Is(err, ErrQueueClosed) {
 		t.Fatalf("fail error = %v", err)
 	}
-	if publisher.WaitingBytes() != 0 || item.payload != nil {
+	if publisher.WaitingBytes() != 0 || item.message.Payload != nil {
 		t.Fatal("failed item was not released")
 	}
 }
@@ -300,7 +301,7 @@ func TestPublisherNilSubmitAndResetRegistry(t *testing.T) {
 		t.Fatal("nil publisher waiting bytes")
 	}
 	nilPublisher.Close()
-	empty := newPublisher(func(context.Context, string, []byte) error { return nil }, config.DefaultTransportEffective(), nil)
+	empty := newPublisher(func(context.Context, Message) error { return nil }, config.DefaultTransportEffective(), nil)
 	if err := empty.Submit(context.Background(), "t", nil); err == nil {
 		t.Fatal("empty packet accepted")
 	}
@@ -362,7 +363,7 @@ func TestPahoConnectorHonorsConnackLimits(t *testing.T) {
 	local := config.DefaultTransportEffective()
 	connector, err := NewPahoConnectorWithTransport(
 		config.BrokerConfig{URL: "tcp://" + listener.Addr().String(), ClientID: "whalerein-access-test"},
-		local, nil, func(string, []byte) {}, discardLogger())
+		local, nil, func(Message) {}, discardLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +397,7 @@ func TestControlPublishStaysRawAndPacketBounded(t *testing.T) {
 	client := &fakeMQTTClient{}
 	session := newRelayTestSession(client)
 	payload := []byte("whalerein/1\nid access-1\nop ping\n")
-	if err := session.Publish(context.Background(), ControlRequestTopic, payload, 1); err != nil {
+	if err := session.Publish(context.Background(), Message{Topic: ControlRequestTopic, Payload: payload, QoS: 1}); err != nil {
 		t.Fatalf("control publish: %v", err)
 	}
 	if !bytes.Equal(client.publishPayload, payload) {
@@ -404,11 +405,11 @@ func TestControlPublishStaysRawAndPacketBounded(t *testing.T) {
 	}
 	// A control payload above the packet limit fails before publish.
 	tight, _ := relayTestSession(t, 32, nil)
-	if err := tight.Publish(context.Background(), ControlRequestTopic, bytes.Repeat([]byte("x"), 128), 1); !errors.Is(err, ErrMessageBudget) {
+	if err := tight.Publish(context.Background(), Message{Topic: ControlRequestTopic, Payload: bytes.Repeat([]byte("x"), 128), QoS: 1}); !errors.Is(err, ErrMessageBudget) {
 		t.Fatalf("oversized control publish = %v", err)
 	}
 	// Any other unknown topic remains invalid.
-	if err := session.Publish(context.Background(), "whalerein/v1/control/reply", []byte("x"), 1); !errors.Is(err, ErrInvalidTopic) {
+	if err := session.Publish(context.Background(), Message{Topic: "whalerein/v1/control/reply", Payload: []byte("x"), QoS: 1}); !errors.Is(err, ErrInvalidTopic) {
 		t.Fatalf("unknown topic = %v", err)
 	}
 }

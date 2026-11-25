@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
@@ -14,17 +15,46 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// RevokeDevice is the only revocation entry point. The database transaction
-// commits grants.revoked_at first (ACLs are database-derived), then Access
-// disconnects the device and tells each online host. replayed_at is written
-// only for hosts that acknowledged the notice.
+// RevokeDevice revokes every live grant of one device. The transaction commits
+// grants.revoked_at first (ACLs are database-derived), then Access fences the
+// frozen grant scopes through the Broker and tells each online host. A delayed
+// retry uses the same frozen generations and never closes a newer authorized
+// connection of the same stable device.
 func (s *Service) RevokeDevice(ctx context.Context, deviceID string) error {
 	if deviceID == "" {
 		return ErrBadRequest
 	}
 	at := s.now()
-	// Fence every realtime admission before the durable write. A later
-	// confirmed per-grant denial narrows the provisional device fence.
+	grants, err := s.store.ListDeviceGrants(ctx, deviceID)
+	if err != nil {
+		return fmt.Errorf("revoke device: %w", err)
+	}
+	scope := store.RevocationScope{DeviceID: deviceID, DeviceWide: true}
+	current := true
+	for _, grant := range grants {
+		if !grant.Active {
+			continue
+		}
+		enrollmentGeneration, err := s.currentEnrollmentGeneration(ctx, grant.HostID)
+		if err != nil {
+			return fmt.Errorf("revoke device: %w", err)
+		}
+		if enrollmentGeneration > grant.EnrollmentGeneration {
+			// This grant belongs to a superseded enrollment. It is not part of
+			// the live device scope and must not be fenced or closed.
+			current = false
+			continue
+		}
+		scope.Grants = append(scope.Grants, store.ScopeGrant{
+			HostID:                     grant.HostID,
+			DeviceID:                   deviceID,
+			EnrollmentGeneration:       grant.EnrollmentGeneration,
+			GrantGeneration:            grant.GrantGeneration,
+			RevocationGeneration:       grant.RevocationGeneration,
+			DeviceRevocationGeneration: grant.DeviceRevocationGeneration,
+		})
+	}
+	// Fence every realtime admission before the durable write.
 	s.admission.DenyDevice(deviceID)
 	hostIDs, exists, err := s.store.RevokeDeviceGrants(ctx, deviceID, at)
 	if err != nil {
@@ -33,22 +63,56 @@ func (s *Service) RevokeDevice(ctx context.Context, deviceID string) error {
 	if !exists {
 		return ErrNotFound
 	}
+	scopedHosts := make(map[string]bool, len(scope.Grants))
+	for _, grant := range scope.Grants {
+		scopedHosts[grant.HostID] = true
+	}
+	// A pairing can commit between the freeze read and the durable revoke.
+	// Include exactly those late grants so the Broker fence covers every row
+	// this operation revoked, while a superseded enrollment stays untouched.
 	for _, hostID := range hostIDs {
+		if scopedHosts[hostID] {
+			continue
+		}
+		grant, err := s.store.AdmissionGrantFor(ctx, hostID, deviceID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return fmt.Errorf("revoke device: %w", err)
+		}
+		enrollmentGeneration, err := s.currentEnrollmentGeneration(ctx, hostID)
+		if err != nil {
+			return fmt.Errorf("revoke device: %w", err)
+		}
+		if enrollmentGeneration > grant.EnrollmentGeneration {
+			continue
+		}
+		scope.Grants = append(scope.Grants, store.ScopeGrant{
+			HostID:                     hostID,
+			DeviceID:                   deviceID,
+			EnrollmentGeneration:       grant.EnrollmentGeneration,
+			GrantGeneration:            grant.GrantGeneration,
+			RevocationGeneration:       grant.RevocationGeneration,
+			DeviceRevocationGeneration: grant.DeviceRevocationGeneration,
+		})
+		scopedHosts[hostID] = true
+	}
+	for hostID := range scopedHosts {
 		s.admission.Deny(hostID, deviceID)
 	}
 	s.admission.CompleteDeviceRevoke(deviceID)
-	if err := s.enforcer.RevokeDevice(ctx, deviceID); err != nil {
+	sort.Slice(scope.Grants, func(i, j int) bool { return scope.Grants[i].HostID < scope.Grants[j].HostID })
+	if current {
+		scope = s.freezeGrantConnections(scope, deviceID)
+	}
+	if _, err := s.enforcer.RevokeDevice(ctx, scope); err != nil {
 		return fmt.Errorf("revoke device policy: %w", err)
 	}
 
 	s.logger.Info("revocation committed", "source", "device_request", "trace_id", diagnostics.TraceID(ctx), "device", s.masker.Device(deviceID), "count", len(hostIDs), "revoked_at_unix_ms", at.UnixMilli())
-	if err := s.transport.DisconnectDevice(ctx, deviceID); err != nil {
-		s.logger.Warn("revocation disconnect failed",
-			"device", s.masker.Device(deviceID), "error", err.Error())
-	}
-
 	for _, hostID := range hostIDs {
-		if !s.presence.IsHostOnline(ctx, hostID) {
+		if !scopedHosts[hostID] || !s.presence.IsHostOnline(ctx, hostID) {
 			continue
 		}
 		if err := s.notifyRevokedGrant(ctx, hostID, deviceID); err != nil {

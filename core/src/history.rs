@@ -25,6 +25,17 @@ const MAX_PAGE_BYTES: u32 = 1024 * 1024;
 const CONTINUATION_TTL_MS: i64 = 60 * 60 * 1000;
 const MAX_TOKEN_CHARS: usize = 8192;
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only switch used by the isolated first-history comparator.
+    static BROAD_FIRST_PAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn set_broad_first_page(enabled: bool) {
+    BROAD_FIRST_PAGE.with(|flag| flag.set(enabled));
+}
+
 /// Requested history source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -571,12 +582,40 @@ impl Core {
         result
     }
 
+    /// Largest first visible page that can travel inline on the MQTT reply
+    /// lane. The packet includes the HostResult envelope, HistoryPage and
+    /// batch framing, so only the remainder is available to committed
+    /// messages. Later pages and bulk synchronization keep their caller bound.
+    #[cfg(test)]
+    fn broad_first_page() -> bool {
+        BROAD_FIRST_PAGE.with(|flag| flag.get())
+    }
+
+    fn first_page_inline_bytes(&self, host_id: &str) -> u32 {
+        #[cfg(test)]
+        if Self::broad_first_page() {
+            // Test-only comparator mode: reproduce the pre-change page target so
+            // the isolated comparison can measure both packings on the same
+            // seeded history. Production never selects this.
+            return MAX_PAGE_BYTES;
+        }
+        let local = self.transport_budget();
+        let receive = self.runtime.host_receive(host_id).unwrap_or(local);
+        let packet = local.packet_bytes.min(receive.packet_bytes);
+        packet.saturating_sub(4 * 1024).clamp(1024, MAX_PAGE_BYTES)
+    }
+
     async fn history_page_online(
         &self,
         request: &HistoryPageRequest,
         max_messages: u32,
         max_bytes: u32,
     ) -> CoreResult<HistoryPage> {
+        let max_bytes = if request.continuation.is_none() {
+            max_bytes.min(self.first_page_inline_bytes(&request.session.host_id))
+        } else {
+            max_bytes
+        };
         let binding = match &request.continuation {
             Some(continuation) => Some(self.continuation_from_token(
                 continuation,
@@ -1154,6 +1193,135 @@ mod tests {
         assert!(!events.contains("whr1."));
         assert!(!events.contains("page:"));
         assert!(!events.contains("session-1"));
+    }
+
+    /// Isolated test-only comparator (task 6.5): the same seeded history is
+    /// read with the pre-change broad page target and with the epoch-5 fitted
+    /// first page under the same transport profile and connection. It records
+    /// the first-page Host request bytes and initially visible records, and
+    /// proves full traversal identity.
+    #[tokio::test]
+    async fn first_history_comparison_records_the_packing_tradeoff() {
+        use crate::api::test_support::history_message;
+        let cases = [
+            (
+                "small",
+                vec![
+                    history_message("s1", "one"),
+                    history_message("s2", "two"),
+                    history_message("s3", "three"),
+                ],
+            ),
+            ("mixed", {
+                let mut messages = Vec::new();
+                for index in 0..6 {
+                    messages.push(history_message(&format!("m{index}"), "mixed small record"));
+                }
+                messages.push(history_message("big", &"y".repeat(12 * 1024)));
+                for index in 7..12 {
+                    messages.push(history_message(&format!("m{index}"), "mixed small record"));
+                }
+                messages
+            }),
+            ("large-leading", {
+                let mut messages = vec![history_message("large", &"z".repeat(48 * 1024))];
+                for index in 1..5 {
+                    messages.push(history_message(&format!("n{index}"), "tail record"));
+                }
+                messages
+            }),
+        ];
+        let mut summary = Vec::new();
+        for (name, messages) in cases {
+            let (_directory, core, access) = paired().await;
+            access.host.lock().unwrap().history_messages = messages;
+            let session = key(&core);
+            set_broad_first_page(true);
+            let broad = core
+                .history_page(&HistoryPageRequest::new(session.clone()))
+                .await
+                .unwrap();
+            set_broad_first_page(false);
+            let broad_ids: Vec<String> = broad
+                .messages
+                .iter()
+                .map(|m| m.message_id.clone())
+                .collect();
+            let fitted = core
+                .history_page(&HistoryPageRequest::new(session.clone()))
+                .await
+                .unwrap();
+            let fitted_ids: Vec<String> = fitted
+                .messages
+                .iter()
+                .map(|m| m.message_id.clone())
+                .collect();
+            assert!(
+                broad_ids.ends_with(&fitted_ids),
+                "{name}: a fitted page is the newest suffix of the broad page"
+            );
+            let mut all = Vec::new();
+            let mut request = HistoryPageRequest::new(session.clone());
+            loop {
+                let page = core.history_page(&request).await.unwrap();
+                all.extend(page.messages.iter().map(|m| m.message_id.clone()));
+                match page.continuation {
+                    Some(continuation) => {
+                        request = HistoryPageRequest::new(session.clone());
+                        request.continuation = Some(continuation);
+                    }
+                    None => break,
+                }
+            }
+            assert_eq!(
+                all, broad_ids,
+                "{name}: full traversal keeps every record once"
+            );
+            let reads = access.host.lock().unwrap().history_request_bytes.clone();
+            summary.push(format!(
+                "{{\"case\":\"{name}\",\"records\":{},\"broad_records\":{},\"broad_request_bytes\":{},\"fitted_records\":{},\"fitted_request_bytes\":{}}}",
+                all.len(),
+                broad_ids.len(),
+                reads.first().copied().unwrap_or(0),
+                fitted_ids.len(),
+                reads.get(1).copied().unwrap_or(0),
+            ));
+        }
+        println!("FIRST_HISTORY_COMPARISON {}", summary.join(","));
+    }
+
+    #[tokio::test]
+    async fn first_visible_page_fits_the_inline_reply_budget_and_continuations_keep_the_caller_bound(
+    ) {
+        let (_directory, core, access) = paired().await;
+        access.host.lock().unwrap().history_messages =
+            vec![history_message("m1", "one"), history_message("m2", "two")];
+        let session = key(&core);
+        let mut first = HistoryPageRequest::new(session.clone());
+        first.max_messages = 1;
+        first.max_bytes = 64 * 1024;
+        let page = core.history_page(&first).await.unwrap();
+        let reads = access.host.lock().unwrap().history_request_bytes.clone();
+        assert_eq!(reads.len(), 1);
+        assert!(
+            reads[0] < 64 * 1024,
+            "first page is fitted to the MQTT reply budget: {}",
+            reads[0]
+        );
+        assert!(reads[0] >= 1024);
+        let continuation = page
+            .continuation
+            .expect("two messages with max one per page");
+        let mut next = HistoryPageRequest::new(session);
+        next.continuation = Some(continuation);
+        next.max_bytes = 12_345;
+        core.history_page(&next).await.unwrap();
+        let reads = access.host.lock().unwrap().history_request_bytes.clone();
+        assert_eq!(
+            reads.last().copied(),
+            Some(12_345),
+            "a continuation keeps the caller bound"
+        );
     }
 
     #[tokio::test]

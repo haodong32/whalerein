@@ -11,7 +11,9 @@ import (
 	"github.com/whalerein/whalerein/access/internal/store"
 )
 
-type payloadWorkerStore struct{}
+type payloadWorkerStore struct {
+	onReconcile func()
+}
 
 func (payloadWorkerStore) ReservePayload(context.Context, store.PayloadReservation, store.PayloadLimits) (store.PayloadAdmission, error) {
 	return store.PayloadAdmission{}, nil
@@ -47,7 +49,8 @@ func (payloadWorkerStore) DeletePayloadTombstones(context.Context, string, time.
 func (payloadWorkerStore) StaleReservedPayloads(context.Context, string, time.Time, int) ([]store.PayloadObject, error) {
 	return nil, nil
 }
-func (payloadWorkerStore) ReadyPayloadPage(context.Context, string, string, int) ([]store.PayloadObject, error) {
+func (s payloadWorkerStore) ReadyPayloadPage(context.Context, string, string, int) ([]store.PayloadObject, error) {
+	s.onReconcile()
 	return nil, nil
 }
 func (payloadWorkerStore) PayloadStats(context.Context, string, time.Time) (store.PayloadStats, error) {
@@ -55,9 +58,11 @@ func (payloadWorkerStore) PayloadStats(context.Context, string, time.Time) (stor
 }
 
 func TestRunPayloadStorageCleansReconcilesAndStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	dir := t.TempDir()
 	service, err := payload.New(payload.Dependencies{
-		Store: payloadWorkerStore{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store: payloadWorkerStore{onReconcile: cancel}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Config: payload.Config{
 			Enabled: true, RootDir: dir, NodeID: "node", MaxObjectBytes: 1 << 20,
 			MaxHostBytes: 2 << 20, MaxNodeBytes: 4 << 20, MaxObjects: 4, MaxActiveUploads: 2,
@@ -72,17 +77,17 @@ func TestRunPayloadStorageCleansReconcilesAndStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		RunPayloadStorage(ctx, service, stager, time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
-	time.Sleep(30 * time.Millisecond)
-	cancel()
 	select {
 	case <-done:
+		if ctx.Err() != context.Canceled {
+			t.Fatal("worker stopped before reconciliation")
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("payload storage worker did not stop")
+		t.Fatal("payload storage worker did not reconcile and stop")
 	}
 }

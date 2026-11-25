@@ -1,16 +1,14 @@
-// Observe the Host live and control event topics on the real broker.
+// Observe the retired Host live topic and the current Device-scoped topics.
 //
+// Epoch 5 retires `whalerein/v1/h/{host}/live`: the Host publishes a QoS 0
+// preview directly on `.../d/{device}/live` and Access never republishes it.
 // The observer authenticates as the shared Access test account, subscribes to
-// the Host live and event topics at QoS 1 (an incoming QoS 0 PUBLISH stays
-// QoS 0), and reports only topics, QoS, sizes and timestamps. It never prints
-// ciphertext or message content. Python drives it over stdin:
+// the retired Host topic (to prove it stays empty) and the Device topic, and
+// reports only topics, QoS, sizes, reserved user properties and timestamps. It
+// never prints ciphertext or message content.
 //
-//   {"op":"snapshot"} -> {"type":"snapshot","live":[...],"event":[...]}
+//   {"op":"snapshot"} -> {"type":"snapshot","live":[...],"event":[...],"device_live":[...],"device_event":[...]}
 //   {"op":"stop"}     -> exits
-//
-// A "live" entry is a PUBLISH observed on .../live; an "event" entry is a
-// PUBLISH observed on .../event. The control event topic must never carry a
-// preview.
 
 import { createRequire } from 'node:module'
 import { createInterface } from 'node:readline'
@@ -27,10 +25,17 @@ if (!password || !hostId) {
   process.exit(2)
 }
 
-const liveTopic = `whalerein/v1/h/${hostId}/live`
+const retiredLiveTopic = `whalerein/v1/h/${hostId}/live`
 const eventTopic = `whalerein/v1/h/${hostId}/event`
 const deviceLiveFilter = `whalerein/v1/h/${hostId}/d/+/live`
-const messages = { live: [], event: [], device_live: [] }
+const deviceEventFilter = `whalerein/v1/h/${hostId}/d/+/event`
+const messages = { live: [], event: [], device_live: [], device_event: [] }
+
+function userProperties(packet) {
+  const pairs = packet?.properties?.userProperties
+  if (!pairs || typeof pairs !== 'object') return {}
+  return { ...pairs }
+}
 
 const client = await mqtt.connectAsync(url, {
   protocolVersion: 5,
@@ -44,13 +49,23 @@ const client = await mqtt.connectAsync(url, {
 })
 
 client.on('message', (topic, payload, packet) => {
-  const entry = { topic, qos: packet?.qos ?? null, bytes: payload.length, at: Date.now() }
-  if (topic === liveTopic) messages.live.push(entry)
+  const entry = {
+    topic,
+    qos: packet?.qos ?? null,
+    bytes: payload.length,
+    at: Date.now(),
+    properties: userProperties(packet),
+  }
+  if (topic === retiredLiveTopic) messages.live.push(entry)
   else if (topic === eventTopic) messages.event.push(entry)
   else if (topic.startsWith(`whalerein/v1/h/${hostId}/d/`) && topic.endsWith('/live')) messages.device_live.push(entry)
+  else if (topic.startsWith(`whalerein/v1/h/${hostId}/d/`) && topic.endsWith('/event')) messages.device_event.push(entry)
 })
 
-await client.subscribeAsync([liveTopic, eventTopic, deviceLiveFilter], { qos: 1 })
+await client.subscribeAsync(
+  [retiredLiveTopic, eventTopic, deviceLiveFilter, deviceEventFilter],
+  { qos: 1 },
+)
 
 function snapshot() {
   process.stdout.write(JSON.stringify({
@@ -58,6 +73,7 @@ function snapshot() {
     live: messages.live,
     event: messages.event,
     device_live: messages.device_live,
+    device_event: messages.device_event,
   }) + '\n')
 }
 

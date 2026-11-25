@@ -68,7 +68,11 @@ export class DshHistory {
       this.#projectors.delete(sessionId)
       this.source.conversation.changeView()
     }
-    view.head=authoritative?head:Math.max(head,view.head)
+    // `head` is the committed fence used for page cuts and rewind detection.
+    // A live notification reports observed progress and may run ahead of the
+    // committed fence while an Attempt streams; it must not advance `head`, or
+    // the next page would look like a rewind and rotate the projection.
+    if(authoritative)view.head=head
     this.source.metadata?.set(`history-view:${sessionId}`,JSON.stringify(view))
     return view
   }
@@ -85,8 +89,9 @@ export class DshHistory {
   // read establishes it from the native head; continuations reuse it.
   async ensureView(sessionId, {signal}={}) {
     if(signal?.aborted)throw new AdapterError('unavailable')
-    const existing=this.#views.get(sessionId)
-    if(existing)return existing
+    // Always pin the committed head, even for an existing view created by a
+    // live notification: `head` is the fence used by later page cuts and
+    // rewind detection, and only an authoritative read may establish it.
     const head=typeof this.source.nativeHead==='function' ? await this.source.nativeHead(sessionId,{signal}) : (await this.source.getSessionSnapshot(sessionId,{signal})).cursor
     if(signal?.aborted)throw new AdapterError('unavailable')
     return this.#view(sessionId,head,true)
@@ -152,7 +157,14 @@ export class DshHistory {
     }
     const source=await this.source.getSessionSnapshot(sessionId,{signal})
     if(signal?.aborted)throw new AdapterError('unavailable')
-    const head=source.cursor??source.events.at(-1)?.dshSeq??-1
+    // One head definition for state and pages. The passive snapshot cursor and
+    // the live session sequence can disagree while an Attempt streams, and a
+    // page that pins a different fence than the watch state would rotate the
+    // projection for no reason.
+    const head=typeof this.source.nativeHead==='function'
+      ? await this.source.nativeHead(sessionId,{signal})
+      : (source.cursor??source.events.at(-1)?.dshSeq??-1)
+    if(signal?.aborted)throw new AdapterError('unavailable')
     const view=this.#view(sessionId,head,true)
     const after=read.after_cursor?this.#position(read.after_cursor,sessionId,view.id):-1
     if(source.complete===false) {

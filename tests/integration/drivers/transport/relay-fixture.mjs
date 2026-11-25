@@ -1,4 +1,4 @@
-// Shared fixture for the epoch-4 inline/reference and live transport probes.
+// Shared fixture for the epoch-5 inline/reference and live transport probes.
 //
 // The relay object client is deliberately in-process: these probes exercise the
 // real Host RelayTransport and a real broker, while the HTTPS directory is a

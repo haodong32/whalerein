@@ -777,6 +777,7 @@ fn expanded_conversation_attachment_and_transport_shapes_are_typed() {
         result_max_bytes: 16 * 1024 * 1024,
         grant_generation: 7,
         revocation_generation: 2,
+        enrollment_generation: 3,
     };
     let request = HostRequest {
         request_id: "request-1".into(),

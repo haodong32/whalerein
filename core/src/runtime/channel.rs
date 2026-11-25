@@ -7,8 +7,9 @@ use whalerein_proto::{
 };
 
 use super::{HandshakePhase, Runtime};
-use crate::access::AccessClient;
-use crate::api::{CoreError, CoreResult, OnlineStatus};
+use crate::access::{transport, AccessClient};
+use crate::api::{Cancellation, CoreError, CoreResult, OnlineStatus};
+use crate::connection::HostConnection;
 use crate::diagnostics::journal::{DiagnosticKind, Diagnostics};
 use crate::pairing::{default_capabilities, PROTOCOL_VERSION};
 use crate::security::{channel_prologue, fingerprint, NoiseSession, SecureChannel, StaticIdentity};
@@ -21,10 +22,66 @@ pub const HANDSHAKE_TIMEOUT_MS: i64 = 30_000;
 ///
 /// A reconnect always creates a new channel and discards the old one, so old
 /// ciphertext can never be opened with the new keys.
+#[cfg(test)]
 pub async fn ensure_channel(
     runtime: &Runtime,
     access: &AccessClient,
     identity: &StaticIdentity,
+    host_id: &str,
+    device_id: &str,
+    force_new: bool,
+    expected_fingerprint: Option<&str>,
+) -> CoreResult<SecureChannel> {
+    ensure_channel_with(
+        runtime,
+        access,
+        identity,
+        None,
+        host_id,
+        device_id,
+        force_new,
+        expected_fingerprint,
+    )
+    .await
+}
+
+/// Establish the channel over the shared Host connection owner.
+///
+/// The caller must already have waited for the authorized subscription, so the
+/// Noise messages travel on the same MQTT query/reply lane as session work.
+/// The resulting channel is bound to the broker connection generation that
+/// carried the negotiation; a replacement during negotiation never installs
+/// the old channel.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ensure_channel_on(
+    runtime: &Runtime,
+    access: &AccessClient,
+    identity: &StaticIdentity,
+    connection: &std::sync::Arc<HostConnection>,
+    host_id: &str,
+    device_id: &str,
+    force_new: bool,
+    expected_fingerprint: Option<&str>,
+) -> CoreResult<SecureChannel> {
+    ensure_channel_with(
+        runtime,
+        access,
+        identity,
+        Some(connection),
+        host_id,
+        device_id,
+        force_new,
+        expected_fingerprint,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ensure_channel_with(
+    runtime: &Runtime,
+    access: &AccessClient,
+    identity: &StaticIdentity,
+    connection: Option<&std::sync::Arc<HostConnection>>,
     host_id: &str,
     device_id: &str,
     force_new: bool,
@@ -39,6 +96,7 @@ pub async fn ensure_channel(
         runtime,
         access,
         identity,
+        connection,
         host_id,
         device_id,
         force_new,
@@ -50,10 +108,36 @@ pub async fn ensure_channel(
 
 /// Refresh only if the channel which failed is still current. If another
 /// observation has already reconnected, reuse its replacement.
-pub(crate) async fn ensure_channel_after(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ensure_channel_after_on(
     runtime: &Runtime,
     access: &AccessClient,
     identity: &StaticIdentity,
+    connection: &std::sync::Arc<HostConnection>,
+    host_id: &str,
+    device_id: &str,
+    stale_channel_id: &str,
+    expected_fingerprint: Option<&str>,
+) -> CoreResult<SecureChannel> {
+    ensure_channel_after_with(
+        runtime,
+        access,
+        identity,
+        Some(connection),
+        host_id,
+        device_id,
+        stale_channel_id,
+        expected_fingerprint,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ensure_channel_after_with(
+    runtime: &Runtime,
+    access: &AccessClient,
+    identity: &StaticIdentity,
+    connection: Option<&std::sync::Arc<HostConnection>>,
     host_id: &str,
     device_id: &str,
     stale_channel_id: &str,
@@ -63,6 +147,7 @@ pub(crate) async fn ensure_channel_after(
         runtime,
         access,
         identity,
+        connection,
         host_id,
         device_id,
         true,
@@ -77,6 +162,7 @@ async fn ensure_channel_guarded(
     runtime: &Runtime,
     access: &AccessClient,
     identity: &StaticIdentity,
+    connection: Option<&std::sync::Arc<HostConnection>>,
     host_id: &str,
     device_id: &str,
     mut force_new: bool,
@@ -110,9 +196,11 @@ async fn ensure_channel_guarded(
     runtime.set_handshake_phase(host_id, HandshakePhase::Msg1Sent);
 
     let receive_generation = runtime.next_receive_generation();
+    let connection_generation = connection.map(|connection| connection.generation());
     match handshake(
         access,
         identity,
+        connection,
         host_id,
         device_id,
         expected_fingerprint,
@@ -121,11 +209,19 @@ async fn ensure_channel_guarded(
     .await
     {
         Ok(established) => {
-            // A revocation during the handshake must not install a channel: the
-            // caller has to observe the refusal, not a working channel.
+            // A revocation or connection replacement during the handshake must
+            // not install a channel: the caller has to observe the refusal.
             if runtime.is_revoked() {
                 runtime.set_handshake_phase(host_id, HandshakePhase::Failed);
                 return Err(CoreError::Revoked);
+            }
+            if let (Some(connection), Some(expected)) = (connection, connection_generation) {
+                if connection.generation() != expected {
+                    runtime.set_handshake_phase(host_id, HandshakePhase::Failed);
+                    return Err(CoreError::Unavailable(
+                        "device connection was replaced during the handshake".into(),
+                    ));
+                }
             }
             runtime.set_channel(host_id, established.channel.clone());
             // The capability set is read from `ChannelReady` once, next to the
@@ -161,6 +257,7 @@ struct Established {
 async fn handshake(
     access: &AccessClient,
     identity: &StaticIdentity,
+    connection: Option<&std::sync::Arc<HostConnection>>,
     host_id: &str,
     device_id: &str,
     expected_fingerprint: Option<&str>,
@@ -185,7 +282,15 @@ async fn handshake(
         receive: Some(device_receive),
     };
     let msg1 = noise.write(&hello.encode_to_vec())?;
-    let msg2 = send_handshake(access, host_id, device_id, &negotiation_id, msg1).await?;
+    let msg2 = send_handshake(
+        access,
+        connection,
+        host_id,
+        device_id,
+        &negotiation_id,
+        msg1,
+    )
+    .await?;
 
     let ready_payload = noise.read(&msg2)?;
     let ready = ChannelReady::decode(ready_payload.as_slice())
@@ -224,7 +329,15 @@ async fn handshake(
 
     // The plugin rejects a non-empty msg3 payload.
     let msg3 = noise.write(&[])?;
-    let result = send_handshake(access, host_id, device_id, &negotiation_id, msg3).await?;
+    let result = send_handshake(
+        access,
+        connection,
+        host_id,
+        device_id,
+        &negotiation_id,
+        msg3,
+    )
+    .await?;
     if !result.is_empty() {
         return Err(CoreError::Security(
             "unexpected payload in handshake completion".into(),
@@ -264,7 +377,7 @@ pub fn required_capability(payload: &RequestPayload) -> Option<Capability> {
         | Payload::SelectSessionModel(_) => Some(Capability::Sessions),
         Payload::ReadHistory(_)
         | Payload::WatchSession(_)
-        | Payload::RefreshWatches(_)
+        | Payload::CheckVersions(_)
         | Payload::UnwatchSession(_) => Some(Capability::Events),
         Payload::SendMessage(_) | Payload::ReadPendingQueue(_) | Payload::UpdatePendingQueue(_) => {
             Some(Capability::Messages)
@@ -312,29 +425,79 @@ pub fn require_payload_capability(
 
 async fn send_handshake(
     access: &AccessClient,
+    connection: Option<&std::sync::Arc<HostConnection>>,
     host_id: &str,
     device_id: &str,
     negotiation_id: &str,
     body: Vec<u8>,
 ) -> CoreResult<Vec<u8>> {
-    let request_id = random_id(16);
     let request = HostRequest {
-        request_id: request_id.clone(),
+        request_id: random_id(16),
         host_id: host_id.to_owned(),
         device_id: device_id.to_owned(),
         kind: RequestKind::Handshake as i32,
         command_id: String::new(),
         payload_digest: Vec::new(),
         expires_at_unix_ms: now_unix_ms() + HANDSHAKE_TIMEOUT_MS,
-        relay_version: crate::access::transport::RELAY_EPOCH_V4,
+        relay_version: crate::access::transport::RELAY_EPOCH_V5,
         trace_id: access.trace_id().to_owned(),
         protocol_version: PROTOCOL_VERSION,
         channel_id: negotiation_id.to_owned(),
         body,
         body_reference: None,
         transport: None,
+        connection_ref: String::new(),
+        grant_generation: 0,
+        enrollment_generation: 0,
     };
-    let receipt = access.submit_request(host_id, &request).await?;
+    let Some(connection) = connection else {
+        #[cfg(test)]
+        {
+            return send_handshake_http(access, request).await;
+        }
+        #[cfg(not(test))]
+        {
+            return Err(CoreError::Internal(
+                "Noise establishment requires the shared host connection".into(),
+            ));
+        }
+    };
+    let result = connection.query(&request, &Cancellation::new()).await?;
+    transport::validate_host_result_representation(&result).map_err(CoreError::from)?;
+    if result.request_id != request.request_id
+        || result.host_id != host_id
+        || result.device_id != device_id
+        || result.channel_id != negotiation_id
+    {
+        return Err(CoreError::Security(
+            "handshake reply identity mismatch".into(),
+        ));
+    }
+    if result.result_reference.is_some() {
+        return Err(CoreError::ProtocolIncompatible);
+    }
+    match OnlineStatus::from_proto(result.status) {
+        Some(OnlineStatus::Succeeded) => Ok(result.result_body),
+        Some(OnlineStatus::HostOffline) => Err(CoreError::HostOffline),
+        Some(OnlineStatus::Rejected) => Err(CoreError::HostRejected),
+        Some(OnlineStatus::Failed)
+            if result.error_code == whalerein_proto::ErrorCode::Unavailable as i32 =>
+        {
+            Err(CoreError::Unavailable(
+                "Host presence is unavailable".into(),
+            ))
+        }
+        Some(OnlineStatus::Failed) | Some(OnlineStatus::Unknown) => Err(CoreError::UnknownResult),
+        _ => Err(CoreError::Internal("handshake did not complete".into())),
+    }
+}
+
+/// Test-only handshake over the HTTP request/poll fixture. Production
+/// post-pairing Noise establishment always uses `send_handshake` on the shared
+/// MQTT query lane.
+#[cfg(test)]
+async fn send_handshake_http(access: &AccessClient, request: HostRequest) -> CoreResult<Vec<u8>> {
+    let receipt = access.submit_request(&request.host_id, &request).await?;
     match OnlineStatus::from_proto(receipt.status) {
         Some(OnlineStatus::HostOffline) => return Err(CoreError::HostOffline),
         Some(OnlineStatus::Rejected) => return Err(CoreError::HostRejected),

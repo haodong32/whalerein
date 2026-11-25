@@ -55,6 +55,27 @@ export class SourceAdapter {
   async readSessionModel() { throw new AdapterError('unsupported_capability') }
   async readPendingQueue() { throw new AdapterError('unsupported_capability') }
   async readState() { throw new AdapterError('unsupported_capability') }
+  // Read-only authoritative version markers for one active observation. It
+  // must not renew, extend or otherwise mutate observation ownership and must
+  // read only the requested facets. `conversation` yields revision/run_phase/
+  // live_epoch/history_head/projection_id; `questions` yields the question
+  // descriptor. This default composes the existing reads for simple Sources;
+  // an adapter with cheaper native reads should override it.
+  async readVersionMarkers(sessionId, facets = {}, options = {}) {
+    const markers = {}
+    if (facets.conversation === true) {
+      const state = await this.readState(sessionId, options)
+      markers.revision = state.revision ?? 0
+      if (state.run_phase !== undefined) markers.run_phase = state.run_phase
+      if (state.live_epoch !== undefined) markers.live_epoch = state.live_epoch
+      if (state.history_head !== undefined) markers.history_head = state.history_head
+      if (state.projection_id !== undefined) markers.projection_id = state.projection_id
+    }
+    if (facets.questions === true) {
+      markers.questions = await this.readQuestionStamp(sessionId, options)
+    }
+    return markers
+  }
   async readWaitState() { throw new AdapterError('unsupported_capability') }
   // Wait observes execution only. Aborting the signal must not interrupt it.
   async waitSession() { throw new AdapterError('unsupported_capability') }

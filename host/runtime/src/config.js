@@ -23,7 +23,9 @@ export function topics(hostId) {
     request: `whalerein/v1/h/${hostId}/request`,
     result: `whalerein/v1/h/${hostId}/result`,
     event: `whalerein/v1/h/${hostId}/event`,
-    live: `whalerein/v1/h/${hostId}/live`,
+    // QoS 0 previews travel directly to the authorized device topic. There is
+    // no shared Host live topic and Access never republishes a preview.
+    deviceLive: (deviceId) => `whalerein/v1/h/${hostId}/d/${deviceId}/live`,
     deviceEvent: (deviceId) => `whalerein/v1/h/${hostId}/d/${deviceId}/event`,
     presence: `whalerein/v1/h/${hostId}/presence`,
   }

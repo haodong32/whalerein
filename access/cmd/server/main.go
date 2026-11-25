@@ -32,6 +32,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/line"
 	"github.com/whalerein/whalerein/access/internal/pairing"
 	"github.com/whalerein/whalerein/access/internal/payload"
+	"github.com/whalerein/whalerein/access/internal/query"
 	"github.com/whalerein/whalerein/access/internal/relay"
 	"github.com/whalerein/whalerein/access/internal/requests"
 	"github.com/whalerein/whalerein/access/internal/serverready"
@@ -267,8 +268,8 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	presence := broker.NewPresence(cfg.Presence.CacheTTL.D(), metrics, logger)
 
 	var service *broker.Service
-	connector, err := broker.NewPahoConnectorWithTransport(cfg.Broker, transport, metrics, func(topic string, payload []byte) {
-		service.HandleMessage(topic, payload)
+	connector, err := broker.NewPahoConnectorWithTransport(cfg.Broker, transport, metrics, func(message broker.Message) {
+		service.HandleMessage(message)
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("configure broker: %w", err)
@@ -382,6 +383,21 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 	service.SetPayloadStager(stager)
 
+	queryService, err := query.New(query.Dependencies{
+		Store:       db,
+		Connections: presence,
+		Hosts:       presence,
+		Publisher:   service,
+		Config: query.Config{
+			MaxTTL: cfg.Requests.MaxTTL.D(),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("query lane: %w", err)
+	}
+	service.SetQueryHandler(queryService)
+	relayService.SetQueryScopes(queryService)
+
 	requestDeps := requests.Dependencies{
 		Store:    db,
 		Broker:   service,
@@ -447,7 +463,6 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 
 	service.SetResultHandler(requestService.HandleHostResult)
 	service.SetEventHandler(eventService.Handle)
-	service.SetLiveEventHandler(eventService.HandleLive)
 	service.SetHostKeyHandler(authService.RememberHostAuthorizationKey)
 
 	readiness := diagnostics.NewReadiness()
@@ -559,6 +574,20 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			if storageService.Enabled() {
 				go relay.RunPayloadStorage(runCtx, storageService, stager, cfg.Storage.CleanupInterval.D(), logger)
 			}
+			// Transient query waiters are bounded by their own deadline even
+			// when no result and no disconnect ever arrives.
+			go func() {
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-runCtx.Done():
+						return
+					case <-ticker.C:
+						queryService.Sweep()
+					}
+				}
+			}()
 			ops.cleanup(runCtx, db, cfg.Cleanup.Interval.D(), cfg.Cleanup.PairingTokenRetention.D(), logger, metrics)
 		}, logger, 10*time.Second)
 }

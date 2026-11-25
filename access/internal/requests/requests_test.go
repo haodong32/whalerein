@@ -360,7 +360,7 @@ func validRequest(now time.Time, commandID string) *whalereinv1.HostRequest {
 		PayloadDigest:   []byte("digest"),
 		ExpiresAtUnixMs: now.Add(5 * time.Minute).UnixMilli(),
 		ProtocolVersion: 1,
-		RelayVersion:    4,
+		RelayVersion:    5,
 		ChannelId:       "channel-1",
 		TraceId:         "trace-1",
 		Body:            []byte("ciphertext"),
@@ -404,14 +404,12 @@ func TestValidateRejectsInvalidRequestsAndAcceptsValidOnes(t *testing.T) {
 		{"rejects unsupported protocol version", func(r *whalereinv1.HostRequest) { r.ProtocolVersion = 2 }, nil, ErrProtocolVersion},
 		{"rejects expired request", func(r *whalereinv1.HostRequest) { r.ExpiresAtUnixMs = now.Add(-time.Second).UnixMilli() }, nil, ErrExpired},
 		{"rejects request beyond maximum lifetime", func(r *whalereinv1.HostRequest) { r.ExpiresAtUnixMs = now.Add(2 * time.Hour).UnixMilli() }, nil, ErrInvalidRequest},
-		{"rejects command identity on handshake", func(r *whalereinv1.HostRequest) {
+		{"rejects retired handshake route", func(r *whalereinv1.HostRequest) {
 			r.Kind = whalereinv1.RequestKind_REQUEST_KIND_HANDSHAKE
-			r.CommandId = "c"
-		}, nil, ErrInvalidRequest},
-		{"rejects digest on query", func(r *whalereinv1.HostRequest) {
+		}, nil, ErrProtocolVersion},
+		{"rejects retired query route", func(r *whalereinv1.HostRequest) {
 			r.Kind = whalereinv1.RequestKind_REQUEST_KIND_QUERY
-			r.PayloadDigest = []byte("d")
-		}, nil, ErrInvalidRequest},
+		}, nil, ErrProtocolVersion},
 		{"rejects command without command ID", func(r *whalereinv1.HostRequest) { r.CommandId = "" }, nil, ErrInvalidRequest},
 		{"rejects command without payload digest", func(r *whalereinv1.HostRequest) { r.PayloadDigest = nil }, nil, ErrInvalidRequest},
 		{"rejects pairing claim in request submission", func(r *whalereinv1.HostRequest) { r.Kind = whalereinv1.RequestKind_REQUEST_KIND_PAIRING_CLAIM }, nil, ErrInvalidRequest},
@@ -440,9 +438,6 @@ func TestSubmitMarksOfflineHostWithoutPublishing(t *testing.T) {
 	f := newFixture(t)
 	f.presence.online["h1"] = false
 	request := validRequest(f.now, "c1")
-	request.Kind = whalereinv1.RequestKind_REQUEST_KIND_HANDSHAKE
-	request.CommandId = ""
-	request.PayloadDigest = nil
 	row, created, err := f.service.Submit(context.Background(), input(request))
 	if err != nil || !created {
 		t.Fatalf("row=%+v created=%v err=%v", row, created, err)
@@ -892,7 +887,7 @@ func TestRelayEpochSurvivesDurableForwardingAndRejectsForeignEpochs(t *testing.T
 	if len(f.broker.published) == 0 || f.broker.published[len(f.broker.published)-1].RelayVersion != RelayEpoch {
 		t.Fatal("relay epoch lost on replay")
 	}
-	for _, version := range []uint32{0, 2, 3, 5} {
+	for _, version := range []uint32{0, 2, 3, 4} {
 		request.RelayVersion = version
 		if _, _, err := f.service.Submit(context.Background(), input(request)); !errors.Is(err, ErrProtocolVersion) {
 			t.Fatalf("foreign epoch %d was admitted", version)

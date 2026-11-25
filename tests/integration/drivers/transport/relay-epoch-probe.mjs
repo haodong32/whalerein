@@ -1,4 +1,4 @@
-// One epoch-4 transport probe per AC subcase. Each invocation prints one JSON
+// One epoch-5 transport probe per AC subcase. Each invocation prints one JSON
 // fact object; the Python case asserts the named identity. Only counts, sizes
 // and stable codes are printed, never ciphertext or message content.
 
@@ -7,8 +7,8 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { MqttAccess } from '../../../../host/runtime/src/access/mqtt.js'
 import { RelayObjectClient } from '../../../../host/runtime/src/access/relay-client.js'
-import { RelayTransport, maxPlaintextBytes } from '../../../../host/runtime/src/access/transport.js'
-import { publishPacketBytes } from '../../../../host/runtime/src/access/packet.js'
+import { RelayTransport } from '../../../../host/runtime/src/access/transport.js'
+import { maxPlaintextBytes, publishPacketBytes } from '../../../../host/runtime/src/access/packet.js'
 import { codec } from '../../../../host/runtime/src/protocol.js'
 import {
   capturePublishes,
@@ -36,7 +36,7 @@ function envelope(hostId, body, requestId = randomUUID(), extra = {}) {
     result_body: body,
     completed_at_unix_ms: 1,
     protocol_version: 1,
-    relay_version: 4,
+    relay_version: 5,
     ...extra,
   })
 }
@@ -59,7 +59,7 @@ function eventEnvelope(hostId, length) {
     nonce: Buffer.alloc(12),
     ciphertext: bytes(length),
     created_at_unix_ms: 1,
-    relay_version: 4,
+    relay_version: 5,
   })
 }
 
@@ -157,7 +157,7 @@ async function caseReferenceLimit() {
     purpose: 'PAYLOAD_PURPOSE_RESULT',
   }
   const payload = proto.encode('whalerein.v1.HostResult', {
-    request_id: randomUUID(), host_id: hostId, status: 'succeeded', relay_version: 4,
+    request_id: randomUUID(), host_id: hostId, status: 'succeeded', relay_version: 5,
     result_reference: reference,
   })
   let code = ''
@@ -199,7 +199,7 @@ async function caseLegacy() {
   const stub = createRelayStub()
   const transport = new RelayTransport({ publish: async () => {}, relay: stub.relay })
   const codes = {}
-  for (const epoch of [0, 2, 3]) {
+  for (const epoch of [0, 2, 3, 4]) {
     try {
       await transport.sendComplete(topic, proto.encode('whalerein.v1.HostResult', {
         request_id: randomUUID(), host_id: hostId, status: 'succeeded', result_body: bytes(16), relay_version: epoch,
@@ -212,7 +212,7 @@ async function caseLegacy() {
   // A mixed artifact with both representations is never admitted either.
   try {
     await transport.sendComplete(topic, proto.encode('whalerein.v1.HostResult', {
-      request_id: randomUUID(), host_id: hostId, status: 'succeeded', result_body: bytes(16), relay_version: 4,
+      request_id: randomUUID(), host_id: hostId, status: 'succeeded', result_body: bytes(16), relay_version: 5,
       result_reference: { object_id: 'f'.repeat(32), owner_node_id: 'n', ciphertext_bytes: 16, sha256: Buffer.alloc(32), expires_at_unix_ms: Date.now() + 60000, purpose: 'PAYLOAD_PURPOSE_RESULT' },
     }), { kind: 'result' })
     codes.mixed = 'accepted'
@@ -236,13 +236,16 @@ async function caseLegacy() {
         request_id: 'legacy', host_id: hostId, kind: 'REQUEST_KIND_QUERY', relay_version: 2,
         body: Buffer.from('WRMQTT2legacy'), protocol_version: 1,
       }), { qos: 1 })
-      const validId = 'valid-v4'
+      const validId = 'valid-v5'
       await new Promise((resolve) => setTimeout(resolve, 300))
       assert.equal(delivered, 0, 'a legacy epoch must not reach the Host business handler')
       await publisher.publishAsync(requestTopic, proto.encode('whalerein.v1.HostRequest', {
-        request_id: validId, host_id: hostId, kind: 'REQUEST_KIND_QUERY', relay_version: 4,
-        body: Buffer.from('valid'), protocol_version: 1,
-      }), { qos: 1 })
+        request_id: validId, host_id: hostId, kind: 'REQUEST_KIND_QUERY', relay_version: 5,
+        body: Buffer.from('valid'), protocol_version: 1, expires_at_unix_ms: Date.now() + 30000,
+      }), { qos: 1, properties: {
+        messageExpiryInterval: 30, correlationData: Buffer.from(validId),
+        responseTopic: `whalerein/v1/h/${hostId}/result`,
+      } })
       const deadline = Date.now() + 2000
       while (delivered === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
       assert.equal(delivered, 1, 'a current epoch request still reaches the handler')
@@ -371,7 +374,7 @@ async function caseBulkFairness() {
 
 async function caseLiveClass() {
   const hostId = `probe-live-${randomUUID().slice(0, 10)}`
-  const liveTopic = `whalerein/v1/h/${hostId}/live`
+  const liveTopic = `whalerein/v1/h/${hostId}/d/device-fixture/live`
   const eventTopic = `whalerein/v1/h/${hostId}/event`
   const stub = createRelayStub()
   const subscriber = await subscribe(MQTT_URL, `whalerein/v1/h/${hostId}/#`, { qos: 1 })
@@ -422,7 +425,7 @@ async function caseLiveClass() {
 
 async function caseLiveInlineAndDrop() {
   const hostId = `probe-live-drop-${randomUUID().slice(0, 10)}`
-  const liveTopic = `whalerein/v1/h/${hostId}/live`
+  const liveTopic = `whalerein/v1/h/${hostId}/d/device-fixture/live`
   const eventTopic = `whalerein/v1/h/${hostId}/event`
   const stub = createRelayStub()
   const subscriber = await subscribe(MQTT_URL, `whalerein/v1/h/${hostId}/#`, { qos: 1 })
@@ -454,7 +457,7 @@ async function caseLiveInlineAndDrop() {
       nonce: Buffer.alloc(12),
       ciphertext: bytes(8),
       created_at_unix_ms: 1,
-      relay_version: 4,
+      relay_version: 5,
       payload_reference: {
         object_id: 'f'.repeat(32),
         owner_node_id: 'node-fixture',

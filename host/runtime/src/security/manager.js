@@ -30,6 +30,7 @@ import {
   RELAY_VERSION,
   resolveTransportProfile,
   transportProfileBudget,
+  validateBrokerConnectionRef,
   validateReceiveAdvertisement,
 } from '../contracts/transport.js'
 
@@ -77,6 +78,16 @@ function requiredString(value, name) {
   return value
 }
 
+function requestGeneration(value) {
+  if (value === undefined || value === null || value === 0 || value === '0') return 0
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : null
+  if (typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value)) {
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) ? parsed : null
+  }
+  return null
+}
+
 export class SecurityManager {
   #channels = new Map()
   #pendingHandshakes = new Map()
@@ -84,6 +95,10 @@ export class SecurityManager {
   #completedPairings = new Map()
   #revocationsPending = false
   #channelReceiveGeneration = 0
+  // Bounded memory of Broker connection instances that were closed by revoke,
+  // replacement or lifecycle. A late reply bound to one of them is dropped.
+  #closedConnections = new Map()
+  #closedConnectionsLimit = 512
 
   /**
    * @param {object} options
@@ -118,6 +133,7 @@ export class SecurityManager {
     maxDeviceChannels = MAX_DEVICE_CHANNELS,
     maxHostChannels = MAX_HOST_CHANNELS,
     onClosedChannels = () => {},
+    onRevokedDevices = () => {},
     onRevokedChannels = () => {},
     receiveAdvertisement = () => defaultReceiveAdvertisement(1),
   }) {
@@ -134,6 +150,7 @@ export class SecurityManager {
     this.maxDeviceChannels = maxDeviceChannels
     this.maxHostChannels = maxHostChannels
     this.onClosedChannels = onClosedChannels
+    this.onRevokedDevices = onRevokedDevices
     this.onRevokedChannels = onRevokedChannels
     this.receiveAdvertisement = receiveAdvertisement
     this.hostFingerprint = identity.fingerprint ?? fingerprint(identity.publicKey)
@@ -168,6 +185,59 @@ export class SecurityManager {
     return this.getChannel(channelId)?.receive ?? null
   }
 
+  /** The Broker connection instance that owns one authenticated channel. */
+  getChannelConnectionRef(channelId) {
+    return this.getChannel(channelId)?.connectionRef ?? null
+  }
+
+  /**
+   * True when a reply still belongs to the connection scope that admitted it.
+   * A channel removed by revoke, replace or lifecycle close can never publish a
+   * late result.
+   */
+  canReplyForRequest(request) {
+    if (!request || typeof request !== 'object') return false
+    if (request.kind !== 'REQUEST_KIND_QUERY' && request.kind !== 'REQUEST_KIND_HANDSHAKE') return true
+    const ref = typeof request.connection_ref === 'string' ? request.connection_ref : ''
+    if (request.kind === 'REQUEST_KIND_HANDSHAKE') {
+      const pending = this.#pendingHandshakes.get(request.channel_id)
+      if (pending && pending.deviceId === request.device_id) {
+        return ref === '' || pending.connectionRef === ref
+      }
+      const channel = this.#resolveChannel(request.channel_id, request.device_id)
+      return channel ? ref === '' || channel.connectionRef === ref : true
+    }
+    // The exact connection instance that owned this query is already closed by
+    // revoke, replacement or lifecycle. No late result may be published.
+    if (ref !== '' && this.#closedConnections.has(ref)) return false
+    if (request.kind === 'REQUEST_KIND_QUERY') {
+      const channel = this.#resolveChannel(request.channel_id, request.device_id)
+      if (!channel) return true
+      return ref === '' || channel.connectionRef === ref
+    }
+    return true
+  }
+
+  /**
+   * Close only the channels and in-progress handshakes owned by one exact
+   * Broker connection instance. A delayed close for an older reference never
+   * touches a newer connection's channels.
+   */
+  closeConnection(deviceId, connectionRef) {
+    let ref
+    try { ref = validateBrokerConnectionRef(connectionRef) } catch { return [] }
+    this.#markConnectionClosed(ref)
+    const closed = this.#removeChannels(channel => channel.deviceId === deviceId && channel.connectionRef === ref)
+    for (const [key, pending] of this.#pendingHandshakes) {
+      if (pending.deviceId === deviceId && pending.connectionRef === ref) this.#pendingHandshakes.delete(key)
+    }
+    if (closed.length > 0) {
+      this.logger?.info('connection_channels_cleared', { count: closed.length, device: deviceId })
+      this.onClosedChannels(closed, 'connection_closed')
+    }
+    return closed
+  }
+
   #hostReceive() {
     try { return validateReceiveAdvertisement(this.receiveAdvertisement()) }
     catch { throw new PluginError('invalid_argument', 'host receive advertisement invalid') }
@@ -192,6 +262,15 @@ export class SecurityManager {
 
   #isIdle(channel, now) {
     return channel.inFlight === 0 && channel.lastUsedAt + this.channelIdleMs <= now
+  }
+
+  #markConnectionClosed(connectionRef) {
+    if (typeof connectionRef !== 'string' || connectionRef === '') return
+    if (this.#closedConnections.has(connectionRef)) this.#closedConnections.delete(connectionRef)
+    this.#closedConnections.set(connectionRef, this.now())
+    while (this.#closedConnections.size > this.#closedConnectionsLimit) {
+      this.#closedConnections.delete(this.#closedConnections.keys().next().value)
+    }
   }
 
   #removeChannels(matches) {
@@ -238,6 +317,9 @@ export class SecurityManager {
    * @returns {Array<{deviceId: string, channelId: string}>} closed channels.
    */
   #clearDeviceChannels(deviceId) {
+    for (const pending of this.#pendingHandshakes.values()) {
+      if (pending.deviceId === deviceId) this.#markConnectionClosed(pending.connectionRef)
+    }
     const closed = this.#removeChannels(channel => channel.deviceId === deviceId)
     for (const [key, pending] of this.#pendingHandshakes) {
       if (pending.deviceId === deviceId) this.#pendingHandshakes.delete(key)
@@ -493,6 +575,14 @@ export class SecurityManager {
     if (this.#revocationsPending) throw new PluginError('revocations_pending', 'revocation replay pending')
     const channelId = requiredString(request.channel_id, 'channel_id')
     const deviceId = requiredString(request.device_id, 'device_id')
+    let connectionRef
+    try { connectionRef = validateBrokerConnectionRef(request.connection_ref) }
+    catch { throw new PluginError('invalid_argument', 'connection reference missing') }
+    const grantGeneration = requestGeneration(request.grant_generation)
+    const enrollmentGeneration = requestGeneration(request.enrollment_generation)
+    if (grantGeneration === null || enrollmentGeneration === null) {
+      throw new PluginError('invalid_argument', 'request generation invalid')
+    }
     const message = request.body
     const peer = this.store.getPeerKey(deviceId)
     if (!peer) throw new PluginError('unauthorized', 'device not paired')
@@ -553,6 +643,9 @@ export class SecurityManager {
       this.#pendingHandshakes.set(channelId, {
         deviceId,
         noise,
+        connectionRef,
+        grantGeneration,
+        enrollmentGeneration,
         receive: deviceReceive,
         receiveGeneration: hostReceive.connection_generation,
         expiresAt: this.now() + this.pendingTtlMs,
@@ -561,6 +654,10 @@ export class SecurityManager {
       return reply
     }
     if (pending.deviceId !== deviceId) throw new PluginError('forbidden', 'channel device mismatch')
+    if (pending.connectionRef !== connectionRef) throw new PluginError('unauthorized', 'connection replaced during handshake')
+    if (pending.grantGeneration !== grantGeneration || pending.enrollmentGeneration !== enrollmentGeneration) {
+      throw new PluginError('unauthorized', 'authorization scope changed during handshake')
+    }
     this.#pendingHandshakes.delete(channelId)
     let payload
     try {
@@ -589,6 +686,9 @@ export class SecurityManager {
     const channel = {
       channelId,
       deviceId,
+      connectionRef,
+      grantGeneration,
+      enrollmentGeneration,
       c2h: derived.c2h,
       h2c: derived.h2c,
       createdAt: now,
@@ -617,6 +717,27 @@ export class SecurityManager {
   #openRequest(request) {
     const channel = this.#resolveChannel(request.channel_id, request.device_id)
     if (!channel) return { ok: false, code: 'unauthorized', reason: 'channel_missing' }
+    // A query is bound to the Broker connection that established the channel.
+    // A delayed request stamped with a replaced connection cannot ride a newer
+    // channel, even with a valid frame.
+    if (request.connection_ref !== undefined && request.connection_ref !== ''
+        && channel.connectionRef !== request.connection_ref) {
+      return { ok: false, code: 'unauthorized', reason: 'connection_changed' }
+    }
+    // Top-level generations are Access-filled for query-lane requests only.
+    // A durable command carries no such stamp and must not be compared against
+    // the channel's admission scope. An explicit zero remains a valid
+    // Standalone generation and is still compared.
+    const grantGeneration = request.grant_generation === undefined || request.grant_generation === null
+      ? null
+      : requestGeneration(request.grant_generation)
+    const enrollmentGeneration = request.enrollment_generation === undefined || request.enrollment_generation === null
+      ? null
+      : requestGeneration(request.enrollment_generation)
+    if ((grantGeneration !== null && grantGeneration !== channel.grantGeneration)
+        || (enrollmentGeneration !== null && enrollmentGeneration !== channel.enrollmentGeneration)) {
+      return { ok: false, code: 'unauthorized', reason: 'authorization_scope_changed' }
+    }
     let frame
     try {
       frame = this.codec.decode('whalerein.v1.EncryptedFrame', request.body)
@@ -716,6 +837,9 @@ export class SecurityManager {
       revokedAt: notice.revoked_at_unix_ms ?? this.now(),
       now: this.now(),
     })
+    // Close observations while the channel keys still exist so each Device can
+    // receive an authenticated terminal WatchClosed with the revocation reason.
+    if (applied.length > 0) this.onRevokedDevices(applied)
     const closed = []
     for (const deviceId of applied) {
       closed.push(...this.#clearDeviceChannels(deviceId))

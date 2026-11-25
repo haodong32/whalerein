@@ -596,8 +596,8 @@
         "number": 0
       },
       {
-        "name": "RELAY_EPOCH_V4",
-        "number": 4
+        "name": "RELAY_EPOCH_V5",
+        "number": 5
       }
     ],
     "RequestKind": [
@@ -1275,6 +1275,17 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ReceiveAdvertisement"
+        }
+      ]
+    },
+    "CheckVersions": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -2539,6 +2550,27 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.PayloadReference"
+        },
+        {
+          "json_name": "connectionRef",
+          "name": "connection_ref",
+          "number": 17,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "grantGeneration",
+          "name": "grant_generation",
+          "number": 18,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "enrollmentGeneration",
+          "name": "enrollment_generation",
+          "number": 19,
+          "repeated": false,
+          "type": "TYPE_UINT64"
         }
       ]
     },
@@ -4467,17 +4499,6 @@
         }
       ]
     },
-    "RefreshWatches": {
-      "fields": [
-        {
-          "json_name": "watchIds",
-          "name": "watch_ids",
-          "number": 1,
-          "repeated": true,
-          "type": "TYPE_STRING"
-        }
-      ]
-    },
     "RelayObject": {
       "fields": [
         {
@@ -4707,6 +4728,27 @@
           "number": 12,
           "repeated": false,
           "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "requestId",
+          "name": "request_id",
+          "number": 13,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "enrollmentGeneration",
+          "name": "enrollment_generation",
+          "number": 14,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "connectionRef",
+          "name": "connection_ref",
+          "number": 15,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -4812,13 +4854,13 @@
           "type_name": "whalerein.v1.WatchSession"
         },
         {
-          "json_name": "refreshWatches",
-          "name": "refresh_watches",
+          "json_name": "checkVersions",
+          "name": "check_versions",
           "number": 13,
           "oneof": "payload",
           "repeated": false,
           "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.RefreshWatches"
+          "type_name": "whalerein.v1.CheckVersions"
         },
         {
           "json_name": "unwatchSession",
@@ -5217,6 +5259,13 @@
           "number": 3,
           "repeated": false,
           "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "enrollmentGeneration",
+          "name": "enrollment_generation",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_UINT64"
         }
       ]
     },
@@ -5343,13 +5392,13 @@
           "type_name": "whalerein.v1.WatchReady"
         },
         {
-          "json_name": "watchStates",
-          "name": "watch_states",
+          "json_name": "versionChecks",
+          "name": "version_checks",
           "number": 13,
           "oneof": "payload",
           "repeated": false,
           "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.WatchStates"
+          "type_name": "whalerein.v1.VersionChecks"
         },
         {
           "json_name": "sessionInfo",
@@ -6353,6 +6402,73 @@
         }
       ]
     },
+    "VersionCheck": {
+      "fields": [
+        {
+          "json_name": "watchId",
+          "name": "watch_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "revision",
+          "name": "revision",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "runPhase",
+          "name": "run_phase",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.RunPhase"
+        },
+        {
+          "json_name": "liveEpoch",
+          "name": "live_epoch",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "historyHead",
+          "name": "history_head",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "projectionId",
+          "name": "projection_id",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "questions",
+          "name": "questions",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.QuestionDescriptor"
+        }
+      ]
+    },
+    "VersionChecks": {
+      "fields": [
+        {
+          "json_name": "checks",
+          "name": "checks",
+          "number": 1,
+          "repeated": true,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.VersionCheck"
+        }
+      ]
+    },
     "WaitSession": {
       "fields": [
         {
@@ -6401,68 +6517,6 @@
           "number": 3,
           "repeated": false,
           "type": "TYPE_STRING"
-        }
-      ]
-    },
-    "WatchLease": {
-      "fields": [
-        {
-          "json_name": "watchId",
-          "name": "watch_id",
-          "number": 1,
-          "repeated": false,
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "leaseMs",
-          "name": "lease_ms",
-          "number": 2,
-          "repeated": false,
-          "type": "TYPE_UINT32"
-        },
-        {
-          "json_name": "revision",
-          "name": "revision",
-          "number": 3,
-          "repeated": false,
-          "type": "TYPE_UINT64"
-        },
-        {
-          "json_name": "runPhase",
-          "name": "run_phase",
-          "number": 4,
-          "repeated": false,
-          "type": "TYPE_ENUM",
-          "type_name": "whalerein.v1.RunPhase"
-        },
-        {
-          "json_name": "liveEpoch",
-          "name": "live_epoch",
-          "number": 5,
-          "repeated": false,
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "historyHead",
-          "name": "history_head",
-          "number": 6,
-          "repeated": false,
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "projectionId",
-          "name": "projection_id",
-          "number": 7,
-          "repeated": false,
-          "type": "TYPE_STRING"
-        },
-        {
-          "json_name": "questions",
-          "name": "questions",
-          "number": 8,
-          "repeated": false,
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.QuestionDescriptor"
         }
       ]
     },
@@ -6516,18 +6570,6 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ObservationInterests"
-        }
-      ]
-    },
-    "WatchStates": {
-      "fields": [
-        {
-          "json_name": "watches",
-          "name": "watches",
-          "number": 1,
-          "repeated": true,
-          "type": "TYPE_MESSAGE",
-          "type_name": "whalerein.v1.WatchLease"
         }
       ]
     }
