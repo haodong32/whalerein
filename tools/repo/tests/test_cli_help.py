@@ -3,10 +3,12 @@
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 from repo import cli
+from repo.runners import ios
 
 
 def forbid_dispatch(*args, **kwargs):
@@ -24,7 +26,8 @@ def test_bare_command_prints_help_without_discovering_projects(monkeypatch, caps
 
 
 @pytest.mark.parametrize(
-    "command", [None, "projects", "doctor", "fmt", "check", "build", "test", "report", "proto"]
+    "command",
+    [None, "projects", "doctor", "fmt", "check", "build", "generate", "test", "report", "proto"],
 )
 def test_help_is_informational_even_with_json(monkeypatch, capsys, command):
     monkeypatch.setattr(cli, "dispatch", forbid_dispatch)
@@ -44,6 +47,7 @@ def test_help_is_informational_even_with_json(monkeypatch, capsys, command):
         (["unknown"], "./repo --help"),
         (["test", "--unknown"], "./repo test --help"),
         (["report"], "./repo report --help"),
+        (["generate"], "./repo generate --help"),
     ],
 )
 def test_usage_errors_keep_json_envelope_and_suggest_relevant_help(capsys, arguments, hint):
@@ -52,6 +56,29 @@ def test_usage_errors_keep_json_envelope_and_suggest_relevant_help(capsys, argum
     payload = json.loads(captured.out)
     assert payload["error"]["code"] == "usage_error"
     assert hint in payload["error"]["message"]
+
+
+@pytest.mark.parametrize(("platform", "exit_code"), [("darwin", 0), ("linux", 3)])
+def test_generate_ios_dispatches_only_on_macos(monkeypatch, capsys, tmp_path, platform, exit_code):
+    calls = []
+
+    def run(self, argv, cwd, *, check):
+        calls.append((argv, cwd, check))
+
+    monkeypatch.setattr(cli, "find_root", lambda: tmp_path)
+    monkeypatch.setattr(cli.Runner, "run", run)
+    monkeypatch.setattr(ios, "sys", SimpleNamespace(platform=platform))
+    assert cli.main(["generate", "ios", "--json"]) == exit_code
+    payload = json.loads(capsys.readouterr().out)
+    if exit_code == 0:
+        assert calls == [(("bash", "apps/ios/scripts/generate-project.sh"), tmp_path, True)]
+        assert payload["data"] == {
+            "target": "ios",
+            "project": str(tmp_path / "apps/ios/WhaleRein.xcodeproj"),
+        }
+    else:
+        assert calls == []
+        assert payload["error"]["code"] == "tool_missing"
 
 
 def test_test_help_describes_real_targets_and_prerequisites(capsys):

@@ -33,7 +33,7 @@ Requirements: macOS with Xcode 16.4 or later, Rust with the
 (`rustup target add aarch64-apple-ios-macabi`).
 
 ```bash
-bash apps/ios/scripts/generate-project.sh
+./repo generate ios
 open apps/ios/WhaleRein.xcodeproj
 ```
 

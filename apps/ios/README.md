@@ -45,7 +45,7 @@ keeps the fixture path.
 Generate the Xcode project before opening it:
 
 ```sh
-bash apps/ios/scripts/generate-project.sh
+./repo generate ios
 open apps/ios/WhaleRein.xcodeproj
 ```
 

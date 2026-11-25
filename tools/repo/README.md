@@ -21,6 +21,7 @@ without executing a task.
 | `fmt [TARGET]` | Write formatting changes. |
 | `check [TARGET]` | Check formatting and run static analysis without modifying source. |
 | `build [TARGET]` | Build applicable projects; Access writes `.data/bin/whalerein-access`. |
+| `generate ios` | Generate the Xcode project on macOS and build missing Rust bindings. |
 | `test [TARGET]` | Run native unit tests by default; see selection below. |
 | `report RUN_DIRECTORY` | Render saved report.json as report.html in the run directory. |
 | `recover RUN_DIRECTORY` | Clean up resources whose ownership is recorded in an abandoned run. |

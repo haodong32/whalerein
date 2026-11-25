@@ -78,6 +78,7 @@ Full reference: tools/repo/README.md""",
         "fmt": "Format source files in place for applicable projects.",
         "check": "Check formatting and static analysis without modifying source or running tests.",
         "build": "Build applicable projects.",
+        "generate": "Generate local project files.",
         "test": "Run native unit tests by default; integration tests are opt-in.",
         "bench": "Measure the plugin–Access–client path under controlled network conditions.",
         "bench-compare": "Compare saved benchmark runs under the predeclared protocol.",
@@ -91,6 +92,7 @@ Full reference: tools/repo/README.md""",
         "fmt": "  ./repo fmt\n  ./repo fmt core",
         "check": "  ./repo check\n  ./repo check repo\n  ./repo check proto",
         "build": "  ./repo build\n  ./repo build access",
+        "generate": "  ./repo generate ios",
         "test": (
             "  ./repo test core --only reconnect\n"
             "  ./repo test core --coverage\n"
@@ -141,6 +143,8 @@ Full reference: tools/repo/README.md""",
         )
         if name in ("fmt", "check", "build", "test", "doctor"):
             sub.add_argument("target", nargs="?", metavar="TARGET", help="scope to select")
+        if name == "generate":
+            sub.add_argument("target", choices=("ios",), help="local project to generate")
         if name == "test":
             sub.add_argument(
                 "--project",
@@ -323,6 +327,10 @@ Full reference: tools/repo/README.md""",
 
 
 def dispatch(args, root, runner):
+    if args.command == "generate":
+        from .runners.ios import generate_project
+
+        return generate_project(root, runner), 0
     if args.command == "recover":
         from .runners.integration import recover_container
         from .runners.ios import recovery_callbacks
