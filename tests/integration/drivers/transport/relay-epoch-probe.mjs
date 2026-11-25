@@ -7,8 +7,8 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { MqttAccess } from '../../../../host/runtime/src/access/mqtt.js'
 import { RelayObjectClient } from '../../../../host/runtime/src/access/relay-client.js'
-import { RelayTransport, maxPlaintextBytes } from '../../../../host/runtime/src/access/transport.js'
-import { publishPacketBytes } from '../../../../host/runtime/src/access/packet.js'
+import { RelayTransport } from '../../../../host/runtime/src/access/transport.js'
+import { maxPlaintextBytes, publishPacketBytes } from '../../../../host/runtime/src/access/packet.js'
 import { codec } from '../../../../host/runtime/src/protocol.js'
 import {
   capturePublishes,

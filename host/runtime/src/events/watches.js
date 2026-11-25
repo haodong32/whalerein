@@ -4,13 +4,7 @@ import { LiveBuffer } from './live-buffer.js'
 import { splitLivePreview, utf8ByteLength } from './preview-split.js'
 import { randomUUID } from 'node:crypto'
 import { ERROR_CODES, PluginError } from '../errors.js'
-import {
-  BROKER_PACKET_LIMIT_BYTES,
-  RELAY_VERSION,
-  effectivePacketBytes,
-  maxPlaintextBytes,
-  publishPacketBytes,
-} from '../access/transport.js'
+import { maxPlaintextBytes, publishPacketBytes } from '../access/packet.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import {
   questionDescriptorToProto,
@@ -18,7 +12,7 @@ import {
   validateQuestionDescriptor,
   validateSessionUpdate,
 } from '../contracts/source.js'
-import { transportProfileBudget, validateTransportBudget } from '../contracts/transport.js'
+import { BROKER_PACKET_LIMIT_BYTES, RELAY_VERSION, transportProfileBudget, validateTransportBudget } from '../contracts/transport.js'
 
 const LEASE = 30000
 // Bounded replay/settlement memory per shared Source. It suppresses exact

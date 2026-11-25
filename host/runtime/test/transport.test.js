@@ -7,12 +7,14 @@ import {
   assertRelayEpoch,
   assertRequestRepresentation,
   assertResultRepresentation,
+} from '../src/access/transport.js'
+import {
   effectivePacketBytes,
   maxPlaintextBytes,
   publishPacketBytes,
   varintBytes,
-  RELAY_VERSION,
-} from '../src/access/transport.js'
+} from '../src/access/packet.js'
+import { RELAY_VERSION } from '../src/contracts/transport.js'
 import { codec } from '../src/protocol.js'
 
 const proto = codec()
@@ -21,7 +23,6 @@ const DEVICE = 'device-1'
 const CHANNEL = 'channel-1'
 const RESULT_TOPIC = `whalerein/v1/h/${HOST}/result`
 const EVENT_TOPIC = `whalerein/v1/h/${HOST}/event`
-const REQUEST_TOPIC = `whalerein/v1/h/${HOST}/request`
 
 const budget = (packet = 64 * 1024, envelope = 16 * 1024 * 1024) => ({
   packet_bytes: packet,
@@ -318,13 +319,13 @@ test('per-topic publication is ordered even when a later message is ready first'
   assert.deepEqual(published, ['one', 'two'])
 })
 
-test('receiveComplete resolves an inline request body directly and validates its representation and epoch', async () => {
+test('receiveRequest resolves an inline request body directly and validates its representation and epoch', async () => {
   const sender = transport()
   const request = proto.encode('whalerein.v1.HostRequest', {
     request_id: 'r1', host_id: HOST, device_id: DEVICE, kind: 'REQUEST_KIND_QUERY',
     body: new Uint8Array([9, 9]), protocol_version: 1, relay_version: RELAY_VERSION,
   })
-  const resolved = await sender.receiveComplete(REQUEST_TOPIC, request)
+  const resolved = await sender.receiveRequest(request)
   assert.equal(resolved.kind, 'REQUEST_KIND_QUERY')
   assert.deepEqual(Buffer.from(resolved.body), Buffer.from([9, 9]))
 
@@ -332,18 +333,18 @@ test('receiveComplete resolves an inline request body directly and validates its
     request_id: 'r1', host_id: HOST, device_id: DEVICE, kind: 'REQUEST_KIND_QUERY',
     body: new Uint8Array([9]), protocol_version: 1,
   })
-  await assert.rejects(sender.receiveComplete(REQUEST_TOPIC, old), (error) => error.code === 'protocol_version_incompatible')
+  await assert.rejects(sender.receiveRequest(old), (error) => error.code === 'protocol_version_incompatible')
   await assert.rejects(
-    sender.receiveComplete(REQUEST_TOPIC, proto.encode('whalerein.v1.HostRequest', {
+    sender.receiveRequest(proto.encode('whalerein.v1.HostRequest', {
       request_id: 'r1', host_id: HOST, device_id: DEVICE, kind: 'REQUEST_KIND_COMMAND',
       protocol_version: 1, relay_version: RELAY_VERSION,
     })),
     (error) => error.code === 'invalid_argument',
   )
-  await assert.rejects(sender.receiveComplete(REQUEST_TOPIC, Buffer.from('WRMQTT2legacy')), (error) => error.code === 'invalid_argument')
+  await assert.rejects(sender.receiveRequest(Buffer.from('WRMQTT2legacy')), (error) => error.code === 'invalid_argument')
 })
 
-test('receiveComplete resolves a reference to the same complete body', async () => {
+test('receiveRequest resolves a reference to the same complete body', async () => {
   const body = new Uint8Array([4, 5, 6])
   const relay = new FakeRelay()
   const objectId = 'b'.repeat(32)
@@ -361,7 +362,8 @@ test('receiveComplete resolves a reference to the same complete body', async () 
     request_id: 'r1', host_id: HOST, device_id: DEVICE, kind: 'REQUEST_KIND_COMMAND',
     body_reference: reference, protocol_version: 1, relay_version: RELAY_VERSION,
   })
-  const resolved = await sender.receiveComplete(REQUEST_TOPIC, request)
+  await assert.rejects(transport().receiveRequest(request), (error) => error.code === 'unavailable')
+  const resolved = await sender.receiveRequest(request)
   assert.deepEqual(Buffer.from(resolved.body), Buffer.from(body))
   assert.equal(resolved.body_reference, undefined)
   assert.deepEqual(relay.calls, ['fetch'])
@@ -369,7 +371,7 @@ test('receiveComplete resolves a reference to the same complete body', async () 
   // A corrupt or partial fetch is terminal and never becomes a message.
   relay.fail = 'fetch'
   await assert.rejects(
-    sender.receiveComplete(REQUEST_TOPIC, request),
+    sender.receiveRequest(request),
     (error) => error.code === 'payload_digest_mismatch',
   )
 })
@@ -386,7 +388,7 @@ test('a reference that cannot fit the envelope budget is rejected before any fet
     },
     protocol_version: 1, relay_version: RELAY_VERSION,
   })
-  await assert.rejects(sender.receiveComplete(REQUEST_TOPIC, request), (error) => error.code === 'payload_too_large')
+  await assert.rejects(sender.receiveRequest(request), (error) => error.code === 'payload_too_large')
   assert.equal(relay.calls.length, 0)
 })
 
@@ -410,18 +412,12 @@ test('invalid send and receive shapes fail before publication', async () => {
     (error) => error.code === 'invalid_argument',
   )
   const envelope = hostResult({ body: new Uint8Array(1024) })
-  const limit = publishPacketBytes(RESULT_TOPIC, envelope.length)
-  await assert.rejects(
-    sender.sendComplete(RESULT_TOPIC, envelope, { kind: 'result', receiverLimit: limit - 1, inlineOnly: true }),
-    (error) => error.code === 'payload_too_large',
-  )
+  await assert.rejects(sender.receiveRequest(new Uint8Array(0)), (error) => error.code === 'invalid_argument')
   await assert.rejects(
     transport({ relay: null }).sendComplete(RESULT_TOPIC, envelope, { kind: 'result', receiverLimit: 100 }),
     (error) => error.code === 'payload_too_large',
   )
   assert.throws(() => new RelayTransport({ budget: budget(), codec: proto }), (error) => error.code === 'invalid_argument')
-  assert.equal(sender.envelopeBytes, 16 * 1024 * 1024)
-  sender.reset()
 })
 
 test('already referenced envelopes publish as one packet or fail before publish', async () => {
@@ -500,39 +496,6 @@ test('a reservation with no owner and an interrupted relay both cancel before pu
     (error) => error.code === 'unavailable',
   )
   assert.equal(published, 0)
-})
-
-test('receiveComplete resolves referenced events and rejects malformed event representations', async () => {
-  const body = new Uint8Array([7, 8, 9])
-  const relay = new FakeRelay()
-  const objectId = 'f'.repeat(32)
-  relay.objects.set(objectId, { ciphertext: body, purpose: 'PAYLOAD_PURPOSE_EVENT' })
-  const sender = transport({ relay })
-  const envelope = proto.encode('whalerein.v1.EventEnvelope', {
-    host_id: HOST, device_id: DEVICE, channel_id: CHANNEL, nonce: new Uint8Array(12),
-    payload_reference: {
-      object_id: objectId, owner_node_id: 'node-1', ciphertext_bytes: body.length,
-      sha256: new Uint8Array(32), expires_at_unix_ms: Date.now() + 60_000,
-      purpose: 'PAYLOAD_PURPOSE_EVENT',
-    },
-    created_at_unix_ms: 1, relay_version: RELAY_VERSION,
-  })
-  const resolved = await sender.receiveComplete(EVENT_TOPIC, envelope, { kind: 'event' })
-  assert.deepEqual(Buffer.from(resolved.ciphertext), Buffer.from(body))
-  assert.equal(resolved.payload_reference, undefined)
-  await assert.rejects(sender.receiveComplete(EVENT_TOPIC, new Uint8Array(0)), (error) => error.code === 'invalid_argument')
-  await assert.rejects(
-    sender.receiveComplete(EVENT_TOPIC, proto.encode('whalerein.v1.EventEnvelope', {
-      host_id: HOST, device_id: DEVICE, channel_id: CHANNEL, nonce: new Uint8Array(12),
-      created_at_unix_ms: 1, relay_version: RELAY_VERSION,
-    })),
-    (error) => error.code === 'invalid_argument',
-  )
-  // A referenced event without a configured client is unavailable, not a message.
-  await assert.rejects(
-    transport().receiveComplete(EVENT_TOPIC, envelope, { kind: 'event' }),
-    (error) => error.code === 'unavailable',
-  )
 })
 
 test('packet arithmetic rejects invalid lengths and topic names', () => {

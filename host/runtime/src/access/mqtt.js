@@ -7,16 +7,13 @@ import { readFileSync } from 'node:fs'
 import mqtt from 'mqtt'
 import { ConfigError, topics, PROTOCOL_VERSION } from '../config.js'
 import { PluginError } from '../errors.js'
-import {
-  BROKER_PACKET_LIMIT_BYTES,
-  PACKET_BYTES,
-  RELAY_VERSION,
-  RelayTransport,
-  publishPacketBytes,
-} from './transport.js'
+import { RelayTransport } from './transport.js'
+import { publishPacketBytes } from './packet.js'
 import { RelayObjectClient } from './relay-client.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import {
+  BROKER_PACKET_LIMIT_BYTES,
+  RELAY_VERSION,
   resolveTransportProfile,
   transportProfileBudget,
   messageExpirySeconds,
@@ -24,13 +21,6 @@ import {
   validateTransportBudget,
   validateTransportProfiles,
 } from '../contracts/transport.js'
-
-// Kept for callers that imported the old constant; the live limit comes from
-// the resolved transport budget.
-export const MAX_MQTT_PACKET_BYTES = PACKET_BYTES
-
-const CORRELATION_DATA_ID = 0x09
-const MESSAGE_EXPIRY_INTERVAL_ID = 0x02
 
 /**
  * Build the MQTT 5 PUBLISH properties for one deadline-bound reply and their
@@ -96,8 +86,6 @@ export class MqttAccess {
   #handlers = {}
   #disconnectReason = -1
   #transport
-  #relay = null
-  #brokerPacketBytes = BROKER_PACKET_LIMIT_BYTES
   #accessReceive = null
   #lastPublish = { kind: 'none', bytes: 0 }
 
@@ -129,7 +117,7 @@ export class MqttAccess {
     authorizationPrivateKey = null,
     accessOrigin = '',
     relayClient = null,
-    relayObjectTtlMs = 5 * 60 * 1000,
+    relayObjectTtlMs,
     caFile = '',
     reconnectMinMs = 500,
     reconnectMaxMs = 30_000,
@@ -154,9 +142,6 @@ export class MqttAccess {
     this.logger = logger
     this.now = now
     this.codec = resolveCodec(codec)
-    this.relayObjectTtlMs = Number.isSafeInteger(relayObjectTtlMs) && relayObjectTtlMs > 0
-      ? relayObjectTtlMs
-      : 5 * 60 * 1000
     validateTransportProfiles()
     const resolved = resolveTransportProfile(typeof transportProfile === 'string' ? transportProfile : 'default')
     this.profile = resolved.wireName
@@ -175,16 +160,14 @@ export class MqttAccess {
         logger,
       })
     }
-    this.#relay = relayClient
     this.#transport = new RelayTransport({
       codec: this.codec,
-      relay: this.#relay,
+      relay: relayClient,
       budget: this.budget,
-      brokerPacketBytes: BROKER_PACKET_LIMIT_BYTES,
       publish: (topic, bytes, options) => this.#publish(topic, bytes, options),
       now,
       logger: this.logger,
-      objectTtlMs: this.relayObjectTtlMs,
+      objectTtlMs: relayObjectTtlMs,
     })
     this.#verifyControlEnvelopes()
     this.#backoffMs = reconnectMinMs
@@ -481,10 +464,9 @@ export class MqttAccess {
   async #onConnected(client, generation, connack) {
     const maximum = connack?.properties?.maximumPacketSize
     // A smaller broker ceiling lowers the effective limit; it never raises it.
-    this.#brokerPacketBytes = Number.isSafeInteger(maximum) && maximum > 0
+    this.#transport.brokerPacketBytes = Number.isSafeInteger(maximum) && maximum > 0
       ? Math.min(maximum, BROKER_PACKET_LIMIT_BYTES)
       : BROKER_PACKET_LIMIT_BYTES
-    this.#transport.brokerPacketBytes = this.#brokerPacketBytes
     this.#accessReceive = null
     this.#connected = true
     this.#everConnected = true
@@ -574,7 +556,7 @@ export class MqttAccess {
     }
     if (topic !== this.topics.request) return
     const receivedAt = this.now()
-    this.#transport.receiveComplete(topic, payload)
+    this.#transport.receiveRequest(payload)
       .then((request) => {
         if (request.kind === 'REQUEST_KIND_QUERY' || request.kind === 'REQUEST_KIND_HANDSHAKE') {
           const expiry = properties?.messageExpiryInterval
@@ -693,7 +675,7 @@ export class MqttAccess {
   publishResult(payload, options = {}) {
     const expiresAt = Number.isSafeInteger(options.expiresAt) && options.expiresAt > 0
       ? options.expiresAt
-      : this.now() + this.relayObjectTtlMs
+      : this.now() + this.#transport.objectTtlMs
     const expirySeconds = messageExpirySeconds(expiresAt, this.now(), options.upstreamExpirySeconds)
     if (expirySeconds === 0) {
       this.logger?.info('mqtt_reply_skipped', { reason: 'expired' })
@@ -710,7 +692,6 @@ export class MqttAccess {
       expiresAt,
       properties,
       propertiesBytes,
-      upstreamExpirySeconds: undefined,
     })
   }
 
@@ -719,7 +700,7 @@ export class MqttAccess {
     return this.#transport.sendComplete(this.topics.event, payload, {
       kind: 'event',
       receiverLimit: this.#accessReceive?.budget?.packet_bytes,
-      expiresAt: this.now() + this.relayObjectTtlMs,
+      expiresAt: this.now() + this.#transport.objectTtlMs,
     })
   }
 

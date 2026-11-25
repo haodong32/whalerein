@@ -25,6 +25,8 @@ export {
 /** The one coordinated MQTT relay epoch. There is no fallback or dual epoch. */
 export const RELAY_VERSION = 5
 
+export const DEFAULT_ENVELOPE_BYTES = TRANSPORT_PROFILES[DEFAULT_TRANSPORT_PROFILE].envelopeBytes
+
 // A Broker-issued connection identity is `<broker-epoch>:<connection-instance>`.
 // The broker epoch is one random 16-hex-character process identity; the
 // connection instance is opaque to Host and is compared only for exact equality.

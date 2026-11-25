@@ -17,9 +17,8 @@ import { CommandService } from './commands/service.js'
 import { questionResponseBudget } from './commands/question-pager.js'
 import { WatchedEvents } from './events/watches.js'
 import { MqttAccess } from './access/mqtt.js'
-import { MESSAGE_BYTES, RELAY_VERSION } from './access/transport.js'
 import { loadOrCreateHostIdentity } from './security/identity.js'
-import { validateRequestTransportMetadata, validateBrokerConnectionRef } from './contracts/transport.js'
+import { RELAY_VERSION, validateRequestTransportMetadata, validateBrokerConnectionRef } from './contracts/transport.js'
 
 const EMPTY = new Uint8Array(0)
 

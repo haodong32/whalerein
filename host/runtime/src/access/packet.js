@@ -6,9 +6,7 @@
 // payload. Callers must never estimate from ciphertext alone.
 
 import { PluginError } from '../errors.js'
-import { BROKER_PACKET_LIMIT_BYTES, RELAY_VERSION } from '../contracts/transport.js'
-
-export { BROKER_PACKET_LIMIT_BYTES, RELAY_VERSION }
+import { BROKER_PACKET_LIMIT_BYTES } from '../contracts/transport.js'
 
 /** Bytes needed to encode an MQTT variable-byte integer. */
 export function varintBytes(value) {
@@ -73,9 +71,10 @@ export function effectivePacketBytes(...limits) {
  * headers change size). Returns 0 when even an empty body does not fit.
  */
 export function maxPlaintextBytes(envelopeSizeFor, packetLimit) {
-  if (envelopeSizeFor(0) > packetLimit) return 0
+  const overhead = envelopeSizeFor(0)
+  if (overhead >= packetLimit) return 0
   let low = 0
-  let high = Math.max(0, packetLimit - (envelopeSizeFor(0) - 0))
+  let high = packetLimit - overhead
   while (low < high) {
     const middle = Math.ceil((low + high) / 2)
     if (envelopeSizeFor(middle) <= packetLimit) low = middle

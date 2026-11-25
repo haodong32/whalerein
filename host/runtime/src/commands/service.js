@@ -10,10 +10,9 @@ import { summaryToProto } from '../contracts/serialization.js'
 import { validateMessageReply } from '../contracts/source.js'
 import { AdapterError, DefinitiveExecutionError, PluginError, publicMessage } from '../errors.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
-import { MESSAGE_BYTES } from '../access/transport.js'
 import { QuestionPager } from './question-pager.js'
 import { AttachmentService } from '../attachments/service.js'
-import { transportProfileBudget, DEFAULT_TRANSPORT_PROFILE } from '../contracts/transport.js'
+import { DEFAULT_ENVELOPE_BYTES, DEFAULT_TRANSPORT_PROFILE, transportProfileBudget } from '../contracts/transport.js'
 
 const COMMAND_STATUS_TO_PROTO = Object.freeze({
   accepted: 'host_accepted',
@@ -203,7 +202,7 @@ export class CommandService {
         ).envelope_bytes
       } catch { envelopeBytes = 0 }
     }
-    this.envelopeBytes = envelopeBytes || MESSAGE_BYTES
+    this.envelopeBytes = envelopeBytes || DEFAULT_ENVELOPE_BYTES
     this.attachments = attachments ?? new AttachmentService({
       hostId,
       adapter,
@@ -433,7 +432,7 @@ export class CommandService {
    * Handle one decrypted RequestPayload.
    * @returns {Promise<{status: string, response?: object, resultPayload?: Buffer, errorCode?: string}>}
    */
-  async handle({ request, payload, questionResponseBudget = MESSAGE_BYTES }) {
+  async handle({ request, payload, questionResponseBudget = DEFAULT_ENVELOPE_BYTES }) {
     if (request.kind !== 'REQUEST_KIND_COMMAND' && request.kind !== 'REQUEST_KIND_QUERY') throw new PluginError('invalid_argument', 'request kind invalid')
     const scope = {
       kind: request.kind, requestId: request.request_id, deviceId: request.device_id,
