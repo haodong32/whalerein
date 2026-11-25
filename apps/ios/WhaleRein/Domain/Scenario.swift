@@ -63,6 +63,7 @@ struct FixtureScenario: Equatable, Sendable {
     }
 
     var initiallyPaired = false
+    var delaysViewportTransitions = false
     var streamOnOpen = false
     var lateEventLeak = false
     var sendUncertain = false

@@ -463,8 +463,8 @@ struct QuestionTests {
         #expect(harness.model.questionAnswerState == .submitted(.confirmed))
     }
 
-    @Test("a fresh watch baseline clears the old question observation")
-    func watchResetClearsStaleQuestions() async -> Void {
+    @Test("a replacement history window preserves independent question state")
+    func historyReplacementPreservesQuestions() async -> Void {
         var harness = await QuestionHarness()
         let batch = questionBatch()
         harness.emitQuestions(questionsState(.current, batches: [batch]))
@@ -478,13 +478,20 @@ struct QuestionTests {
         await harness.model.submitQuestionReview()
         #expect(harness.model.settledQuestionReviews[batch.batchID] != nil)
 
-        harness.emit(.watchReset(messages: [], approvals: []))
+        harness.emit(
+            .historySnapshot(
+                ConversationHistoryPage(
+                    source: .online, projection: "projection-next", complete: true,
+                    messages: [], activities: [], continuation: nil
+                ),
+                replacing: true
+            )
+        )
         await pump()
-        #expect(harness.model.questionsFreshness == .loading)
-        #expect(harness.model.questionBatches.isEmpty)
-        #expect(harness.model.questionReview == nil)
-        #expect(harness.model.settledQuestionReviews.isEmpty)
-        #expect(harness.model.questionAnswerState == .idle)
+        #expect(harness.model.questionsFreshness == .current)
+        #expect(harness.model.questionBatches.map(\.batchID) == [batch.batchID])
+        #expect(harness.model.settledQuestionReviews[batch.batchID] != nil)
+        #expect(harness.model.questionAnswerState == .submitted(.confirmed))
     }
 
     @Test("a changed guard is rejected before any submission")

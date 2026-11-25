@@ -6,17 +6,12 @@
 
 use std::time::{Duration, Instant};
 
-use bytes::BytesMut;
-use rumqttc::v5::mqttbytes::v5::Packet;
-use rumqttc::v5::mqttbytes::QoS;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use whalerein_core::api::test_support::{history_message, FakeAccess, FakeAttachmentObject};
 use whalerein_mobile::{
     android_redirect_uri, new_operation_id, write_client_config, AttachmentDownloadRequestView,
     AttachmentReferenceView, AttachmentTransferView, ConversationEvent, DeliveryChoice,
     MemorySecretStore, MessageReferenceView, MessageReplyView, MessageView, MobileClientService,
-    MobileCore, QueueAction, SessionKeyView, WaitOutcome,
+    MobileCore, QueueAction, SessionKeyView, WaitOutcome, WatchHistoryBaseline,
 };
 
 fn write_config(dir: &std::path::Path) -> String {
@@ -41,10 +36,17 @@ fn new_core(data_dir: &std::path::Path) -> std::sync::Arc<MobileCore> {
     .expect("create MobileCore")
 }
 
+fn poll_payloads(core: &MobileCore, timeout_ms: u64) -> Vec<ConversationEvent> {
+    core.poll_events(timeout_ms)
+        .into_iter()
+        .map(|entry| entry.event)
+        .collect()
+}
+
 fn wait_for_pairing(core: &MobileCore) -> (Option<String>, Option<String>) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        for event in core.poll_events(500) {
+        for event in poll_payloads(core, 500) {
             if let ConversationEvent::PairingFinished { host_id, code } = event {
                 return (host_id, code);
             }
@@ -108,11 +110,11 @@ fn poll_events_timeout_returns_promptly() {
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
     let started = Instant::now();
-    let events = core.poll_events(50);
+    let events = poll_payloads(&core, 50);
     assert!(events.is_empty());
     assert!(started.elapsed() < Duration::from_secs(2));
     // A zero timeout never blocks.
-    assert!(core.poll_events(0).is_empty());
+    assert!(poll_payloads(&core, 0).is_empty());
 }
 
 #[test]
@@ -279,7 +281,7 @@ fn pairing_cancel_emits_cancelled_and_allows_a_new_attempt() {
     core.pairing_cancel();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let events = core.poll_events(500);
+        let events = poll_payloads(&core, 500);
         if events.iter().any(|event| {
             matches!(
                 event,
@@ -400,9 +402,9 @@ fn sessions_send_stop_and_approvals_reach_the_fixture_host() {
                 && !reference.projection_id.is_empty()
     ));
     // The same result is queued for observers.
-    assert!(core.poll_events(0).iter().any(|event| matches!(
+    assert!(poll_payloads(&core, 0).iter().any(|event| matches!(
         event,
-        ConversationEvent::CommandStatus { command } if command.request_id == sent.request_id
+        ConversationEvent::CommandStatus { command, .. } if command.request_id == sent.request_id
     )));
 
     let stopped = core.stop(host_id.clone(), "session-1".into()).unwrap();
@@ -438,23 +440,38 @@ fn watch_start_and_stop_are_prompt_and_idempotent() {
     let core = new_core(dir.path());
     let host_id = pair(&core, &access);
 
-    core.start_watch(host_id.clone(), "session-1".into())
+    let initial = core
+        .start_watch(
+            host_id.clone(),
+            "session-1".into(),
+            WatchHistoryBaseline::Complete,
+        )
         .unwrap();
     // Replacing an active watch is allowed.
-    core.start_watch(host_id.clone(), "session-1".into())
+    let replacement = core
+        .start_watch(
+            host_id.clone(),
+            "session-1".into(),
+            WatchHistoryBaseline::Complete,
+        )
         .unwrap();
+    assert_ne!(initial, replacement);
     core.stop_watch();
     core.stop_watch();
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut ended = 0;
     while Instant::now() < deadline && ended == 0 {
-        ended += core
-            .poll_events(200)
-            .iter()
-            .filter(|event| matches!(event, ConversationEvent::WatchEnded))
-            .count();
+        for entry in core.poll_events(200) {
+            if matches!(entry.event, ConversationEvent::WatchEnded) {
+                let producer = entry.scope.expect("terminal producer");
+                assert_eq!(producer.generation, replacement);
+                assert_eq!(producer.host_id, host_id);
+                assert_eq!(producer.session_id, "session-1");
+                ended += 1;
+            }
+        }
     }
-    assert!(ended >= 1, "stopWatch must emit watchEnded");
+    assert_eq!(ended, 1, "stopWatch must emit one scoped watchEnded");
 }
 
 #[test]
@@ -502,78 +519,6 @@ fn export_diagnostics_rejects_an_unusable_path() {
 /// The fixture Host only publishes through Watch/Refresh responses; the test
 /// peer is enough to let a real watch attach so its events enter the binding
 /// queue through the production path.
-fn spawn_mqtt_peer(runtime: &tokio::runtime::Runtime, listener: TcpListener) {
-    runtime.spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                return;
-            };
-            tokio::spawn(async move {
-                let mut stream = stream;
-                let mut buffer = BytesMut::new();
-                if !matches!(
-                    read_mqtt_packet(&mut stream, &mut buffer).await,
-                    Some(Packet::Connect(..))
-                ) {
-                    return;
-                }
-                if stream.write_all(&[0x20, 3, 0, 0, 0]).await.is_err() {
-                    return;
-                }
-                // The client may subscribe and publish in either order; a
-                // broker must acknowledge both and keep the session open.
-                loop {
-                    let Some(packet) = read_mqtt_packet(&mut stream, &mut buffer).await else {
-                        return;
-                    };
-                    let reply: Option<Vec<u8>> = match packet {
-                        Packet::Subscribe(subscription) => {
-                            let [high, low] = subscription.pkid.to_be_bytes();
-                            Some(vec![0x90, 4, high, low, 0, 0])
-                        }
-                        Packet::Publish(publish) if publish.qos != QoS::AtMostOnce => {
-                            let [high, low] = publish.pkid.to_be_bytes();
-                            Some(vec![0x40, 2, high, low])
-                        }
-                        Packet::PingReq(_) => Some(vec![0xD0, 0]),
-                        Packet::Disconnect(..) => return,
-                        _ => None,
-                    };
-                    if let Some(reply) = reply {
-                        if stream.write_all(&reply).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-            });
-        }
-    });
-}
-
-async fn read_mqtt_packet(stream: &mut TcpStream, buffer: &mut BytesMut) -> Option<Packet> {
-    loop {
-        if let Ok(packet) = Packet::read(buffer, None) {
-            return Some(packet);
-        }
-        if stream.read_buf(buffer).await.ok()? == 0 {
-            return None;
-        }
-    }
-}
-
-fn pair_with_mqtt(core: &MobileCore, access: &FakeAccess, mqtt_url: &str) -> String {
-    // The invitation's optional `mqtt=` override keeps the deterministic
-    // loopback broker per profile instead of mutating process environment.
-    let invitation = format!("{}&mqtt={mqtt_url}", access.pairing_uri());
-    let prompt = core.pairing_start(invitation).unwrap();
-    core.pairing_decide(true, Some(access.fingerprint()))
-        .unwrap();
-    let (host_id, code) = wait_for_pairing(core);
-    assert_eq!(code, None);
-    assert_eq!(host_id.as_deref(), Some(prompt.host_id.as_str()));
-    prompt.host_id
-}
-
 fn wait_for_cached_message(core: &MobileCore, host_id: &str, session_id: &str, message_id: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -597,7 +542,7 @@ fn wait_for_cached_message(core: &MobileCore, host_id: &str, session_id: &str, m
 fn drain_events(core: &MobileCore) -> Vec<ConversationEvent> {
     let mut events = Vec::new();
     loop {
-        let batch = core.poll_events(150);
+        let batch = poll_payloads(core, 150);
         if batch.is_empty() {
             return events;
         }
@@ -625,18 +570,15 @@ fn has_message(events: &[ConversationEvent], text: &str) -> bool {
 fn host_monitor_reports_connection_transitions_without_a_watch() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let access = runtime.block_on(FakeAccess::start());
-    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
-    let mqtt_url = format!("mqtt://{}", listener.local_addr().unwrap());
-    spawn_mqtt_peer(&runtime, listener);
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
-    let host_id = pair_with_mqtt(&core, &access, &mqtt_url);
+    let host_id = pair(&core, &access);
 
     core.start_host_monitor(vec![host_id.clone()]);
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut states = Vec::new();
     while Instant::now() < deadline {
-        for event in core.poll_events(200) {
+        for event in poll_payloads(&core, 200) {
             if let ConversationEvent::HostConnection {
                 host_id: event_host,
                 state,
@@ -674,19 +616,20 @@ fn host_monitor_reports_connection_transitions_without_a_watch() {
 fn queued_old_watch_events_never_become_the_next_sessions_events() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let access = runtime.block_on(FakeAccess::start());
-    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
-    let mqtt_url = format!("mqtt://{}", listener.local_addr().unwrap());
-    spawn_mqtt_peer(&runtime, listener);
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
-    let host_id = pair_with_mqtt(&core, &access, &mqtt_url);
+    let host_id = pair(&core, &access);
 
     // Warm the committed cursor for both sessions. A later watch on a warm
     // cursor treats the next history interval as new output instead of a cold
     // snapshot, which is what makes the queued old-watch message observable.
     for session_id in ["session-1", "session-2"] {
-        core.start_watch(host_id.clone(), session_id.into())
-            .unwrap();
+        core.start_watch(
+            host_id.clone(),
+            session_id.into(),
+            WatchHistoryBaseline::Complete,
+        )
+        .unwrap();
         wait_for_cached_message(&core, &host_id, session_id, "message-1");
         core.stop_watch();
         drain_events(&core);
@@ -703,8 +646,12 @@ fn queued_old_watch_events_never_become_the_next_sessions_events() {
         ));
         assert_eq!(host.history_cut, "bookmark:committed");
     }
-    core.start_watch(host_id.clone(), "session-1".into())
-        .unwrap();
+    core.start_watch(
+        host_id.clone(),
+        "session-1".into(),
+        WatchHistoryBaseline::Complete,
+    )
+    .unwrap();
     wait_for_cached_message(&core, &host_id, "session-1", "old-message");
     // The cache is committed immediately before the watch callback queues the
     // Message; give that callback its moment while the consumer stays paused.
@@ -735,14 +682,18 @@ fn queued_old_watch_events_never_become_the_next_sessions_events() {
             "bookmark:new".into(),
         ));
     }
-    core.start_watch(host_id.clone(), "session-2".into())
-        .unwrap();
+    core.start_watch(
+        host_id.clone(),
+        "session-2".into(),
+        WatchHistoryBaseline::Complete,
+    )
+    .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(4);
     let mut emitted = Vec::new();
     let mut saw_new_message = false;
     while Instant::now() < deadline {
-        let batch = core.poll_events(200);
+        let batch = poll_payloads(&core, 200);
         emitted.extend(batch);
         if has_message(&emitted, "NEW-SESSION-CONTENT") {
             saw_new_message = true;
@@ -772,7 +723,7 @@ fn queued_old_watch_events_never_become_the_next_sessions_events() {
     assert!(
         emitted.iter().any(|event| matches!(
             event,
-            ConversationEvent::CommandStatus { command } if command.request_id == sent.request_id
+            ConversationEvent::CommandStatus { command, .. } if command.request_id == sent.request_id
         )),
         "a non-watch command event was dropped with the old watch: {emitted:?}"
     );
@@ -786,7 +737,7 @@ fn queued_old_watch_events_never_become_the_next_sessions_events() {
             .iter()
             .any(|event| matches!(event, ConversationEvent::WatchEnded))
     {
-        tail.extend(core.poll_events(200));
+        tail.extend(poll_payloads(&core, 200));
     }
     assert_eq!(
         tail.iter()
@@ -805,25 +756,26 @@ fn queued_old_watch_events_never_become_the_next_sessions_events() {
 fn identical_session_ids_on_two_authorized_hosts_keep_their_event_scopes() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let access = runtime.block_on(FakeAccess::start());
-    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
-    let mqtt_url = format!("mqtt://{}", listener.local_addr().unwrap());
-    spawn_mqtt_peer(&runtime, listener);
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
-    let host_a = pair_with_mqtt(&core, &access, &mqtt_url);
+    let host_a = pair(&core, &access);
 
     // Pair the second Host identity on the same Access profile, then put the
     // fixture back to Host A for the old watch. Both Hosts stay authorized.
     access.host.lock().unwrap().host_id = "host-2".into();
-    let host_b = pair_with_mqtt(&core, &access, &mqtt_url);
+    let host_b = pair(&core, &access);
     assert_eq!(host_a, "host-1");
     assert_eq!(host_b, "host-2");
     access.host.lock().unwrap().host_id = host_a.clone();
     drain_events(&core);
 
     // Warm Host A's committed cursor so the next watch reports new output.
-    core.start_watch(host_a.clone(), "session-1".into())
-        .unwrap();
+    core.start_watch(
+        host_a.clone(),
+        "session-1".into(),
+        WatchHistoryBaseline::Complete,
+    )
+    .unwrap();
     wait_for_cached_message(&core, &host_a, "session-1", "message-1");
     core.stop_watch();
     drain_events(&core);
@@ -836,8 +788,12 @@ fn identical_session_ids_on_two_authorized_hosts_keep_their_event_scopes() {
             "bookmark:a".into(),
         ));
     }
-    core.start_watch(host_a.clone(), "session-1".into())
-        .unwrap();
+    core.start_watch(
+        host_a.clone(),
+        "session-1".into(),
+        WatchHistoryBaseline::Complete,
+    )
+    .unwrap();
     wait_for_cached_message(&core, &host_a, "session-1", "host-a-message");
     std::thread::sleep(Duration::from_millis(200));
     core.stop_watch();
@@ -851,8 +807,7 @@ fn identical_session_ids_on_two_authorized_hosts_keep_their_event_scopes() {
     let stopped_by = Instant::now() + Duration::from_secs(2);
     let mut stopped = false;
     while Instant::now() < stopped_by {
-        if core
-            .poll_events(100)
+        if poll_payloads(&core, 100)
             .iter()
             .any(|event| matches!(event, ConversationEvent::WatchEnded))
         {
@@ -863,13 +818,17 @@ fn identical_session_ids_on_two_authorized_hosts_keep_their_event_scopes() {
     assert!(stopped, "the first watch never terminated");
 
     access.host.lock().unwrap().host_id = host_b.clone();
-    core.start_watch(host_b.clone(), "session-1".into())
-        .unwrap();
+    core.start_watch(
+        host_b.clone(),
+        "session-1".into(),
+        WatchHistoryBaseline::Complete,
+    )
+    .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut emitted = Vec::new();
     while Instant::now() < deadline {
-        emitted.extend(core.poll_events(200));
+        emitted.extend(poll_payloads(&core, 200));
     }
     assert!(
         !has_message(&emitted, "HOST-A-ONLY"),
@@ -901,7 +860,7 @@ fn wait_for_current_questions(
 ) -> whalerein_mobile::QuestionsView {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        for event in core.poll_events(250) {
+        for event in poll_payloads(core, 250) {
             if let ConversationEvent::Questions { view } = event {
                 if view.freshness == "current"
                     && view
@@ -926,16 +885,17 @@ fn question_observation_and_guard_flow_use_core_owned_state() {
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let access = runtime.block_on(FakeAccess::start());
-    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
-    let mqtt_url = format!("mqtt://{}", listener.local_addr().unwrap());
-    spawn_mqtt_peer(&runtime, listener);
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
-    let host_id = pair_with_mqtt(&core, &access, &mqtt_url);
+    let host_id = pair(&core, &access);
     let session_id = "session-1".to_owned();
 
-    core.start_watch(host_id.clone(), session_id.clone())
-        .unwrap();
+    core.start_watch(
+        host_id.clone(),
+        session_id.clone(),
+        WatchHistoryBaseline::Complete,
+    )
+    .unwrap();
     let view = wait_for_current_questions(&core, &session_id);
     // Emitted observation state, not just a one-shot read.
     assert_eq!(view.freshness, "current");
@@ -1053,9 +1013,9 @@ fn question_observation_and_guard_flow_use_core_owned_state() {
         .unwrap();
     assert!(!answered.command_id.is_empty());
     assert_eq!(answered.status, "succeeded");
-    assert!(core.poll_events(0).iter().any(|event| matches!(
+    assert!(poll_payloads(&core, 0).iter().any(|event| matches!(
         event,
-        ConversationEvent::CommandStatus { command } if command.command_id == answered.command_id
+        ConversationEvent::CommandStatus { command, .. } if command.command_id == answered.command_id
     )));
     let cancelled = core
         .request_question_answer_cancel(
@@ -1077,18 +1037,19 @@ fn question_observation_and_guard_flow_use_core_owned_state() {
 fn queued_question_state_from_a_replaced_session_is_not_relabelled() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let access = runtime.block_on(FakeAccess::start());
-    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
-    let mqtt_url = format!("mqtt://{}", listener.local_addr().unwrap());
-    spawn_mqtt_peer(&runtime, listener);
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
-    let host_id = pair_with_mqtt(&core, &access, &mqtt_url);
+    let host_id = pair(&core, &access);
     drain_events(&core);
 
     // Let the old watch queue both its conversation baseline and a current
     // question view while the consumer stays paused.
-    core.start_watch(host_id.clone(), "session-1".into())
-        .unwrap();
+    core.start_watch(
+        host_id.clone(),
+        "session-1".into(),
+        WatchHistoryBaseline::Complete,
+    )
+    .unwrap();
     std::thread::sleep(Duration::from_millis(900));
     core.stop_watch();
     std::thread::sleep(Duration::from_millis(100));
@@ -1103,13 +1064,17 @@ fn queued_question_state_from_a_replaced_session_is_not_relabelled() {
         )
         .unwrap();
 
-    core.start_watch(host_id.clone(), "session-2".into())
-        .unwrap();
+    core.start_watch(
+        host_id.clone(),
+        "session-2".into(),
+        WatchHistoryBaseline::Complete,
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut emitted = Vec::new();
     let mut saw_current = false;
     while Instant::now() < deadline {
-        emitted.extend(core.poll_events(250));
+        emitted.extend(poll_payloads(&core, 250));
         saw_current = emitted.iter().any(|event| {
             matches!(
                 event,
@@ -1143,7 +1108,7 @@ fn queued_question_state_from_a_replaced_session_is_not_relabelled() {
     assert!(
         emitted.iter().any(|event| matches!(
             event,
-            ConversationEvent::CommandStatus { command } if command.request_id == sent.request_id
+            ConversationEvent::CommandStatus { command, .. } if command.request_id == sent.request_id
         )),
         "an independent command event was lost with the replaced watch: {emitted:?}"
     );
@@ -1866,8 +1831,15 @@ fn stale_wrong_scope_and_tampered_continuations_are_stale_history() {
         .unwrap_err();
     assert_eq!(error.code(), "stale_history");
 
-    // A changed cut on the same scope also requires a fresh traversal.
-    access.host.lock().unwrap().history_cut = "bookmark:replaced".into();
+    // A different head would allow an existing fixed-cut traversal. Expire
+    // the previous cut explicitly to test a required rebase on the same scope.
+    let previous_cut = {
+        let mut host = access.host.lock().unwrap();
+        let total = host.history_messages.len();
+        let new_cut = "bookmark:replaced".to_owned();
+        host.history_positions.insert(new_cut.clone(), total);
+        std::mem::replace(&mut host.history_cut, new_cut)
+    };
     let error = core
         .history_page(
             host_id.clone(),
@@ -1880,7 +1852,12 @@ fn stale_wrong_scope_and_tampered_continuations_are_stale_history() {
         .unwrap_err();
     assert_eq!(error.code(), "stale_history");
 
-    // Tampered tokens never resolve to content.
+    // Restore fixture coverage so token tampering is the only failing input.
+    {
+        let mut host = access.host.lock().unwrap();
+        host.history_cut = previous_cut;
+        host.history_positions.clear();
+    }
     let mut tampered = continuation;
     let last = tampered.pop().unwrap();
     tampered.push(if last == 'a' { 'b' } else { 'a' });
@@ -1898,15 +1875,89 @@ fn stale_wrong_scope_and_tampered_continuations_are_stale_history() {
 }
 
 #[test]
+fn paged_watch_maps_the_recent_snapshot_and_questions_under_one_producer() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let access = runtime.block_on(FakeAccess::start());
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+    let host_id = pair(&core, &access);
+    let session_id = "session-1";
+    access.host.lock().unwrap().history_messages = ["m1", "m2", "m3"]
+        .into_iter()
+        .map(|id| history_message(id, "synthetic"))
+        .collect();
+
+    let generation = core
+        .start_watch(
+            host_id.clone(),
+            session_id.into(),
+            WatchHistoryBaseline::Recent {
+                max_messages: 2,
+                max_bytes: 256 * 1024,
+            },
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut history = None;
+    let mut observed_questions = false;
+    let mut observation_id = None;
+    while (history.is_none() || !observed_questions) && Instant::now() < deadline {
+        for entry in core.poll_events(100) {
+            let Some(scope) = entry.scope else { continue };
+            assert_eq!(scope.generation, generation);
+            assert_eq!(scope.host_id, host_id);
+            assert_eq!(scope.session_id, session_id);
+            let id = scope.observation_id.expect("Core observation identity");
+            assert_eq!(observation_id.get_or_insert_with(|| id.clone()), &id);
+            match entry.event {
+                ConversationEvent::HistorySnapshot { page, .. } if page.source == "online" => {
+                    history = Some(page);
+                }
+                ConversationEvent::Questions { view } if view.freshness == "current" => {
+                    observed_questions = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        observed_questions,
+        "Questions must arrive alongside the recent snapshot"
+    );
+    let page = history.expect("scoped online recent snapshot");
+    assert_eq!(
+        page.messages
+            .iter()
+            .map(|row| row.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m2", "m3"]
+    );
+    let continuation = page
+        .continuation
+        .expect("older continuation from the snapshot");
+    let older = core
+        .history_page(
+            host_id,
+            session_id.into(),
+            false,
+            Some(continuation),
+            2,
+            256 * 1024,
+        )
+        .unwrap();
+    assert_eq!(older.messages.len(), 1);
+    assert_eq!(older.messages[0].message_id, "m1");
+    core.stop_watch();
+}
+
+#[test]
 fn cache_history_is_local_and_explicitly_empty_or_populated() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let access = runtime.block_on(FakeAccess::start());
-    let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
-    let mqtt_url = format!("mqtt://{}", listener.local_addr().unwrap());
-    spawn_mqtt_peer(&runtime, listener);
     let dir = tempfile::tempdir().unwrap();
     let core = new_core(dir.path());
-    let host_id = pair_with_mqtt(&core, &access, &mqtt_url);
+    let host_id = pair(&core, &access);
     {
         let mut host = access.host.lock().unwrap();
         host.history_messages = vec![history_message("m1", "one"), history_message("m2", "two")];
@@ -1927,8 +1978,12 @@ fn cache_history_is_local_and_explicitly_empty_or_populated() {
     assert!(empty.messages.is_empty());
     assert!(empty.continuation.is_none());
 
-    core.start_watch(host_id.clone(), "session-1".into())
-        .unwrap();
+    core.start_watch(
+        host_id.clone(),
+        "session-1".into(),
+        WatchHistoryBaseline::Complete,
+    )
+    .unwrap();
     wait_for_cached_message(&core, &host_id, "session-1", "m2");
     core.stop_watch();
     let populated = core

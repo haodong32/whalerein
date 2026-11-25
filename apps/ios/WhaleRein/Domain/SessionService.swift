@@ -37,6 +37,7 @@ protocol SessionService: AnyObject {
 
     // Watch
     func startWatch(hostId: String, sessionId: String) async throws
+    func acceptsWatchEvent(_ envelope: SessionEventEnvelope) -> Bool
     func stopWatch()
 
     // Commands
@@ -100,4 +101,9 @@ protocol SessionService: AnyObject {
     // Device lifecycle
     func forgetDevice() async throws
     func revoke() async throws
+}
+
+
+extension SessionService {
+    func acceptsWatchEvent(_ envelope: SessionEventEnvelope) -> Bool { true }
 }

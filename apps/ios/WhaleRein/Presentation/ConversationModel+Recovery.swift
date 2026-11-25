@@ -160,11 +160,7 @@ extension ConversationModel {
             }
             return
         }
-        let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
-        if let echoIndex {
-            state.messages.insert(message, at: min(echoIndex, state.messages.count))
-        } else {
-            state.messages.append(message)
-        }
+        reconcileUserEcho(message)
+        state.messages.append(message)
     }
 }

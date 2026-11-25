@@ -173,9 +173,9 @@ final class MobileCore {
     func connectionState(hostId: String) -> String
 
     // Observation
-    func startWatch(hostId: String, sessionId: String) throws
+    func startWatch(hostId: String, sessionId: String, baseline: WatchHistoryBaseline) throws -> UInt64
     func stopWatch()
-    func pollEvents(timeoutMs: UInt64) -> [ConversationEvent]
+    func pollEvents(timeoutMs: UInt64) -> [ConversationEventEnvelope]
 
     // Commands and approvals
     func send(hostId: String, sessionId: String, text: String,
@@ -243,11 +243,12 @@ lastFailureCode, appVersion, coreVersion }`.
 Enums: `DeliveryChoice { steer, queue, send }`;
 `MessageReplyView { pending, committed(reference: MessageReferenceView),
 inputRequired(kinds: [String], operation, session: SessionKeyView), uncertain }`;
+`WatchHistoryBaseline { recent(maxMessages:maxBytes:), complete }`;
 `ConversationEvent { state(runPhase:running:revision:approvals:), historyReset,
-message(message:), preview(attemptId:kind:text:replace:incomplete:),
+historySnapshot(page:continuity:), historyUnavailable(code:), message(message:), preview(attemptId:kind:text:replace:incomplete:),
 toolActivity(activity:), attemptEnded(attemptId:outcome:),
 connection(hostId:status:), pairingPrompt(prompt:),
-pairingFinished(hostId:code:), commandStatus(command:),
+pairingFinished(hostId:code:), commandStatus(session:command:),
 approvalChanged(approval:), questions(view:), error(code:message:),
 droppedEvents(count:), watchEnded }`.
 
@@ -273,9 +274,8 @@ Semantics:
   `digestHex` is the 32-byte approval digest rendered as hex.
 - `cachedMessages` reads Core's encrypted local cache only (no channel), in
   committed order. An empty cache returns `[]`; an unpaired profile throws
-  `not_paired`. On `historyReset`, replay these before live updates and dedupe
-  by `messageId`. It shares the exact `MessageView`/`BlockView` projection used
-  by live `message` events.
+  `not_paired`. It shares the `MessageView`/`BlockView` projection used by live
+  `message` events and bounded `historyPage` reads.
 - `capabilities` resolves the session through the Host's session list; an
   absent session throws `not_found` and a Source that reported no capabilities
   throws `unavailable`. `deliveryModes` contains stable lowercase values
@@ -283,12 +283,18 @@ Semantics:
   lowercase. `state.running` is true while `runPhase` is `running` or
   `stopping`; `runPhase` distinguishes them.
 - `pollEvents` blocks the calling thread up to `timeoutMs` (capped at 30 s) and
-  returns an empty array on timeout; call it off the main thread.
-- `send`, `stop` and `resolveApproval` return their `CommandView` and also queue
-  a `commandStatus` event. The queue is bounded at 512 events; overflow drops the
-  oldest and reports `droppedEvents(count:)` before the retained events.
-- `startWatch` replaces an earlier watch; stale updates are discarded.
-  `stopWatch` aborts the Rust task and emits `watchEnded`.
+  returns an empty array on timeout. Call it off the main thread. Each envelope
+  preserves the original producer generation, Host/session key and Core observation
+  identity where available. Match the generation returned by `startWatch`, including
+  when reopening the same session. Independent app events carry no Watch scope.
+- Command events carry the command's own session key. The queue holds 512 events.
+  Overflow drops the oldest and reports `droppedEvents(count:)` for the affected
+  scope ahead of retained events.
+- `startWatch` replaces an earlier watch. The recent baseline provides a bounded
+  `historySnapshot` with continuity and an earlier continuation when available.
+  Comprehensive observers use the complete baseline and receive `historyReset`
+  for committed cache replacement. `stopWatch` aborts the Rust task and emits a
+  scoped `watchEnded`.
 - `pairingStart` waits up to 20 s for Core's Noise-verified prompt and returns
   it (also queued as `pairingPrompt`). A timeout is typed and aborts that
   attempt, so an immediate retry starts a fresh one; a prompt that races the
@@ -353,11 +359,7 @@ Semantics:
 - The typed conversation contract is a hard cut. `BlockView` gained
   `toolActivity` and `notice`, `ConversationEvent` gained `toolActivity` and a
   `kind` on `preview`, and `MessageReplyView` mirrors Core `SendReply`; a client
-  compiled against the previous contract must be rebuilt. Independent history
-  pages (`HistoryPage`) are not exposed by these bindings.
-- iOS feature and UI work remains deferred for this release (design D-12). This
-  crate only performs workspace compile maintenance, so the app must not be
-  treated as validated against the new typed values until that work resumes.
+  compiled against the previous contract must be rebuilt.
 
 ## Security
 

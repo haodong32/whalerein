@@ -180,7 +180,7 @@ enum FixtureCatalog {
         )
     }
 
-    static func questionBatch(sessionId: String) -> QuestionBatch {
+    static func questionBatch(sessionId: String, compact: Bool = false) -> QuestionBatch {
         QuestionBatch(
             sessionID: sessionId,
             batchID: "question-release-\(sessionId)",
@@ -192,12 +192,14 @@ enum FixtureCatalog {
                 QuestionItem(
                     id: "question-channel",
                     question: "Which release channel should this session publish to?",
-                    detail: "The native request is waiting for an explicit answer.",
-                    header: "Release channel",
-                    options: [
-                        QuestionOption(label: "Stable", description: "Publish to the stable channel."),
-                        QuestionOption(label: "Beta", description: "Publish to the beta channel."),
-                    ],
+                    detail: compact ? nil : "The native request is waiting for an explicit answer.",
+                    header: compact ? nil : "Release channel",
+                    options: compact
+                        ? [QuestionOption(label: "Stable", description: nil)]
+                        : [
+                            QuestionOption(label: "Stable", description: "Publish to the stable channel."),
+                            QuestionOption(label: "Beta", description: "Publish to the beta channel."),
+                        ],
                     multiSelect: false,
                     intent: QuestionIntent(
                         kind: "ask",

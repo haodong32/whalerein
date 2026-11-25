@@ -141,6 +141,19 @@ enum ScenarioCatalog {
                 fixture: FixtureScenario(initiallyPaired: true)
             ),
             Scenario(
+                id: "conversation.delayed-viewport",
+                category: .conversation,
+                title: "Conversation with delayed transitions",
+                notes: "Delays older pages and command receipts so the viewport can be measured before and after each update.",
+                launch: LaunchOverrides(serviceMode: .fixtures, resetState: true),
+                fixture: FixtureScenario(
+                    initiallyPaired: true,
+                    delaysViewportTransitions: true,
+                    sendEcho: true,
+                    questionsOnOpen: true
+                )
+            ),
+            Scenario(
                 id: "conversation.streaming",
                 category: .conversation,
                 title: "Streaming reply",

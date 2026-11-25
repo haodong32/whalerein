@@ -21,6 +21,8 @@ extension FixtureSessionService: ConversationHistoryService {
         let pageSize = max(1, min(maxMessages, 50))
         let end: Int
         if let continuation {
+            await delayViewportTransition(for: .seconds(12))
+            try Task.checkCancellation()
             guard let parsed = Self.parseContinuation(continuation) else {
                 throw SessionServiceError(.staleHistory)
             }

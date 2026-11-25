@@ -9,6 +9,7 @@ use crate::conversation::{ConversationMessage, ToolActivities, ToolActivity};
 use crate::session::SessionKey;
 use crate::sync::{validate_batch, validate_message};
 use base64::Engine;
+use prost::Message;
 use serde::{Deserialize, Serialize};
 use whalerein_proto::{
     request_payload, response_payload, CommittedMessageRef, HistoryPageSelection, HistoryRead,
@@ -384,83 +385,11 @@ fn snapshot_required(message: &str) -> CoreError {
     }
 }
 
-fn bounded(max_messages: u32, max_bytes: u32) -> (u32, u32) {
+pub(crate) fn bounded(max_messages: u32, max_bytes: u32) -> (u32, u32) {
     (
         max_messages.clamp(1, MAX_PAGE_MESSAGES),
         max_bytes.clamp(1, MAX_PAGE_BYTES),
     )
-}
-
-fn cache_fingerprint(messages: &[ConversationMessage]) -> String {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    for message in messages {
-        hasher.update(message.message_id.as_bytes());
-        hasher.update([0u8]);
-        hasher.update(message.authored_at_unix_ms.to_le_bytes());
-        for block in &message.blocks {
-            hasher.update(block.block_id.as_bytes());
-            hasher.update([0u8]);
-            match &block.content {
-                Some(crate::conversation::content_block::Content::Text(text)) => {
-                    hasher.update(text.text.as_bytes());
-                }
-                Some(crate::conversation::content_block::Content::Reasoning(reasoning)) => {
-                    hasher.update(reasoning.text.as_bytes());
-                }
-                Some(crate::conversation::content_block::Content::Notice(notice)) => {
-                    hasher.update(notice.summary.as_deref().unwrap_or_default().as_bytes());
-                }
-                Some(crate::conversation::content_block::Content::ToolActivity(activity)) => {
-                    hasher.update(activity.id.call_id.as_bytes());
-                }
-                Some(crate::conversation::content_block::Content::Attachment(attachment)) => {
-                    hasher.update(attachment.attachment_ref.as_bytes());
-                }
-                None => {}
-            }
-            hasher.update([0u8]);
-        }
-    }
-    hex::encode(hasher.finalize())
-}
-
-fn estimated_bytes(message: &ConversationMessage) -> usize {
-    let mut total = message.message_id.len() + 8;
-    for block in &message.blocks {
-        total += block.block_id.len() + 8;
-        total += match &block.content {
-            Some(crate::conversation::content_block::Content::Text(text)) => text.text.len(),
-            Some(crate::conversation::content_block::Content::Reasoning(reasoning)) => {
-                reasoning.text.len()
-            }
-            Some(crate::conversation::content_block::Content::Notice(notice)) => {
-                notice.summary.as_ref().map_or(0, String::len)
-            }
-            Some(crate::conversation::content_block::Content::Attachment(attachment)) => {
-                attachment.name.len()
-                    + attachment.media_type.len()
-                    + attachment.attachment_ref.len()
-            }
-            Some(crate::conversation::content_block::Content::ToolActivity(activity)) => {
-                activity.name.len()
-                    + activity.summary.as_ref().map_or(0, String::len)
-                    + activity.progress.as_ref().map_or(0, String::len)
-                    + activity
-                        .result
-                        .iter()
-                        .map(|part| match part {
-                            crate::conversation::ToolResultPart::Text(text) => text.len(),
-                            crate::conversation::ToolResultPart::Attachment(attachment) => {
-                                attachment.name.len() + attachment.attachment_ref.len()
-                            }
-                        })
-                        .sum::<usize>()
-            }
-            None => 0,
-        };
-    }
-    total
 }
 
 struct ContinuationBinding {
@@ -569,10 +498,10 @@ impl Core {
         self.authorized_session(&request.session)?;
         let (max_messages, max_bytes) = bounded(request.max_messages, request.max_bytes);
         let result = match request.mode {
-            HistoryMode::Source => {
-                self.history_page_online(request, max_messages, max_bytes)
-                    .await
-            }
+            HistoryMode::Source => self
+                .history_page_online(request, max_messages, max_bytes, None)
+                .await
+                .map(|(page, _)| page),
             HistoryMode::Cache => self.history_page_cache(request, max_messages, max_bytes),
         };
         match &result {
@@ -605,12 +534,31 @@ impl Core {
         packet.saturating_sub(4 * 1024).clamp(1024, MAX_PAGE_BYTES)
     }
 
+    /// Read the first reverse page at the exact forward position established
+    /// by WatchReady. The Source validates and echoes that opaque position.
+    pub(crate) async fn history_page_at(
+        &self,
+        request: &HistoryPageRequest,
+        projection: &str,
+        cut: &str,
+    ) -> CoreResult<(HistoryPage, whalerein_proto::HistoryPage)> {
+        self.authorized_session(&request.session)?;
+        if projection.is_empty() || projection.len() > 128 || cut.is_empty() || cut.len() > 4096 {
+            return Err(snapshot_required("invalid watch history position"));
+        }
+
+        let (max_messages, max_bytes) = bounded(request.max_messages, request.max_bytes);
+        self.history_page_online(request, max_messages, max_bytes, Some((projection, cut)))
+            .await
+    }
+
     async fn history_page_online(
         &self,
         request: &HistoryPageRequest,
         max_messages: u32,
         max_bytes: u32,
-    ) -> CoreResult<HistoryPage> {
+        watch_cut: Option<(&str, &str)>,
+    ) -> CoreResult<(HistoryPage, whalerein_proto::HistoryPage)> {
         let max_bytes = if request.continuation.is_none() {
             max_bytes.min(self.first_page_inline_bytes(&request.session.host_id))
         } else {
@@ -631,7 +579,7 @@ impl Core {
         let cut_cursor = binding
             .as_ref()
             .map(|binding| binding.cut.clone())
-            .unwrap_or_default();
+            .unwrap_or_else(|| watch_cut.map_or(String::new(), |(_, cut)| cut.to_owned()));
         let read = HistoryRead {
             session_id: request.session.session_id.clone(),
             snapshot: false,
@@ -657,13 +605,80 @@ impl Core {
                 "unexpected history response payload".into(),
             ));
         };
-        self.normalize_page(&request.session, page, binding, max_messages)
+        if let Some((projection, cut)) = watch_cut {
+            Self::validate_watch_cut(&page, projection, cut)?;
+        }
+        let normalized = self.normalize_page(&request.session, &page, binding, max_messages)?;
+        Ok((normalized, page))
+    }
+
+    fn validate_watch_cut(
+        page: &whalerein_proto::HistoryPage,
+        projection: &str,
+        cut: &str,
+    ) -> CoreResult<()> {
+        if !cut.is_empty()
+            && page.projection_id == projection
+            && page.cut_cursor == cut
+            && page
+                .batch
+                .as_ref()
+                .is_some_and(|batch| batch.to_cursor == cut)
+        {
+            return Ok(());
+        }
+        Err(snapshot_required(
+            "history page does not attest the watch position",
+        ))
+    }
+
+    pub(crate) fn cached_recent_page(
+        &self,
+        request: &HistoryPageRequest,
+        page: &whalerein_proto::HistoryPage,
+    ) -> CoreResult<HistoryPage> {
+        let (count, budget) = bounded(request.max_messages, request.max_bytes);
+        let batch = page
+            .batch
+            .as_ref()
+            .ok_or_else(|| CoreError::Cache("missing cached history batch".into()))?;
+        let mut page = page.clone();
+        let window = page.batch.as_mut().expect("validated recent history batch");
+        let mut bytes = 0;
+        let len = batch
+            .changes
+            .iter()
+            .rev()
+            .take(count as usize)
+            .take_while(|change| {
+                bytes += change.encoded_len();
+                bytes <= budget as usize
+            })
+            .count();
+        if len == 0 && !batch.changes.is_empty() {
+            return Err(CoreError::Api {
+                code: Some(whalerein_proto::ErrorCode::PayloadTooLarge),
+                message: "cached message exceeds the page budget".into(),
+            });
+        }
+        if len < window.changes.len() {
+            window.changes.drain(..window.changes.len() - len);
+            page.complete = false;
+        }
+        // Persisted forward progress and reverse continuation have separate
+        // positions. Recent-only cache cannot supply additional offline rows.
+        let complete = page.complete;
+        page.complete = true;
+        let mut result = self.normalize_page(&request.session, &page, None, count)?;
+        result.source = HistorySource::Cache;
+        result.complete = complete;
+        Ok(result)
     }
 
     fn normalize_page(
         &self,
         session: &SessionKey,
-        page: whalerein_proto::HistoryPage,
+        page: &whalerein_proto::HistoryPage,
         binding: Option<ContinuationBinding>,
         max_messages: u32,
     ) -> CoreResult<HistoryPage> {
@@ -696,7 +711,7 @@ impl Core {
             if binding.projection != page.projection_id {
                 return Err(self.projection_reset());
             }
-            if binding.cut != page.cut_cursor {
+            if binding.cut != page.cut_cursor || batch.to_cursor != page.cut_cursor {
                 return Err(snapshot_required("history cut changed"));
             }
             if batch.from_cursor.is_empty() || batch.from_cursor == binding.next {
@@ -743,7 +758,7 @@ impl Core {
         };
         Ok(HistoryPage {
             source: HistorySource::Online,
-            projection: page.projection_id,
+            projection: page.projection_id.clone(),
             complete: page.complete,
             messages,
             activities: activities.ordered().into_iter().cloned().collect(),
@@ -757,6 +772,26 @@ impl Core {
         max_messages: u32,
         max_bytes: u32,
     ) -> CoreResult<HistoryPage> {
+        self.read_full_cache_window(request, max_messages, max_bytes)
+            .map(|(page, _)| page)
+    }
+
+    /// Read a cache snapshot with its consistent forward cut in a single
+    /// lock acquisition. Recent-only coverage has a separate store.
+    pub(crate) fn full_cache_window(
+        &self,
+        request: &HistoryPageRequest,
+    ) -> CoreResult<(HistoryPage, Option<String>)> {
+        let (count, bytes) = bounded(request.max_messages, request.max_bytes);
+        self.read_full_cache_window(request, count, bytes)
+    }
+
+    fn read_full_cache_window(
+        &self,
+        request: &HistoryPageRequest,
+        max_messages: u32,
+        max_bytes: u32,
+    ) -> CoreResult<(HistoryPage, Option<String>)> {
         let binding = match &request.continuation {
             Some(continuation) => Some(self.continuation_from_token(
                 continuation,
@@ -766,97 +801,90 @@ impl Core {
             None => None,
         };
         let cache = self.cache()?;
-        let Some(view) = cache.history_view(&request.session)? else {
-            // No cache installation for this session is a truthful finite
-            // empty read, not a fenced obsolete projection. A continuation
-            // still refers to an install that was replaced or evicted.
+        let expected = binding
+            .as_ref()
+            .map(|binding| {
+                let ordinal = binding
+                    .next
+                    .parse::<i64>()
+                    .map_err(|_| snapshot_required("history continuation position is invalid"))?;
+                if ordinal < 0 || binding.cut != "ordinal" || binding.source != HistorySource::Cache
+                {
+                    return Err(snapshot_required(
+                        "history continuation position is invalid",
+                    ));
+                }
+                Ok((
+                    binding.projection.as_str(),
+                    binding.generation,
+                    binding.install.as_str(),
+                    ordinal,
+                ))
+            })
+            .transpose()?;
+        let Some(window) =
+            cache.bounded_history_window(&request.session, expected, max_messages, max_bytes)?
+        else {
             if binding.is_some() {
                 return Err(snapshot_required(
-                    "cached history continuation refers to a replaced or evicted install",
+                    "cached history continuation is no longer available",
                 ));
             }
-            return Ok(HistoryPage {
-                source: HistorySource::Cache,
-                projection: String::new(),
-                complete: true,
-                messages: Vec::new(),
-                activities: Vec::new(),
-                continuation: None,
-            });
+            return Ok((
+                HistoryPage {
+                    source: HistorySource::Cache,
+                    projection: String::new(),
+                    complete: true,
+                    messages: Vec::new(),
+                    activities: Vec::new(),
+                    continuation: None,
+                },
+                None,
+            ));
         };
-        if view.projection.is_empty() || view.projection.len() > 128 {
+        if window.projection.is_empty() || window.projection.len() > 128 {
             return Err(snapshot_required(
                 "cached history belongs to a previous content projection",
             ));
         }
-        let projection = view.projection;
-        let generation = cache.cache_generation()?;
-        let install = cache.cache_install_id()?;
-        let messages = cache.history_messages(&request.session)?;
-        let end = if let Some(binding) = &binding {
-            if binding.source != HistorySource::Cache
-                || binding.projection != projection
-                || binding.generation != generation
-                || binding.install != install
-            {
-                return Err(self.projection_reset());
-            }
-            let end: usize = binding
-                .next
-                .parse()
-                .map_err(|_| snapshot_required("history continuation position is invalid"))?;
-            if end > messages.len() || cache_fingerprint(&messages[..end]) != binding.cut {
-                return Err(snapshot_required("cached history was replaced or evicted"));
-            }
-            end
-        } else {
-            messages.len()
-        };
-        let mut start = end.saturating_sub(max_messages as usize);
-        while start < end
-            && messages[start..end]
-                .iter()
-                .map(estimated_bytes)
-                .sum::<usize>()
-                > max_bytes as usize
-        {
-            start += 1;
-        }
-        if start == end && end > 0 {
+        if window.older.is_some() && window.messages.is_empty() {
             return Err(CoreError::Api {
                 code: Some(whalerein_proto::ErrorCode::PayloadTooLarge),
                 message: "cached message exceeds the page budget".into(),
             });
         }
-        let page_messages = messages[start..end].to_vec();
+        let page_messages = window.messages;
         let mut activities = ToolActivities::default();
         activities.absorb(
             page_messages
                 .iter()
                 .flat_map(ConversationMessage::tool_activities),
         );
-        let complete = start == 0;
-        let continuation = if complete {
-            None
-        } else {
-            Some(self.page_continuation(
-                &request.session,
-                &projection,
-                &cache_fingerprint(&messages[..start]),
-                &start.to_string(),
-                HistorySource::Cache,
-                generation,
-                &install,
-            )?)
-        };
-        Ok(HistoryPage {
-            source: HistorySource::Cache,
-            projection,
-            complete,
-            messages: page_messages,
-            activities: activities.ordered().into_iter().cloned().collect(),
-            continuation,
-        })
+        let continuation = window
+            .older
+            .map(|older| {
+                self.page_continuation(
+                    &request.session,
+                    &window.projection,
+                    "ordinal",
+                    &older.to_string(),
+                    HistorySource::Cache,
+                    window.generation,
+                    &window.install,
+                )
+            })
+            .transpose()?;
+        Ok((
+            HistoryPage {
+                source: HistorySource::Cache,
+                projection: window.projection,
+                complete: continuation.is_none(),
+                messages: page_messages,
+                activities: activities.ordered().into_iter().cloned().collect(),
+                continuation,
+            },
+            Some(window.cursor),
+        ))
     }
 
     fn projection_reset(&self) -> CoreError {
@@ -972,6 +1000,40 @@ mod tests {
 
     fn key(_core: &Core) -> SessionKey {
         SessionKey::new("host-1", "session-1").unwrap()
+    }
+
+    #[test]
+    fn reverse_page_must_attest_the_watch_projection_and_cut() {
+        let page = whalerein_proto::HistoryPage {
+            projection_id: "view".into(),
+            cut_cursor: "watch-head".into(),
+            batch: Some(whalerein_proto::HistoryBatch {
+                to_cursor: "watch-head".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(Core::validate_watch_cut(&page, "view", "watch-head").is_ok());
+        for (view, cut) in [
+            ("view", ""),
+            ("view", "reverse-cut"),
+            ("moved", "watch-head"),
+        ] {
+            assert_eq!(
+                Core::validate_watch_cut(&page, view, cut)
+                    .unwrap_err()
+                    .code(),
+                "snapshot_required"
+            );
+        }
+        let mut invalid = page;
+        invalid.batch.as_mut().unwrap().to_cursor = "other-head".into();
+        assert_eq!(
+            Core::validate_watch_cut(&invalid, "view", "watch-head")
+                .unwrap_err()
+                .code(),
+            "snapshot_required"
+        );
     }
 
     #[tokio::test]

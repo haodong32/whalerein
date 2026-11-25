@@ -41,7 +41,7 @@ struct AppLifecycleTests {
         #expect(app.isPrivacyShieldVisible)
         #expect(app.resumeMarker?.hostId == "studio-mac")
         #expect(app.resumeMarker?.sessionId == "s-001")
-        #expect(service.stopWatchCount == 1)
+        #expect(service.stopWatchCount == 0)
         #expect(app.conversation?.isSuspended == true)
 
         let key = AppStorageLocations.sessionKey(hostId: "studio-mac", sessionId: "s-001")
@@ -64,6 +64,7 @@ struct AppLifecycleTests {
 
         await app.enterBackground()
         service.emit(.watchEnded(reason: "stopped"), sequence: 2)
+        await waitUntil { app.conversation?.watchEnded == true }
         await app.becomeActive()
 
         #expect(!app.isPrivacyShieldVisible)
@@ -112,7 +113,7 @@ struct AppLifecycleTests {
         #expect(service.savedDrafts[key] == "close me now")
     }
 
-    @Test("suspending ends the event subscription and resuming creates exactly one new one")
+    @Test("suspending retains the observation and resuming keeps exactly one subscription")
     func subscriptionLifecycle() async {
         let service = StubSessionService()
         let model = await makeStartedConversation(service: service)
@@ -120,11 +121,11 @@ struct AppLifecycleTests {
         #expect(service.activeStreamCount == 1)
 
         await model.suspendForBackground()
-        await waitUntil { service.activeStreamCount == 0 }
-        #expect(service.activeStreamCount == 0)
+        #expect(service.activeStreamCount == 1)
 
         await model.resumeAfterForeground()
-        #expect(service.eventStreamCount == 2)
+        #expect(service.eventStreamCount == 1)
         #expect(service.activeStreamCount == 1)
+        #expect(service.startWatchCalls.count == 1)
     }
 }

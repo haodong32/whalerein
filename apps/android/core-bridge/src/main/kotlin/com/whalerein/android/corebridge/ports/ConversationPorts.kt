@@ -4,9 +4,12 @@ import com.whalerein.android.corebridge.AndroidCore
 import com.whalerein.android.corebridge.ApprovalView
 import com.whalerein.android.corebridge.AttemptRefView
 import com.whalerein.android.corebridge.ConversationEvent
+import com.whalerein.android.corebridge.ConversationEventEnvelope
 import com.whalerein.android.corebridge.DeliveryChoice
+import com.whalerein.android.corebridge.MobileCore
 import com.whalerein.android.corebridge.MobileException
 import com.whalerein.android.corebridge.WaitOutcome
+import com.whalerein.android.corebridge.WatchHistoryBaseline
 import com.whalerein.android.state.conversation.AttemptEnded
 import com.whalerein.android.state.conversation.CommandPort
 import com.whalerein.android.state.conversation.ComposerPort
@@ -72,55 +75,78 @@ private fun operationIdFor(sendId: String): String =
         .take(16)
         .joinToString("") { "%02x".format(it) }
 
+internal fun ConversationEventEnvelope.watchPayloadFor(
+    session: WatchSession,
+    producerGeneration: ULong,
+): ConversationEvent? {
+    val producer = scope
+    return when {
+        producer == null -> event as? ConversationEvent.DroppedEvents
+        producer.generation == producerGeneration &&
+            producer.hostId == session.scope.hostId() &&
+            producer.sessionId == session.scope.sessionId() -> event
+        else -> null
+    }
+}
+
 internal class ObservationAdapter(private val owner: AndroidCore) : ObservationPort {
+    private data class ActiveWatch(
+        val session: WatchSession,
+        val core: MobileCore,
+        val producerGeneration: ULong,
+        val deadline: Long?,
+    )
+
     private val mutex = Mutex()
-    private var current: WatchSession? = null
-    private var mode = WatchMode.Live
-    private var deadline = 0L
-    private var sawOutput = false
+    private var current: ActiveWatch? = null
 
     override suspend fun startWatch(request: WatchRequest): Outcome<WatchSession> = mutex.withLock {
         onIoOutcome {
+            val core = owner.core()
             val existing = current
-            if (existing != null && existing.scope == request.scope &&
-                existing.generation == request.generation
+            if (existing != null && existing.core === core &&
+                existing.session.scope == request.scope &&
+                existing.session.generation == request.generation
             ) {
-                return@onIoOutcome existing
+                return@onIoOutcome existing.session
             }
-            owner.core().stopWatch()
-            owner.core().startWatch(request.scope.hostId(), request.scope.sessionId())
+            val producerGeneration = core.startWatch(
+                request.scope.hostId(),
+                request.scope.sessionId(),
+                WatchHistoryBaseline.Complete,
+            )
             val session = WatchSession(
                 watchId = UUID.randomUUID().toString(),
                 scope = request.scope,
                 generation = request.generation,
                 mode = request.mode,
             )
-            mode = request.mode
-            deadline = request.timeoutMillis?.let { System.currentTimeMillis() + it } ?: 0L
-            sawOutput = false
-            current = session
+            val deadline = request.timeoutMillis?.let { System.currentTimeMillis() + it }
+            current = ActiveWatch(session, core, producerGeneration, deadline)
             session
         }
     }
 
     override suspend fun pollEvents(session: WatchSession): Outcome<ObservationBatch> = mutex.withLock {
-        val active = current
-        if (active == null || active.watchId != session.watchId) {
-            return@withLock Outcome.Success(
-                ObservationBatch(
-                    scope = session.scope,
-                    generation = session.generation,
-                    ended = WatchEndReason.ScopeChanged,
-                ),
-            )
-        }
         onIoOutcome {
-            val raw = owner.core().pollEvents(500UL)
+            val active = current
+            if (active == null || active.session.watchId != session.watchId) {
+                return@onIoOutcome session.scopeChanged()
+            }
+            if (active.core !== owner.core()) {
+                current = null
+                return@onIoOutcome session.scopeChanged()
+            }
+            val raw = active.core.pollEvents(500UL)
+            if (active.core !== owner.core()) {
+                current = null
+                return@onIoOutcome session.scopeChanged()
+            }
             var dropped = 0
             var ended: WatchEndReason? = null
             val events = mutableListOf<StateEvent>()
-            for (event in raw) {
-                when (event) {
+            for (envelope in raw) {
+                when (val event = envelope.watchPayloadFor(session, active.producerGeneration)) {
                     is ConversationEvent.DroppedEvents -> {
                         dropped += event.count.toInt()
                         ended = WatchEndReason.DroppedEvents
@@ -142,7 +168,7 @@ internal class ObservationAdapter(private val owner: AndroidCore) : ObservationP
                             session.generation,
                             event.approvals.map { it.toPendingItem() },
                         )
-                        if (mode == WatchMode.UntilQuiescent && !event.running &&
+                        if (session.mode == WatchMode.UntilQuiescent && !event.running &&
                             event.approvals.isEmpty()
                         ) {
                             ended = WatchEndReason.Quiescent
@@ -163,11 +189,10 @@ internal class ObservationAdapter(private val owner: AndroidCore) : ObservationP
                             )
                         }
                         events += target
-                        if (kind == MessageBlockKind.Text && event.text.isNotEmpty()) {
-                            sawOutput = true
-                            if (mode == WatchMode.FirstVisibleOutput) {
-                                ended = WatchEndReason.FirstVisibleOutput
-                            }
+                        if (session.mode == WatchMode.FirstVisibleOutput &&
+                            kind == MessageBlockKind.Text && event.text.isNotEmpty()
+                        ) {
+                            ended = WatchEndReason.FirstVisibleOutput
                         }
                     }
                     is ConversationEvent.Message -> {
@@ -177,10 +202,9 @@ internal class ObservationAdapter(private val owner: AndroidCore) : ObservationP
                             session.generation,
                             event.message.toStateMessage(origin),
                         )
-                        if (mode == WatchMode.FirstVisibleOutput &&
+                        if (session.mode == WatchMode.FirstVisibleOutput &&
                             event.message.blocks.any { it.kind == "text" }
                         ) {
-                            sawOutput = true
                             ended = WatchEndReason.FirstVisibleOutput
                         }
                     }
@@ -197,11 +221,13 @@ internal class ObservationAdapter(private val owner: AndroidCore) : ObservationP
                     else -> Unit
                 }
             }
-            if (ended == null && deadline > 0 && System.currentTimeMillis() > deadline) {
+            if (ended == null && active.deadline != null && System.currentTimeMillis() > active.deadline) {
                 ended = WatchEndReason.Timeout
             }
             if (ended != null) {
-                owner.core().stopWatch()
+                if (active.core === owner.core()) {
+                    active.core.stopWatch()
+                }
                 current = null
             }
             ObservationBatch(
@@ -216,13 +242,22 @@ internal class ObservationAdapter(private val owner: AndroidCore) : ObservationP
 
     override suspend fun stopWatch(session: WatchSession): Outcome<Unit> = mutex.withLock {
         onIoOutcome {
-            if (current?.watchId == session.watchId) {
-                owner.core().stopWatch()
+            val active = current
+            if (active != null && active.session.watchId == session.watchId) {
+                if (active.core === owner.core()) {
+                    active.core.stopWatch()
+                }
                 current = null
             }
         }
     }
 }
+
+private fun WatchSession.scopeChanged(): ObservationBatch = ObservationBatch(
+    scope = scope,
+    generation = generation,
+    ended = WatchEndReason.ScopeChanged,
+)
 
 private inline fun <T> onIoOutcome(block: () -> T): Outcome<T> = try {
     Outcome.Success(block())

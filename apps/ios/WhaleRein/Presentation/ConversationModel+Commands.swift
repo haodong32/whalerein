@@ -26,6 +26,7 @@ extension ConversationModel {
             submittedAt: now()
         )
         state = ConversationReduce.reduce(state, .sendSubmitted(command))
+        appendPendingSend(command, text: text)
         do {
             var receipt = try await service.send(
                 hostId: hostId,
@@ -33,16 +34,20 @@ extension ConversationModel {
                 text: text,
                 delivery: choice
             )
+            guard !isClosed else { return }
             // The submission settled: release the gate even though an uncertain
             // receipt continues to block Send until reconciliation.
             if let early = takeEarlyCommandStatus(for: receipt.commandId) {
-                receipt.status = preferredStatus(early, over: receipt.status)
+                receipt.status = preferredStatus(early.status, over: receipt.status)
+                receipt.messageId = receipt.messageId ?? early.messageId
+                receipt.deliveryId = receipt.deliveryId ?? early.deliveryId
             }
             state.lastCommandKind = command.kind
             // A rejected send was definitively not accepted, so it has no
             // retained operation to recover and must not become the identity a
             // later relaunch tries to resolve.
-            lastSendOperationId = receipt.status == .rejected ? nil : receipt.requestId
+            let admitted = receipt.status != .rejected && receipt.status != .cancelled
+            lastSendOperationId = admitted ? receipt.requestId : nil
             operationResult = nil
             operationErrorKey = nil
             operationReadErrorKey = nil
@@ -53,10 +58,8 @@ extension ConversationModel {
                 state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
                 inFlightSendText = nil
             }
-            if receipt.status != .rejected {
-                appendOptimisticUserMessage(text: text, receipt: receipt)
-            }
-            if choice == .send || (choice == .queue && !capabilities.running) {
+            settlePendingSend(command, receipt: receipt)
+            if admitted, choice == .send || (choice == .queue && !capabilities.running) {
                 // An idle native-queue submission starts the turn; a running
                 // queue submission leaves the current run untouched.
                 updateCapabilities(running: true)
@@ -65,7 +68,7 @@ extension ConversationModel {
                 // Keep the current draft (which may already be a newer message)
                 // until the original request is reconciled.
                 await persistDraftNow()
-            } else if receipt.status != .rejected {
+            } else if admitted {
                 // A successful older send consumes only the text it submitted.
                 // Text typed while the response was in flight belongs to a
                 // newer message and must survive.
@@ -75,14 +78,12 @@ extension ConversationModel {
                     await persistDraftNow()
                 }
             }
-            if receipt.status == .uncertain {
-                requestScroll(animated: true)
-            }
         } catch {
             // A definite failure releases the gate so the same intent can be
             // retried; a late settlement of the failed command cannot re-arm it.
             let code = (error as? SessionServiceError)?.code ?? .internalError
             state = ConversationReduce.reduce(state, .sendRejected(command, code))
+            removePendingSend(command)
             reportFatalIfNeeded(code)
         }
     }
@@ -104,7 +105,9 @@ extension ConversationModel {
             // The submission settled; an accepted or uncertain Stop remains
             // pending through `pendingStop` until the Host reconciles it.
             if let early = takeEarlyCommandStatus(for: receipt.commandId) {
-                receipt.status = preferredStatus(early, over: receipt.status)
+                receipt.status = preferredStatus(early.status, over: receipt.status)
+                receipt.messageId = receipt.messageId ?? early.messageId
+                receipt.deliveryId = receipt.deliveryId ?? early.deliveryId
             }
             state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
             applyStopReceipt(receipt, submissionEpoch: submissionEpoch)

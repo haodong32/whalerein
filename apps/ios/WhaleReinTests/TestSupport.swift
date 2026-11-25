@@ -179,6 +179,11 @@ final class SuspendedResponse<Value: Sendable> {
         response?.resume(returning: value)
         response = nil
     }
+
+    func fail(with error: Error) {
+        response?.resume(throwing: error)
+        response = nil
+    }
 }
 
 @MainActor
@@ -367,6 +372,12 @@ class StubSessionService: SessionService {
         if let startWatchHandler {
             try await startWatchHandler(hostId, sessionId)
         }
+    }
+
+    var acceptsWatchEventHandler: ((SessionEventEnvelope) -> Bool)?
+
+    func acceptsWatchEvent(_ envelope: SessionEventEnvelope) -> Bool {
+        acceptsWatchEventHandler?(envelope) ?? true
     }
 
     func stopWatch() {

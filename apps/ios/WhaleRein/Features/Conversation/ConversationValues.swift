@@ -100,23 +100,6 @@ enum ApprovalSlot: Equatable, Sendable {
     }
 }
 
-/// Committed-history traversal state.
-enum HistoryState: Equatable, Sendable {
-    case unavailable
-    case cachedOnly
-    case idle(complete: Bool)
-    case loadingMore
-    case failed(AppErrorCode)
-}
-
-/// Where the visible content came from. The UI labels cached and optimistic
-/// content; Core stays authoritative.
-enum ContentProvenance: Equatable, Sendable {
-    case optimistic
-    case confirmed
-    case cached
-}
-
 /// Question facet of the conversation: Core-owned batches, the user's review
 /// draft, the answer submission and the truncated-page indicator.
 struct QuestionFacet: Equatable, Sendable {
@@ -137,17 +120,21 @@ struct QuestionFacet: Equatable, Sendable {
 
 /// Older-history facet: one one-shot traversal beside the live watch.
 struct HistoryFacet: Equatable, Sendable {
-    struct Prepend: Equatable, Sendable {
-        let id: Int
-        let anchorMessageId: String?
-    }
-
+    var source: HistorySource?
+    var projection: String?
+    var continuation: String?
+    var baselineContinuation: String?
+    var traversal = 0
+    var didAutoFill = false
+    var didAutomaticallyRebase = false
+    var canScroll = true
+    var positionChanged = false
+    var awaitsOnlineReplacement = false
     var provenance: HistoryProvenance?
     var loading = false
     var complete = false
     var needsFreshTraversal = false
     var errorKey: L10nKey?
-    var prepend: Prepend?
 }
 
 /// Streaming preview of the reply currently being generated, plus the typed
