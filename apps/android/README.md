@@ -79,6 +79,10 @@ application ID and one version sequence for both flavors. `noGms` carries no
 Google service dependency, manifest entry or initializer. Release packaging is
 minified and shrunk.
 
+The Android Release Rust build emits a shared library with size optimization,
+ThinLTO, one codegen unit and RELR relocations. It bundles SQLite without
+full-text search, RTree, DBSTAT or runtime extension loading.
+
 Signing is deliberately outside the tracked tree. Local development uses a
 repository-local test keystore created by `apps/android/scripts/`; release
 signing material comes from environment or keystore properties and is never
