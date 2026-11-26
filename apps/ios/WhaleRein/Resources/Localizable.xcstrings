@@ -1735,6 +1735,23 @@
         }
       }
     },
+    "conversation.history.positionChanged": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your previous reading position is unavailable. Showing the latest messages."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法恢复之前的阅读位置，当前显示最新消息。"
+          }
+        }
+      }
+    },
     "conversation.history.unavailable": {
       "extractionState": "manual",
       "localizations": {
@@ -1820,19 +1837,19 @@
         }
       }
     },
-    "conversation.loadEarlier": {
+    "conversation.continueLoading": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Load earlier messages"
+            "value": "Continue Loading"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "加载更早的消息"
+            "value": "继续加载"
           }
         }
       }

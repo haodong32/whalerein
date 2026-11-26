@@ -1,292 +1,347 @@
-// Optimistic send reconciliation. Core may echo the committed user message with
-// its own id; that echo must replace the local bubble instead of adding a second
-// one. Sources that never echo keep exactly one local bubble.
+// The send presentation is stable while a receipt is pending and only
+// reconciles against a committed identity supplied by that receipt.
 
 import Foundation
 import Testing
 @testable import WhaleRein
 
-@Suite("Optimistic send deduplication")
+@Suite("Send deduplication")
 @MainActor
 struct SendDeduplicationTests {
-    private func userMessage(id: String, text: String) -> ConversationMessage {
+    private func echo(_ id: String) -> ConversationMessage {
         ConversationMessage(
             messageId: id,
             role: .user,
-            blocks: [ConversationBlock(blockId: "\(id)-block-0", kind: .text, text: text)],
+            blocks: [ConversationBlock(blockId: id + "-text", kind: .text, text: "equal")],
             createdAtUnixMs: 1
         )
     }
 
-    private func envelope(
-        _ event: MessageEvent,
-        sequence: Int
-    ) -> SessionEventEnvelope {
-        SessionEventEnvelope(
-            hostId: "studio-mac",
-            sessionId: "s-001",
-            sequence: sequence,
-            event: event
+    private func envelope(_ event: MessageEvent, _ sequence: Int) -> SessionEventEnvelope {
+        SessionEventEnvelope(hostId: "studio-mac", sessionId: "s-001", sequence: sequence, event: event)
+    }
+
+    private func receipt(_ status: CommandStatus, messageID: String? = nil) -> CommandReceipt {
+        CommandReceipt(
+            commandId: "cmd", requestId: "req", status: status,
+            delivery: .send, messageId: messageID
         )
     }
 
-    @Test("a Core echo with the receipt message id replaces the optimistic bubble")
-    func echoByMessageId() async {
+    @Test("a receipt-first echo reuses the pending row identity and does not move a reader")
+    func receiptFirstPreservesReadingPosition() async throws {
         let service = StubSessionService()
-        let receipt = CommandReceipt(
-            commandId: "cmd-echo-1",
-            requestId: "req-echo-1",
-            status: .accepted,
-            delivery: .send,
-            messageId: "msg-core-1",
-            deliveryId: "del-1"
-        )
-        service.sendHandler = { _, _, _, _ in receipt }
+        let gate = SuspendedResponse<CommandReceipt>()
+        service.sendHandler = { _, _, _, _ in try await gate.wait() }
         let model = await makeStartedConversation(service: service)
-        model.draft = "hello echo"
+        model.updateScroll(isAtLatest: false)
+        model.noteTopVisibleMessage("visible")
+        let before = model.scrollRequest?.id
+        model.draft = "equal"
 
-        await model.send()
-        #expect(model.messages.count == 1)
-        #expect(model.messages[0].messageId == "local-cmd-echo-1")
+        let send = Task { await model.send() }
+        await gate.waitUntilStarted()
+        let local = try #require(model.messages.first?.messageId)
+        #expect(local.hasPrefix("local-"))
+        #expect(model.pendingSubmission == .send)
+        #expect(model.scroll.anchorMessageId == "visible")
+        #expect(model.scrollRequest?.id == before)
 
-        model.handle(envelope(.message(userMessage(id: "msg-core-1", text: "hello echo")), sequence: 2))
-
-        #expect(model.messages.count == 1, "The committed echo must not add a second bubble")
-        #expect(model.messages[0].messageId == "msg-core-1")
+        gate.resume(with: receipt(.accepted, messageID: "same"))
+        await send.value
+        #expect(model.messages.map(\.messageId) == [local])
+        model.handle(envelope(.message(echo("other")), 2))
+        model.handle(envelope(.message(echo("same")), 3))
+        model.handle(envelope(.message(echo("same")), 4))
+        #expect(model.messages.map(\.messageId) == ["other", "same"])
+        #expect(model.presentationID(for: "same") == local)
+        #expect(model.scroll.anchorMessageId == "visible")
+        #expect(model.scrollRequest?.id == before)
     }
 
-    @Test("an echo without a correlation id is matched by its exact text")
-    func echoByText() async {
+    @Test("echo-first handling preserves both committed messages when another sender's text is equal")
+    func echoFirstMatchesAuthoritativeID() async throws {
         let service = StubSessionService()
-        service.sendHandler = { _, _, _, delivery in
-            CommandReceipt(
-                commandId: "cmd-echo-2",
-                requestId: "req-echo-2",
-                status: .accepted,
-                delivery: delivery
+        let gate = SuspendedResponse<CommandReceipt>()
+        service.sendHandler = { _, _, _, _ in try await gate.wait() }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "equal"
+
+        let send = Task { await model.send() }
+        await gate.waitUntilStarted()
+        let local = try #require(model.messages.first?.messageId)
+        model.handle(envelope(.message(echo("other")), 2))
+        model.handle(envelope(.message(echo("same")), 3))
+        #expect(model.messages.map(\.messageId) == [local, "other", "same"])
+
+        gate.resume(with: receipt(.accepted, messageID: "same"))
+        await send.value
+        #expect(model.messages.map(\.messageId) == ["other", "same"])
+        #expect(model.presentationID(for: "other") == "other")
+        #expect(model.presentationID(for: "same") == "same")
+    }
+
+    @Test("without association the receipt status and committed content remain independent")
+    func textCannotSettlePending() async throws {
+        let service = StubSessionService()
+        let gate = SuspendedResponse<CommandReceipt>()
+        service.sendHandler = { _, _, _, _ in try await gate.wait() }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "equal"
+        let send = Task { await model.send() }
+        await gate.waitUntilStarted()
+        let local = try #require(model.messages.first?.messageId)
+        model.handle(envelope(.message(echo("other")), 2))
+        #expect(model.messages.map(\.messageId) == [local, "other"])
+        gate.resume(with: receipt(.accepted))
+        await send.value
+        #expect(model.lastSendStatus == .accepted)
+        #expect(model.messages.map(\.messageId) == [local, "other"])
+        #expect(model.presentationID(for: "other") == "other")
+    }
+
+    @Test("an accepted send stays visible when only the assistant replies", arguments: [nil, "request-id"] as [String?])
+    func acceptedSendStaysVisibleWithoutUserEcho(messageID: String?) async throws {
+        let service = StubSessionService()
+        let gate = SuspendedResponse<CommandReceipt>()
+        service.sendHandler = { _, _, _, _ in try await gate.wait() }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "Fixture prompt"
+
+        let send = Task { await model.send() }
+        await gate.waitUntilStarted()
+        let localID = try #require(model.messages.first?.messageId)
+        gate.resume(with: receipt(.accepted, messageID: messageID))
+        await send.value
+        #expect(model.lastSendStatus == .accepted)
+
+        let reply = ConversationMessage(
+            messageId: "assistant-reply",
+            role: .assistant,
+            blocks: [ConversationBlock(blockId: "reply-text", kind: .text, text: "Fixture reply")],
+            createdAtUnixMs: 2
+        )
+        #expect(model.messages.map(\.messageId) == [localID])
+        model.handle(envelope(.preview(attemptId: "reply", text: "Fixture preview", replace: true, incomplete: true), 2))
+        #expect(model.livePreview == "Fixture preview")
+        #expect(model.messages.map(\.messageId) == [localID])
+        model.handle(envelope(.message(reply), 3))
+
+        #expect(model.messages.map(\.messageId) == [localID, reply.messageId])
+    }
+
+    @Test("an early confirmed status without a message ID keeps the outgoing row")
+    func earlyConfirmationWithoutUserEchoKeepsOutgoingRow() async throws {
+        let service = StubSessionService()
+        let gate = SuspendedResponse<CommandReceipt>()
+        service.sendHandler = { _, _, _, _ in try await gate.wait() }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "Fixture prompt"
+
+        let send = Task { await model.send() }
+        await gate.waitUntilStarted()
+        let localID = try #require(model.messages.first?.messageId)
+        model.handle(envelope(.commandStatus(receipt(.confirmed)), 2))
+        gate.resume(with: receipt(.accepted))
+        await send.value
+
+        #expect(model.lastSendStatus == .confirmed)
+        #expect(model.messages.map(\.messageId) == [localID])
+    }
+
+    @Test("an older send receipt leaves the next draft editable and persisted")
+    func delayedReceiptPreservesTheNextDraft() async throws {
+        let service = StubSessionService()
+        let gate = SuspendedResponse<CommandReceipt>()
+        service.sendHandler = { _, _, _, _ in try await gate.wait() }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "Fixture prompt"
+
+        let send = Task { await model.send() }
+        await gate.waitUntilStarted()
+        model.draft = "Next fixture draft"
+        gate.resume(with: receipt(.accepted, messageID: "first-message"))
+        await send.value
+
+        #expect(model.draft == "Next fixture draft")
+        let persisted = try await service.loadDraft(hostId: "studio-mac", sessionId: "s-001")
+        #expect(persisted == "Next fixture draft")
+        model.close()
+        let reopened = await makeStartedConversation(service: service)
+        #expect(reopened.draft == "Next fixture draft")
+    }
+
+    private func assistantReply(createdAt: Int64 = 2) -> ConversationMessage {
+        ConversationMessage(
+            messageId: "fixture-assistant",
+            role: .assistant,
+            blocks: [ConversationBlock(blockId: "answer", kind: .text, text: "Fixture reply")],
+            createdAtUnixMs: createdAt
+        )
+    }
+
+    @Test("a replacement snapshot keeps the accepted prompt before its answer")
+    func replacementKeepsAcceptedPromptBeforeReply() async throws {
+        let service = StubSessionService()
+        service.sendHandler = { _, _, _, _ in receipt(.accepted, messageID: "user-echo") }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "Fixture prompt"
+        await model.send()
+        let local = try #require(model.messages.last)
+        let localID = local.messageId
+        let reply = assistantReply(createdAt: local.createdAtUnixMs + 1)
+        let page = ConversationHistoryPage(
+            source: .online, projection: "replacement", complete: true,
+            messages: [reply], activities: [], continuation: nil
+        )
+        model.handle(envelope(.historySnapshot(page, replacing: true), 2))
+        #expect(model.messages.map(\.messageId) == [localID, reply.messageId])
+        model.handle(envelope(.message(echo("user-echo")), 3))
+        #expect(model.messages.map(\.messageId) == ["user-echo", reply.messageId])
+        #expect(model.presentationID(for: "user-echo") == localID)
+    }
+
+    @Test("identical submissions correlate independently even when echoes arrive in reverse order")
+    func twoIdenticalSendsKeepTheirOwnIdentity() async throws {
+        let service = StubSessionService()
+        var next = 0
+        service.sendHandler = { _, _, _, _ in
+            next += 1
+            return CommandReceipt(
+                commandId: "command-\(next)", requestId: "request-\(next)",
+                status: .accepted, delivery: .queue, messageId: "echo-\(next)"
             )
         }
         let model = await makeStartedConversation(service: service)
-        model.draft = "text matched"
-
+        model.draft = "equal"
         await model.send()
-        model.handle(envelope(.message(userMessage(id: "msg-core-2", text: "text matched")), sequence: 2))
-
-        #expect(model.messages.count == 1)
-        #expect(model.messages[0].messageId == "msg-core-2")
-    }
-
-    @Test("a reconnect reset keeps an accepted optimistic row until its echo")
-    func resetKeepsAcceptedOptimisticRow() async {
-        let service = StubSessionService()
-        service.sendHandler = { _, _, _, delivery in
-            CommandReceipt(
-                commandId: "cmd-reset-keep",
-                requestId: "req-reset-keep",
-                status: .accepted,
-                delivery: delivery
-            )
-        }
-        let model = await makeStartedConversation(service: service)
-        model.draft = "still pending"
+        let first = try #require(model.messages.last?.messageId)
+        model.draft = "equal"
         await model.send()
-        #expect(model.messages.last?.messageId == "local-cmd-reset-keep")
+        let second = try #require(model.messages.last?.messageId)
+        #expect(first != second)
+        #expect(service.sendCalls.count == 2)
 
-        model.handle(
-            envelope(
-                .reset(messages: [userMessage(id: "old-1", text: "earlier")], approvals: []),
-                sequence: 2
-            )
-        )
-        #expect(model.messages.map(\.messageId) == ["old-1", "local-cmd-reset-keep"])
-    }
-
-    @Test("a reset snapshot that already contains the committed echo does not duplicate it")
-    func resetDropsOptimisticWhenEchoIsInSnapshot() async {
-        let service = StubSessionService()
-        service.sendHandler = { _, _, _, delivery in
-            CommandReceipt(
-                commandId: "cmd-reset-echo",
-                requestId: "req-reset-echo",
-                status: .accepted,
-                delivery: delivery
-            )
-        }
-        let model = await makeStartedConversation(service: service)
-        model.draft = "already committed"
-        await model.send()
-
-        model.handle(
-            envelope(
-                .reset(messages: [userMessage(id: "msg-committed", text: "already committed")], approvals: []),
-                sequence: 2
-            )
-        )
-        #expect(model.messages.map(\.messageId) == ["msg-committed"])
-    }
-
-    @Test("a reset with an older identical text keeps a second distinct optimistic send")
-    func resetKeepsRepeatedTextOptimisticRow() async {
-        let service = StubSessionService()
-        service.sendHandler = { _, _, _, delivery in
-            CommandReceipt(
-                commandId: "cmd-same-text",
-                requestId: "req-same-text",
-                status: .accepted,
-                delivery: delivery
-            )
-        }
-        let model = await makeStartedConversation(service: service)
-        model.handle(
-            envelope(
-                .reset(messages: [userMessage(id: "old-same", text: "same")], approvals: []),
-                sequence: 1
-            )
-        )
-        model.draft = "same"
-        await model.send()
-
-        model.handle(
-            envelope(
-                .reset(messages: [userMessage(id: "old-same", text: "same")], approvals: []),
-                sequence: 2
-            )
-        )
-        #expect(model.messages.map(\.messageId) == ["old-same", "local-cmd-same-text"])
-    }
-
-    @Test("a reset whose snapshot adds the committed identical text drops the optimistic row")
-    func resetDropsRepeatedTextWhenEchoCountGrows() async {
-        let service = StubSessionService()
-        service.sendHandler = { _, _, _, delivery in
-            CommandReceipt(
-                commandId: "cmd-same-echo",
-                requestId: "req-same-echo",
-                status: .accepted,
-                delivery: delivery
-            )
-        }
-        let model = await makeStartedConversation(service: service)
-        model.handle(
-            envelope(
-                .reset(messages: [userMessage(id: "old-same", text: "same")], approvals: []),
-                sequence: 1
-            )
-        )
-        model.draft = "same"
-        await model.send()
-
-        model.handle(
-            envelope(
-                .reset(
-                    messages: [
-                        userMessage(id: "old-same", text: "same"),
-                        userMessage(id: "new-same", text: "same")
-                    ],
-                    approvals: []
-                ),
-                sequence: 2
-            )
-        )
-        #expect(model.messages.map(\.messageId) == ["old-same", "new-same"])
-    }
-
-    @Test("a duplicate echo cannot add a second committed row")
-    func duplicateEchoIgnored() async {
-        let service = StubSessionService()
-        let receipt = CommandReceipt(
-            commandId: "cmd-echo-3",
-            requestId: "req-echo-3",
-            status: .accepted,
-            delivery: .send,
-            messageId: "msg-core-3"
-        )
-        service.sendHandler = { _, _, _, _ in receipt }
-        let model = await makeStartedConversation(service: service)
-        model.draft = "duplicate"
-
-        await model.send()
-        let echo = userMessage(id: "msg-core-3", text: "duplicate")
-        model.handle(envelope(.message(echo), sequence: 2))
-        model.handle(envelope(.replace(message: echo), sequence: 3))
-        model.handle(envelope(.message(echo), sequence: 4))
-
-        #expect(model.messages.count == 1)
-        #expect(model.messages[0].messageId == "msg-core-3")
-    }
-
-    @Test("a Host that never echoes keeps exactly one local bubble")
-    func nonEchoKeepsLocalBubble() async {
-        let service = StubSessionService()
-        let receipt = CommandReceipt(
-            commandId: "cmd-local-1",
-            requestId: "req-local-1",
-            status: .accepted,
-            delivery: .send
-        )
-        service.sendHandler = { _, _, _, _ in receipt }
-        let model = await makeStartedConversation(service: service)
-        model.draft = "no echo"
-
-        await model.send()
-        var settled = receipt
-        settled.status = .confirmed
-        model.handle(envelope(.commandStatus(settled), sequence: 2))
-
-        #expect(model.messages.count == 1)
-        #expect(model.messages[0].messageId == "local-cmd-local-1")
-
-        // A later unrelated user message must still append normally.
-        model.handle(envelope(.message(userMessage(id: "msg-other", text: "another")), sequence: 3))
-        #expect(model.messages.map(\.messageId) == ["local-cmd-local-1", "msg-other"])
-    }
-
-    @Test("an echo of a different text does not remove the pending bubble")
-    func differentTextDoesNotMatch() async {
-        let service = StubSessionService()
-        service.sendHandler = { _, _, _, delivery in
-            CommandReceipt(
-                commandId: "cmd-echo-4",
-                requestId: "req-echo-4",
-                status: .accepted,
-                delivery: delivery
-            )
-        }
-        let model = await makeStartedConversation(service: service)
-        model.draft = "expected"
-
-        await model.send()
-        model.handle(envelope(.message(userMessage(id: "msg-other", text: "different")), sequence: 2))
-
+        model.handle(envelope(.message(echo("echo-2")), 2))
+        #expect(model.messages.map(\.messageId) == [first, "echo-2"])
+        model.handle(envelope(.message(echo("echo-1")), 3))
+        #expect(Set(model.messages.map(\.messageId)) == ["echo-1", "echo-2"])
         #expect(model.messages.count == 2)
-        #expect(model.messages.map(\.messageId) == ["local-cmd-echo-4", "msg-other"])
+        #expect(model.presentationID(for: "echo-1") == first)
+        #expect(model.presentationID(for: "echo-2") == second)
     }
 
-    @Test("an uncertain send stays reconciled when the echo and settlement race")
-    func uncertainEchoReconciliation() async {
+    @Test("the first turn ending keeps the next queued send until its own echo")
+    func queuedPromptSurvivesFirstTurn() async throws {
         let service = StubSessionService()
-        let receipt = CommandReceipt(
-            commandId: "cmd-uncertain",
-            requestId: "req-uncertain",
-            status: .uncertain,
-            delivery: .send,
-            messageId: "msg-committed"
-        )
-        service.sendHandler = { _, _, _, _ in receipt }
+        service.sendHandler = { _, _, _, _ in receipt(.accepted, messageID: "queued-echo") }
         let model = await makeStartedConversation(service: service)
-        model.draft = "race"
+        model.updateCapabilities(running: true)
+        model.draft = "equal"
+        await model.send()
+        let queued = try #require(model.messages.last?.messageId)
+        #expect(model.lastSendStatus == .accepted)
+        #expect(service.sendCalls.last?.3 == .queue)
+        let reply = assistantReply()
+        model.handle(envelope(.message(reply), 2))
+        #expect(model.messages.contains { $0.messageId == queued })
+        model.handle(envelope(.attemptEnded(attemptId: "first-turn", outcome: .completed), 3))
+        #expect(model.messages.contains { $0.messageId == queued })
+        model.handle(envelope(.message(echo("queued-echo")), 4))
+        #expect(model.messages.map(\.messageId) == [reply.messageId, "queued-echo"])
+        #expect(model.presentationID(for: "queued-echo") == queued)
+    }
+
+    @Test("switching away during a send isolates the draft and the original session recovers history")
+    func switchAwayDuringSendAndReturn() async throws {
+        let service = StubSessionService()
+        let gate = SuspendedResponse<CommandReceipt>()
+        service.sendHandler = { _, _, _, _ in try await gate.wait() }
+        let original = await makeStartedConversation(service: service)
+        original.draft = "equal"
+        let send = Task { await original.send() }
+        await gate.waitUntilStarted()
+        original.close()
+
+        let other = await makeStartedConversation(service: service, sessionId: "s-002")
+        other.draft = "Other fixture draft"
+        gate.resume(with: receipt(.accepted, messageID: "original-echo"))
+        await send.value
+        let user = echo("original-echo")
+        let reply = assistantReply()
+        other.handle(envelope(.message(user), 2))
+        other.handle(envelope(.message(reply), 3))
+        #expect(other.messages.isEmpty)
+        #expect(other.draft == "Other fixture draft")
+        other.close()
+
+        let reopened = await makeStartedConversation(service: service)
+        let page = ConversationHistoryPage(
+            source: .online, projection: "reopened", complete: true,
+            messages: [user, reply], activities: [], continuation: nil
+        )
+        reopened.handle(envelope(.historySnapshot(page, replacing: true), 2))
+        #expect(reopened.messages.map(\.messageId) == [user.messageId, reply.messageId])
+        #expect(reopened.draft.isEmpty)
+    }
+
+    @Test("a delivery ID reconciles a native receipt with a distinct committed ID", arguments: [false, true])
+    func deliveryCorrelationWorksInEitherOrder(echoFirst: Bool) async {
+        let service = StubSessionService()
+        let gate = SuspendedResponse<CommandReceipt>()
+        service.sendHandler = { _, _, _, _ in try await gate.wait() }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "equal"
+
+        let send = Task { await model.send() }
+        await gate.waitUntilStarted()
+        var committed = echo("committed-id")
+        committed.deliveryId = "request-id"
+        let event = envelope(.message(committed), 2)
+        if echoFirst { model.handle(event) }
+        gate.resume(with: CommandReceipt(
+            commandId: "cmd", requestId: "request-id", status: .accepted,
+            delivery: .queue, messageId: "request-id", deliveryId: "request-id"
+        ))
+        await send.value
+        if !echoFirst { model.handle(event) }
+
+        #expect(model.messages.map(\.messageId) == ["committed-id"])
+    }
+
+    @Test("a rejected send removes the pending row and retains the draft")
+    func rejectionRemovesPendingPresentation() async {
+        let service = StubSessionService()
+        service.sendHandler = { _, _, _, _ in
+            CommandReceipt(commandId: "cmd", requestId: "req", status: .rejected, delivery: .send)
+        }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "equal"
+        await model.send()
+        #expect(model.messages.isEmpty)
+        #expect(model.draft == "equal")
+        #expect(model.lastSendStatus == .rejected)
+    }
+
+    @Test("uncertainty settles the original send when association and confirmation arrive later")
+    func uncertainEchoReconciliation() async throws {
+        let service = StubSessionService()
+        service.sendHandler = { _, _, _, _ in
+            CommandReceipt(commandId: "cmd", requestId: "req", status: .uncertain, delivery: .send)
+        }
+        let model = await makeStartedConversation(service: service)
+        model.draft = "equal"
 
         await model.send()
         #expect(model.inFlightSend != nil)
-        #expect(model.messages.count == 1)
+        let local = try #require(model.messages.first?.messageId)
+        model.handle(envelope(.message(echo("other")), 2))
+        #expect(model.messages.map(\.messageId) == [local, "other"])
 
-        model.handle(envelope(.message(userMessage(id: "msg-committed", text: "race")), sequence: 2))
-        var settled = receipt
-        settled.status = .confirmed
-        model.handle(envelope(.commandStatus(settled), sequence: 3))
-
-        #expect(model.messages.count == 1)
-        #expect(model.messages[0].messageId == "msg-committed")
+        model.handle(envelope(.commandStatus(receipt(.confirmed, messageID: "same")), 3))
+        model.handle(envelope(.message(echo("same")), 4))
+        #expect(Set(model.messages.map(\.messageId)) == ["other", "same"])
+        #expect(model.presentationID(for: "same") == local)
         #expect(model.inFlightSend == nil)
         #expect(model.draft.isEmpty)
     }

@@ -43,6 +43,7 @@ final class AppShellModel {
     /// Shared serialized draft owner. Conversation models take a lease; a
     /// replacement invalidates the old lease before it can write.
     var drafts: DraftService
+    var outgoingStore = ConversationOutgoingStore()
     /// True while the app is not active. The root renders an opaque shield so
     /// the app-switcher snapshot never contains conversation content.
     /// Present after a background transition; used by tests and diagnostics to

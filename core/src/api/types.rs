@@ -1109,12 +1109,15 @@ pub struct QuestionPageInfo {
 pub struct ObservationInterests {
     pub conversation: bool,
     pub questions: bool,
+    #[serde(default)]
+    pub(crate) recent_page: Option<(u32, u32)>,
 }
 
 impl ObservationInterests {
     pub fn conversation() -> Self {
         Self {
             conversation: true,
+            recent_page: None,
             questions: false,
         }
     }
@@ -1122,6 +1125,7 @@ impl ObservationInterests {
     pub fn questions() -> Self {
         Self {
             conversation: false,
+            recent_page: None,
             questions: true,
         }
     }
@@ -1129,7 +1133,16 @@ impl ObservationInterests {
     pub fn both() -> Self {
         Self {
             conversation: true,
+            recent_page: None,
             questions: true,
+        }
+    }
+
+    /// Observe a bounded recent conversation and Questions.
+    pub fn paged_conversation(max_messages: u32, max_bytes: u32) -> Self {
+        Self {
+            recent_page: Some((max_messages, max_bytes)),
+            ..Self::both()
         }
     }
 
@@ -1270,6 +1283,22 @@ pub struct SessionEvent {
 pub enum SessionEventPayload {
     Conversation(crate::conversation::ViewUpdate),
     Questions(QuestionView),
+    HistorySnapshot(HistorySnapshot),
+    HistoryUnavailable { code: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySnapshot {
+    pub page: crate::history::HistoryPage,
+    pub continuity: HistoryContinuity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryContinuity {
+    /// Core verified continuity from the previous range in this observation.
+    Continuous,
+    /// Install this window atomically. Includes the first delivered range.
+    Replacement,
 }
 
 impl From<whalerein_proto::QuestionBatch> for QuestionBatchInfo {

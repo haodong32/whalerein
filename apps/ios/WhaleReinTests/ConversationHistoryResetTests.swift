@@ -56,7 +56,7 @@ struct ConversationHistoryResetTests {
                 hostId: "studio-mac",
                 sessionId: "s-001",
                 sequence: 1,
-                event: .reset(messages: messages.map(historyMessage), approvals: [])
+                event: .historySnapshot(historyPage(messages, continuation: "cursor-1"), replacing: true)
             )
         )
         return model
@@ -68,8 +68,6 @@ struct ConversationHistoryResetTests {
         let model = await startedModel(service, messages: ["m5", "m6"])
         service.historyPageHandler = { continuation in
             switch continuation {
-            case nil:
-                return historyPage(["m5", "m6"], continuation: "cursor-1")
             case "cursor-1":
                 return historyPage(["m3", "m4"], continuation: "cursor-2")
             case "cursor-2":
@@ -81,8 +79,7 @@ struct ConversationHistoryResetTests {
 
         await model.loadOlderHistory()
         await model.loadOlderHistory()
-        await model.loadOlderHistory()
-        #expect(model.historyComplete)
+        #expect(model.history.complete)
         #expect(Set(model.messages.map(\.messageId)) == ["m1", "m2", "m3", "m4", "m5", "m6"])
         #expect(!model.canLoadOlderHistory)
 
@@ -92,19 +89,19 @@ struct ConversationHistoryResetTests {
                 hostId: "studio-mac",
                 sessionId: "s-001",
                 sequence: 2,
-                event: .reset(messages: [historyMessage("m6")], approvals: [])
+                event: .historySnapshot(historyPage(["m6"], continuation: "fresh-0"), replacing: true)
             )
         )
         #expect(model.messages.map(\.messageId) == ["m6"])
-        #expect(!model.historyComplete, "the old completion flag must not survive a new snapshot")
-        #expect(model.historyContinuation == nil)
-        #expect(model.historyProjection == nil)
+        #expect(!model.history.complete, "the old completion flag must not survive a new snapshot")
+        #expect(model.history.continuation == "fresh-0")
+        #expect(model.history.projection == "projection-1")
         #expect(model.canLoadOlderHistory)
 
         // A fresh traversal from the new snapshot reaches all older messages.
         service.historyPageHandler = { continuation in
             switch continuation {
-            case nil:
+            case "fresh-0":
                 return historyPage(["m5", "m6"], continuation: "fresh-1")
             case "fresh-1":
                 return historyPage(["m3", "m4"], continuation: "fresh-2")
@@ -119,7 +116,7 @@ struct ConversationHistoryResetTests {
         await model.loadOlderHistory()
         await model.loadOlderHistory()
         #expect(Set(model.messages.map(\.messageId)) == ["m1", "m2", "m3", "m4", "m5", "m6"])
-        #expect(model.historyComplete)
+        #expect(model.history.complete)
         let freshCalls = Array(service.historyPageCalls.dropFirst(callsBeforeReset))
         #expect(freshCalls.contains("fresh-1"))
         // The exhausted old continuations are never reused.
@@ -146,14 +143,14 @@ struct ConversationHistoryResetTests {
                 hostId: "studio-mac",
                 sessionId: "s-001",
                 sequence: 2,
-                event: .reset(messages: [historyMessage("m9")], approvals: [])
+                event: .historySnapshot(historyPage(["m9"], projection: "projection-2", complete: true), replacing: true)
             )
         )
         gate.resume(with: historyMessage("m1"))
         await read.value
 
         #expect(model.messages.map(\.messageId) == ["m9"])
-        #expect(model.historyErrorKey == nil)
-        #expect(model.historyProjection == nil)
+        #expect(model.history.errorKey == nil)
+        #expect(model.history.projection == "projection-2")
     }
 }

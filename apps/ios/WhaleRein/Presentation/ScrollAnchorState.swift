@@ -8,13 +8,17 @@ struct ScrollAnchorState: Equatable, Sendable {
     private(set) var isAtLatest = true
     private(set) var unreadCount = 0
     private(set) var anchorMessageId: String?
+    private(set) var layoutRevision = 0
+
+    mutating func markLayoutChange() {
+        layoutRevision &+= 1
+    }
 
     mutating func update(isAtLatest: Bool) {
+        self.isAtLatest = isAtLatest
         if isAtLatest {
-            self.isAtLatest = true
             unreadCount = 0
-        } else {
-            self.isAtLatest = false
+            anchorMessageId = nil
         }
     }
 
@@ -25,36 +29,44 @@ struct ScrollAnchorState: Equatable, Sendable {
 
     /// Returns true when the transcript should follow the new content.
     mutating func recordIncoming(isOwnMessage: Bool) -> Bool {
-        if isOwnMessage {
-            isAtLatest = true
-            unreadCount = 0
-            anchorMessageId = nil
-            return true
-        }
         if isAtLatest {
             return true
         }
-        unreadCount += 1
+        if !isOwnMessage {
+            unreadCount += 1
+        }
         return false
     }
 
-    /// Captures the row that must stay visually stable when older messages are
-    /// prepended. Unlike `noteTopVisibleMessage`, this also applies while the
-    /// transcript is at the latest row, because loading older content implies
-    /// the reader is at the top.
-    mutating func capturePrependAnchor(_ messageId: String?) {
-        anchorMessageId = messageId
-    }
-
     mutating func jumpToLatest() {
-        isAtLatest = true
-        unreadCount = 0
-        anchorMessageId = nil
+        update(isAtLatest: true)
+    }
+}
+
+/// The first surviving previously visible row preserves its offset.
+struct TranscriptRowPosition: Equatable, Sendable {
+    let id: String
+    let top: CGFloat
+    let bottom: CGFloat
+
+    static func correction(anchors: [Self], current: [Self]) -> CGFloat? {
+        let positions = Dictionary(current.map { ($0.id, $0.top) }, uniquingKeysWith: { first, _ in first })
+        for anchor in anchors {
+            if let top = positions[anchor.id] {
+                return top - anchor.top
+            }
+        }
+        return nil
     }
 
-    mutating func reset() {
-        isAtLatest = true
-        unreadCount = 0
-        anchorMessageId = nil
+    static func trailingSpace(from current: CGFloat, maximum: CGFloat, correction: CGFloat) -> CGFloat {
+        guard correction > 0.5 else { return 0 }
+        return max(0, current + correction - max(0, maximum))
+    }
+
+    static func restorationOffset(from current: CGFloat, maximum: CGFloat, correction: CGFloat) -> CGFloat? {
+        guard abs(correction) > 0.5 else { return nil }
+        let target = min(max(0, maximum), max(0, current + correction))
+        return abs(target - current) > 0.5 ? target : nil
     }
 }

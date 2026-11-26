@@ -21,12 +21,10 @@ final class LiveSessionService: SessionService {
     private var continuations: [UUID: AsyncStream<SessionEventEnvelope>.Continuation] = [:]
 
     private var activeWatch: SessionContext?
-    private var watchGeneration: UInt64 = 0
+    private var activeGeneration: UInt64?
+    private var watchRequest: UInt64 = 0
+    private var watchTransition: Task<Void, Error>?
     private var sequence = 0
-    private var latestApprovals: [Approval] = []
-    private var cachedHistory: [ConversationMessage] = []
-    private var cachedHistoryById: [String: ConversationMessage] = [:]
-    private var cachedCapabilities: SessionCapabilities?
     private var lastPairingOutcome: PairingOutcome?
     private var pairingWaiters: [UUID: CheckedContinuation<PairingOutcome, Error>] = [:]
 
@@ -121,23 +119,30 @@ final class LiveSessionService: SessionService {
         let core = self.core
         return Task.detached(priority: .utility) { [weak self, core] in
             while !Task.isCancelled {
-                guard let generation = await self?.watchGenerationSnapshot() else { return }
+                guard self != nil else { return }
                 let events = core.pollEvents(timeoutMs: 500)
                 if events.isEmpty { continue }
-                await self?.ingest(events, generation: generation)
+                await self?.ingest(events)
             }
         }
     }
 
-    private func watchGenerationSnapshot() -> UInt64 { watchGeneration }
-
-    private func ingest(_ events: [ConversationEvent], generation: UInt64) {
-        for event in events {
-            apply(event, generation: generation)
+    private func ingest(_ events: [ConversationEventEnvelope]) async {
+        // Independent events can be handled even while a watch start is
+        // returning the generation of its already-produced first baseline.
+        for envelope in events where envelope.scope == nil {
+            apply(envelope.event, watchScope: nil)
+        }
+        while let transition = watchTransition {
+            _ = try? await transition.value
+        }
+        for envelope in events {
+            guard let scope = envelope.scope else { continue }
+            apply(envelope.event, watchScope: scope)
         }
     }
 
-    private func apply(_ event: ConversationEvent, generation: UInt64) {
+    private func apply(_ event: ConversationEvent, watchScope: WatchEventScope?) {
         switch event {
         case .pairingFinished(let hostId, let code):
             let outcome = PairingOutcome(hostId: hostId, code: code)
@@ -157,130 +162,113 @@ final class LiveSessionService: SessionService {
                 sinceUnixMs: sinceUnixMs
             )
             return
+        case .commandStatus(let session, let command):
+            broadcast(
+                .commandStatus(Self.map(command: command, delivery: nil)),
+                scope: SessionContext(hostId: session.hostId, sessionId: session.sessionId)
+            )
+            return
         default:
             break
         }
 
-        guard generation == watchGeneration, let scope = activeWatch else { return }
+        guard let watchScope,
+              watchScope.generation == activeGeneration,
+              let scope = activeWatch,
+              scope.hostId == watchScope.hostId, scope.sessionId == watchScope.sessionId else { return }
+
+        func emit(_ event: MessageEvent) {
+            broadcast(event, scope: scope, watchScope: watchScope)
+        }
 
         switch event {
         case .state(_, _, let running, _, let approvals):
-            let mapped = approvals.map(Self.map(approval:))
-            latestApprovals = mapped
-            broadcast(.approvals(mapped), scope: scope)
-            var capabilities = cachedCapabilities
-                ?? SessionCapabilities(running: running, supportsSteer: false, supportsQueue: false)
-            capabilities.running = running
-            cachedCapabilities = capabilities
-            broadcast(.capabilities(capabilities), scope: scope)
-            // Core emits this state after the baseline history has been
-            // committed to the encrypted cache. Refresh the local transcript
-            // now so a cold watch shows seeded history even though the first
-            // reset ran before the baseline completed.
-            Task { @MainActor [weak self] in
-                await self?.reloadCachedHistory(scope: scope)
-            }
+            emit(.approvals(approvals.map(Self.map(approval:))))
+            emit(.runtimeChanged(running: running))
+
+        case .historySnapshot(let page, let continuity):
+            emit(.historySnapshot(Self.map(historyPage: page), replacing: continuity == .replacement))
+
+        case .historyUnavailable(let code):
+            emit(.historyUnavailable(Self.map(code: code)))
 
         case .historyReset:
-            broadcast(.watchReset(messages: cachedHistory, approvals: latestApprovals), scope: scope)
+            break
 
         case .message(let message, _, _):
-            let mapped = Self.map(message: message)
-            if let cached = cachedHistoryById[mapped.messageId] {
-                if cached == mapped {
-                    // Already emitted from the local cache before live events.
-                    return
-                }
-                cachedHistoryById[mapped.messageId] = mapped
-                if let index = cachedHistory.firstIndex(where: { $0.messageId == mapped.messageId }) {
-                    cachedHistory[index] = mapped
-                }
-                broadcast(.replace(message: mapped), scope: scope)
-                return
-            }
-            broadcast(.message(mapped), scope: scope)
+            emit(.message(Self.map(message: message)))
 
         case .preview(let attempt, _, let kind, let text, let replace, let incomplete):
             // Answer and reasoning previews keep distinct typed identities.
             switch kind {
             case "reasoning":
-                broadcast(
+                emit(
                     .reasoningPreview(
                         attemptId: attempt.attemptId,
                         text: text,
                         replace: replace,
                         incomplete: incomplete
-                    ),
-                    scope: scope
+                    )
                 )
             case "text":
-                broadcast(
-                    .preview(attemptId: attempt.attemptId, text: text, replace: replace, incomplete: incomplete),
-                    scope: scope
+                emit(
+                    .preview(attemptId: attempt.attemptId, text: text, replace: replace, incomplete: incomplete)
                 )
             default:
                 break
             }
 
         case .toolActivity(let activity):
-            broadcast(
-                .toolActivity(Self.map(toolActivity: activity)),
-                scope: scope
+            emit(
+                .toolActivity(Self.map(toolActivity: activity))
             )
 
         case .attemptEnded(let attempt, let outcome):
-            broadcast(
-                .attemptEnded(attemptId: attempt.attemptId, outcome: Self.map(outcome: outcome)),
-                scope: scope
+            emit(
+                .attemptEnded(attemptId: attempt.attemptId, outcome: Self.map(outcome: outcome))
             )
-
-        case .commandStatus(let command):
-            broadcast(.commandStatus(Self.map(command: command, delivery: nil)), scope: scope)
 
         case .approvalChanged(let approval):
             let mapped = Self.map(approval: approval)
-            latestApprovals.removeAll { $0.approvalId == mapped.approvalId }
-            latestApprovals.append(mapped)
-            broadcast(.approvalChanged(mapped), scope: scope)
+            emit(.approvalChanged(mapped))
 
         case .questions(let view):
             // Core owns reconciliation and freshness. The app never polls or
             // turns a missing/loading view into an empty collection.
-            broadcast(.questions(Self.map(questions: view)), scope: scope)
+            emit(.questions(Self.map(questions: view)))
 
         case .error(let code, _):
-            broadcast(
-                .error(code: Self.map(code: code), message: Self.staticMessage(for: Self.map(code: code))),
-                scope: scope
+            emit(
+                .error(code: Self.map(code: code), message: Self.staticMessage(for: Self.map(code: code)))
             )
 
         case .droppedEvents(let count):
             // The bounded Core queue discarded older events. Surface the loss
             // explicitly instead of silently treating the transcript as whole.
-            broadcast(
+            emit(
                 .error(
                     code: .internalError,
                     message: "The event stream dropped \(count) events and must be refreshed."
-                ),
-                scope: scope
+                )
             )
 
         case .watchEnded:
-            activeWatch = nil
-            broadcast(.watchEnded(reason: "ended"), scope: scope)
+            emit(.watchEnded(reason: "ended"))
 
-        case .pairingFinished, .pairingPrompt, .hostConnection:
+        case .pairingFinished, .pairingPrompt, .hostConnection, .commandStatus:
             break
         }
     }
 
-    private func broadcast(_ event: MessageEvent, scope: SessionContext) {
+    private func broadcast(_ event: MessageEvent, scope: SessionContext, watchScope: WatchEventScope? = nil) {
         sequence += 1
         let envelope = SessionEventEnvelope(
             hostId: scope.hostId,
             sessionId: scope.sessionId,
             sequence: sequence,
-            event: event
+            event: event,
+            watchGeneration: watchScope?.generation,
+            observationID: watchScope?.observationId
         )
         for continuation in continuations.values {
             continuation.yield(envelope)
@@ -454,58 +442,56 @@ final class LiveSessionService: SessionService {
             // directly; it fails with `unavailable` instead of inventing them.
             view = try await call { try core.capabilities(hostId: hostId, sessionId: sessionId) }
         }
-        let mapped = Self.map(capabilities: view, running: summary.running)
-        cachedCapabilities = mapped
-        return mapped
+        return Self.map(capabilities: view, running: summary.running)
     }
 
     // MARK: - Watch
 
     func startWatch(hostId: String, sessionId: String) async throws {
-        let core = self.core
-        // Stop the previous watch and make its in-flight events stale before
-        // the new scope exists.
-        watchGeneration &+= 1
+        watchRequest &+= 1
+        let request = watchRequest
+        let previous = watchTransition
         activeWatch = nil
-        _ = try? await call { core.stopWatch() }
-
-        // Record the real Source capabilities for this session before the
-        // stream starts so state events can update only the running flag.
-        cachedCapabilities = try? await capabilities(hostId: hostId, sessionId: sessionId)
-        // Warm the durable session list while the Host is reachable so offline
-        // lists can fall back to the cache when the broker is down.
-        _ = try? await sessions(hostId: hostId)
-
-        // Load the encrypted local transcript so the reset event can restore
-        // history after a reconnect or process restart. Live messages with the
-        // same immutable id are deduplicated below.
-        let cached = try? await call {
-            try core.cachedMessages(hostId: hostId, sessionId: sessionId)
-        }
-        cachedHistory = (cached ?? []).map(Self.map(message:))
-        cachedHistoryById = Dictionary(
-            uniqueKeysWithValues: cachedHistory.map { ($0.messageId, $0) }
-        )
-
-        watchGeneration &+= 1
-        let generation = watchGeneration
-        let scope = SessionContext(hostId: hostId, sessionId: sessionId)
-        activeWatch = scope
-        do {
-            try await call { try core.startWatch(hostId: hostId, sessionId: sessionId) }
-        } catch {
-            if watchGeneration == generation {
-                activeWatch = nil
+        activeGeneration = nil
+        let core = self.core
+        let transition = Task {
+            defer { if watchRequest == request { watchTransition = nil } }
+            _ = try? await previous?.value
+            guard watchRequest == request else { throw CancellationError() }
+            let generation = try await call {
+                try core.startWatch(
+                    hostId: hostId,
+                    sessionId: sessionId,
+                    baseline: .recent(
+                        maxMessages: UInt32(ConversationHistoryLimit.messages),
+                        maxBytes: UInt32(ConversationHistoryLimit.bytes)
+                    )
+                )
             }
-            throw error
+            guard watchRequest == request else { throw CancellationError() }
+            activeWatch = SessionContext(hostId: hostId, sessionId: sessionId)
+            activeGeneration = generation
         }
+        watchTransition = transition
+        try await transition.value
     }
 
     func stopWatch() {
-        watchGeneration &+= 1
+        watchRequest &+= 1
+        let request = watchRequest
+        let previous = watchTransition
         activeWatch = nil
+        activeGeneration = nil
         let core = self.core
-        _ = Task.detached { core.stopWatch() }
+        watchTransition = Task {
+            defer { if watchRequest == request { watchTransition = nil } }
+            _ = try? await previous?.value
+            try await call { core.stopWatch() }
+        }
+    }
+
+    func acceptsWatchEvent(_ envelope: SessionEventEnvelope) -> Bool {
+        envelope.belongsToActiveWatch(generation: activeGeneration, scope: activeWatch)
     }
 
     // MARK: - Commands
@@ -604,15 +590,6 @@ final class LiveSessionService: SessionService {
     func cancelWait(waitId: String) async throws -> Bool {
         let core = self.core
         return try await call { try core.cancelWait(waitId: waitId) }
-    }
-
-    /// Encrypted local transcript for restart/cache verification.
-    func cachedTranscript(hostId: String, sessionId: String) async throws -> [ConversationMessage] {
-        let core = self.core
-        let cached = try await call {
-            try core.cachedMessages(hostId: hostId, sessionId: sessionId)
-        }
-        return cached.map(Self.map(message:))
     }
 
     // MARK: - Questions
@@ -1068,7 +1045,8 @@ final class LiveSessionService: SessionService {
                     attachment: block.attachment.map(map(attachment:))
                 )
             },
-            createdAtUnixMs: view.createdAtUnixMs
+            createdAtUnixMs: view.createdAtUnixMs,
+            deliveryId: view.deliveryId
         )
     }
 
@@ -1128,23 +1106,6 @@ final class LiveSessionService: SessionService {
         case "committed": return .completed
         case "interrupted": return .cancelled
         default: return .failed
-        }
-    }
-
-    private func reloadCachedHistory(scope: SessionContext) async {
-        let core = self.core
-        guard let cached = try? await call({
-            try core.cachedMessages(hostId: scope.hostId, sessionId: scope.sessionId)
-        }) else { return }
-        let mapped = cached.map(Self.map(message:))
-        let refresh = CachedHistoryRefresh.resolve(previous: cachedHistory, current: mapped)
-        guard refresh != .unchanged else { return }
-        cachedHistory = mapped
-        cachedHistoryById = Dictionary(uniqueKeysWithValues: mapped.map { ($0.messageId, $0) })
-        // An append after a send stays incremental; only a genuinely different
-        // view replaces the whole transcript.
-        for event in refresh.events(current: mapped, approvals: latestApprovals) {
-            broadcast(event, scope: scope)
         }
     }
 

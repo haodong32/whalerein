@@ -24,12 +24,12 @@ fn trim_history(
     budget: u64,
 ) -> Result<(), CacheError> {
     loop {
-        let bytes: i64=conn.query_row("SELECT COALESCE((SELECT sum(length(payload)) FROM conversation_messages),0) + COALESCE((SELECT sum(length(payload)) FROM conversation_stage_messages),0)",[],|row|row.get(0))?;
+        let bytes: i64=conn.query_row("SELECT COALESCE((SELECT sum(length(payload)) FROM conversation_messages),0) + COALESCE((SELECT sum(length(payload)) FROM conversation_stage_messages),0) + COALESCE((SELECT sum(length(payload)) FROM conversation_recent),0)",[],|row|row.get(0))?;
         if bytes as u64 <= budget {
             return Ok(());
         }
         let excluded: whalerein_proto::SessionKey = protected.map(Into::into).unwrap_or_default();
-        let candidate:Option<(String,String)>=conn.query_row("SELECT host_id,session_id FROM (SELECT host_id,session_id,rowid AS position FROM conversation_views UNION ALL SELECT host_id,session_id,rowid AS position FROM conversation_stages) WHERE NOT(host_id=?1 AND session_id=?2) ORDER BY position,host_id,session_id LIMIT 1",params![excluded.host_id,excluded.session_id],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let candidate:Option<(String,String)>=conn.query_row("SELECT host_id,session_id FROM (SELECT host_id,session_id,rowid AS position FROM conversation_views UNION ALL SELECT host_id,session_id,rowid AS position FROM conversation_stages UNION ALL SELECT host_id,session_id,rowid AS position FROM conversation_recent) WHERE NOT(host_id=?1 AND session_id=?2) ORDER BY position,host_id,session_id LIMIT 1",params![excluded.host_id,excluded.session_id],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
         let Some((host, session)) = candidate else {
             return Err(CacheError::HistoryBudget);
         };
@@ -39,6 +39,7 @@ fn trim_history(
             "history_receipts",
             "conversation_stage_messages",
             "conversation_stages",
+            "conversation_recent",
         ] {
             conn.execute(
                 &format!("DELETE FROM {table} WHERE host_id=?1 AND session_id=?2"),
@@ -55,6 +56,20 @@ pub(crate) struct HistoryView {
     pub cursor: String,
     pub projection: String,
     pub generation: i64,
+}
+
+pub(crate) struct CachedHistoryWindow {
+    pub(crate) projection: String,
+    pub(crate) cursor: String,
+    pub(crate) generation: u64,
+    pub(crate) install: String,
+    pub(crate) messages: Vec<ConversationMessage>,
+    pub(crate) older: Option<i64>,
+}
+
+fn recent_aad(key: &SessionKey) -> Vec<u8> {
+    serde_json::to_vec(&["conversation-recent", &key.host_id, &key.session_id])
+        .expect("string tuple")
 }
 
 impl Cache {
@@ -98,7 +113,10 @@ impl Cache {
                host_id TEXT NOT NULL, session_id TEXT NOT NULL, message_id TEXT NOT NULL,
                ordinal INTEGER NOT NULL, payload BLOB NOT NULL,
                projection TEXT NOT NULL DEFAULT '',
-               PRIMARY KEY(host_id,session_id,message_id));",
+               PRIMARY KEY(host_id,session_id,message_id));
+             CREATE TABLE IF NOT EXISTS conversation_recent (
+               host_id TEXT NOT NULL, session_id TEXT NOT NULL, payload BLOB NOT NULL,
+               PRIMARY KEY(host_id,session_id));",
         )?;
         for (table, column, definition) in [
             (
@@ -169,11 +187,6 @@ impl Cache {
         Ok(())
     }
 
-    pub(crate) fn cache_install_id(&self) -> Result<String, CacheError> {
-        let conn = self.conn.lock().expect("cache mutex");
-        meta_value(&conn, "cache_install_id")?.ok_or(CacheError::Corrupt)
-    }
-
     #[cfg(test)]
     pub(crate) fn clear_projection_for_test(&self, key: &SessionKey) -> Result<(), CacheError> {
         let conn = self.conn.lock().expect("cache mutex");
@@ -188,6 +201,7 @@ impl Cache {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn cache_generation(&self) -> Result<u64, CacheError> {
         let conn = self.conn.lock().expect("cache mutex");
         meta_generation(&conn, "cache_generation")
@@ -272,6 +286,120 @@ impl Cache {
         Ok(messages)
     }
 
+    /// Read at most one bounded page plus its boundary row. The metadata and
+    /// rows are read together so a replacement cannot rebind a continuation.
+    pub(crate) fn bounded_history_window(
+        &self,
+        key: &SessionKey,
+        expected: Option<(&str, u64, &str, i64)>,
+        max_messages: u32,
+        max_bytes: u32,
+    ) -> Result<Option<CachedHistoryWindow>, CacheError> {
+        let mut conn = self.conn.lock().expect("cache mutex");
+        let read = conn.transaction()?;
+
+        let view: Option<(String, String)> = read.query_row(
+            "SELECT projection,cursor FROM conversation_views WHERE host_id=?1 AND session_id=?2",
+            params![key.host_id, key.session_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((projection, cursor)) = view else {
+            return Ok(None);
+        };
+        let generation = meta_generation(&read, "cache_generation")?;
+        let install = meta_value(&read, "cache_install_id")?.ok_or(CacheError::Corrupt)?;
+        let before = match expected {
+            Some((p, g, i, before)) if p == projection && g == generation && i == install => before,
+            Some(_) => return Ok(None),
+            None => i64::MAX,
+        };
+        let mut statement = read.prepare(
+            "SELECT ordinal,message_id,payload FROM conversation_messages
+             WHERE host_id=?1 AND session_id=?2 AND projection=?3 AND ordinal<?4
+             ORDER BY ordinal DESC LIMIT ?5",
+        )?;
+        let mut rows = statement.query(params![
+            key.host_id,
+            key.session_id,
+            projection,
+            before,
+            i64::from(max_messages) + 1
+        ])?;
+        let mut messages = Vec::new();
+        let mut oldest = None;
+        let mut older = None;
+        let mut bytes = 0;
+        while let Some(row) = rows.next()? {
+            let ordinal = row.get::<_, i64>(0)?;
+            if messages.len() == max_messages as usize {
+                older = oldest;
+                break;
+            }
+            let id: String = row.get(1)?;
+            let blob: Vec<u8> = row.get(2)?;
+            let data = self.open_blob(&aad(key, &id), &blob)?;
+            bytes += data.len();
+            if bytes > max_bytes as usize {
+                older = oldest.or(Some(before));
+                break;
+            }
+            let message: ConversationMessage = MessageUpsert::decode(data.as_slice())
+                .map_err(|_| CacheError::Corrupt)?
+                .message
+                .ok_or(CacheError::Corrupt)?
+                .into();
+            oldest = Some(ordinal);
+            messages.push(message);
+        }
+        messages.reverse();
+        Ok(Some(CachedHistoryWindow {
+            projection,
+            cursor,
+            generation,
+            install,
+            messages,
+            older,
+        }))
+    }
+
+    /// A recent suffix has its own encrypted durable position. Reading or
+    /// replacing it never grants a comprehensive synchronization cursor.
+    pub(crate) fn recent_history(
+        &self,
+        key: &SessionKey,
+    ) -> Result<Option<HistoryPage>, CacheError> {
+        let conn = self.conn.lock().expect("cache mutex");
+        let blob: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT payload FROM conversation_recent WHERE host_id=?1 AND session_id=?2",
+                params![key.host_id, key.session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        blob.map(|blob| {
+            let data = self.open_blob(&recent_aad(key), &blob)?;
+            HistoryPage::decode(data.as_slice()).map_err(|_| CacheError::Corrupt)
+        })
+        .transpose()
+    }
+
+    pub(crate) fn store_recent_history(
+        &self,
+        key: &SessionKey,
+        page: &HistoryPage,
+    ) -> Result<(), CacheError> {
+        let payload = self.seal(&recent_aad(key), &page.encode_to_vec())?;
+        let mut conn = self.conn.lock().expect("cache mutex");
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO conversation_recent(host_id,session_id,payload) VALUES(?1,?2,?3)
+             ON CONFLICT(host_id,session_id) DO UPDATE SET payload=excluded.payload",
+            params![key.host_id, key.session_id, payload],
+        )?;
+        trim_history(&tx, Some(key), self.history_budget_bytes)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn next_history_message(
         &self,
         key: &SessionKey,
@@ -336,6 +464,11 @@ impl Cache {
         let mut canonical = batch.clone();
         for change in &mut canonical.changes {
             change.origin = None;
+            // Delivery correlation is metadata. A replay across an upgrade
+            // still identifies the same committed batch and content.
+            if let Some(message) = &mut change.message {
+                message.delivery_id.clear();
+            }
         }
         let digest = crate::util::sha256(&canonical.encode_to_vec());
         let projection = page.projection_id.clone();
@@ -454,8 +587,29 @@ impl Cache {
             }
         }
         let ordinal_start:i64=tx.query_row(&format!("SELECT COALESCE(MAX(ordinal),-1)+1 FROM {table} WHERE host_id=?1 AND session_id=?2"),params![key.host_id,key.session_id],|row|row.get(0))?;
+        let mut changed_existing = false;
         for (index, (id, payload)) in sealed.into_iter().enumerate() {
             let ordinal = ordinal_start + index as i64;
+            if !page.snapshot && !changed_existing {
+                let prior: Option<Vec<u8>> = tx
+                    .query_row(
+                        "SELECT payload FROM conversation_messages
+                     WHERE host_id=?1 AND session_id=?2 AND message_id=?3",
+                        params![key.host_id, key.session_id, id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(prior) = prior {
+                    let aad = aad(&key, &id);
+                    let canonical = |blob: &[u8]| -> Result<_, CacheError> {
+                        let bytes = self.open_blob(&aad, blob)?;
+                        Ok(MessageUpsert::decode(bytes.as_slice())
+                            .map_err(|_| CacheError::Corrupt)?
+                            .message)
+                    };
+                    changed_existing = canonical(&prior)? != canonical(&payload)?;
+                }
+            }
             tx.execute(&format!("INSERT INTO {table}(host_id,session_id,message_id,ordinal,payload,projection) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(host_id,session_id,message_id) DO UPDATE SET payload=excluded.payload,projection=excluded.projection"),params![key.host_id,key.session_id,id,ordinal,payload,projection])?;
         }
         if page.snapshot && !page.complete {
@@ -489,6 +643,9 @@ impl Cache {
                     "UPDATE conversation_views SET cursor=?3 WHERE host_id=?1 AND session_id=?2",
                     params![key.host_id, key.session_id, batch.to_cursor],
                 )?;
+                if changed_existing {
+                    bump_cache_generation(&tx)?;
+                }
             }
         }
         tx.execute("INSERT INTO history_receipts(host_id,session_id,batch_id,digest,applied_at,projection) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(host_id,session_id,batch_id) DO NOTHING",params![key.host_id,key.session_id,batch.batch_id,protected_digest,crate::util::now_unix_ms(),projection])?;
@@ -719,6 +876,38 @@ mod tests {
         ));
     }
     #[test]
+    fn replaying_existing_history_with_delivery_identity_keeps_the_cached_view() {
+        let cache = Cache::open_in_memory([1; 32]).unwrap();
+        cache
+            .apply_history_page(&page("a", "start", "one", "one", true, true, "first"))
+            .unwrap();
+
+        let mut old_delta = page("a", "one", "two", "two", true, false, "sent");
+        old_delta.batch.as_mut().unwrap().changes[0]
+            .message
+            .as_mut()
+            .unwrap()
+            .role = MessageRole::User as i32;
+        assert!(cache.apply_history_page(&old_delta).unwrap());
+
+        let mut upgraded_replay = old_delta;
+        upgraded_replay.batch.as_mut().unwrap().changes[0]
+            .message
+            .as_mut()
+            .unwrap()
+            .delivery_id = "fixture-delivery".into();
+
+        assert!(!cache.apply_history_page(&upgraded_replay).unwrap());
+        let messages = cache.history_messages(&key("a")).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].message_id, "sent");
+        assert_eq!(
+            cache.history_cursor(&key("a")).unwrap().as_deref(),
+            Some("two")
+        );
+    }
+
+    #[test]
     fn discarded_partial_views_and_empty_source_positions_do_not_erase_committed_history() {
         let cache = Cache::open_in_memory([1; 32]).unwrap();
         cache
@@ -853,6 +1042,59 @@ mod retention_tests {
             .unwrap();
         assert_eq!(receipts, 0);
         assert_eq!(status, "unknown");
+    }
+
+    #[test]
+    fn bounded_history_window_matches_the_encoded_byte_budget_boundary() {
+        let cache = Cache::open_in_memory([1; 32]).unwrap();
+        let key = SessionKey {
+            host_id: "a".into(),
+            session_id: "s".into(),
+        };
+        let page = page("a", "", "row", "synthetic row", true);
+        let bytes = page.batch.as_ref().unwrap().changes[0].encoded_len() as u32;
+        cache.apply_history_page(&page).unwrap();
+
+        for (budget, fits) in [(bytes - 1, false), (bytes, true), (bytes + 1, true)] {
+            let window = cache
+                .bounded_history_window(&key, None, 1, budget)
+                .unwrap()
+                .unwrap();
+            assert_eq!(window.messages.len(), usize::from(fits));
+            assert_eq!(window.older.is_none(), fits);
+        }
+    }
+
+    #[test]
+    fn recent_history_budget_failure_preserves_the_previous_window_and_complete_cursor() {
+        let mut cache = Cache::open_in_memory([1; 32]).unwrap();
+        let key = SessionKey {
+            host_id: "a".into(),
+            session_id: "s".into(),
+        };
+        cache
+            .apply_history_page(&page("a", "", "full", "complete", true))
+            .unwrap();
+        let mut recent = page("a", "bound", "recent", "suffix", false);
+        recent.snapshot = false;
+        recent.cut_cursor = "recent".into();
+        cache.store_recent_history(&key, &recent).unwrap();
+
+        cache.history_budget_bytes = 512;
+        let mut oversized = page("a", "bound", "later", &"x".repeat(1024), false);
+        oversized.snapshot = false;
+        oversized.cut_cursor = "later".into();
+        assert!(matches!(
+            cache.store_recent_history(&key, &oversized),
+            Err(CacheError::HistoryBudget)
+        ));
+        assert_eq!(cache.recent_history(&key).unwrap(), Some(recent));
+        assert_eq!(cache.history_cursor(&key).unwrap().as_deref(), Some("full"));
+
+        cache.history_budget_bytes = 0;
+        cache.trim_history_cache(None).unwrap();
+        assert!(cache.recent_history(&key).unwrap().is_none());
+        assert!(cache.history_cursor(&key).unwrap().is_none());
     }
 
     #[test]

@@ -314,10 +314,17 @@ func transcript(from envelopes: [SessionEventEnvelope]) -> [ConversationMessage]
     var messages: [ConversationMessage] = []
     for envelope in envelopes {
         switch envelope.event {
-        case .reset(let reset, _):
-            messages = reset
-        case .message(let message):
-            if !messages.contains(where: { $0.messageId == message.messageId }) {
+        case .historySnapshot(let page, let replacing):
+            if replacing {
+                messages = page.messages
+            } else {
+                var ids = Set(messages.map(\.messageId))
+                messages.append(contentsOf: page.messages.filter { ids.insert($0.messageId).inserted })
+            }
+        case .message(let message), .replace(let message):
+            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+                messages[index] = message
+            } else {
                 messages.append(message)
             }
         default:
@@ -339,7 +346,8 @@ func commandStatusLog(_ envelopes: [SessionEventEnvelope]) -> [String] {
 func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
     envelopes.map { envelope in
         switch envelope.event {
-        case .reset: return "reset"
+        case .historySnapshot: return "historySnapshot"
+        case .historyUnavailable: return "historyUnavailable"
         case .message: return "message"
         case .replace: return "replace"
         case .preview: return "preview"
@@ -347,7 +355,7 @@ func eventKinds(_ envelopes: [SessionEventEnvelope]) -> [String] {
         case .toolActivity: return "toolActivity"
         case .attemptEnded: return "attemptEnded"
         case .hostConnection: return "hostConnection"
-        case .capabilities: return "capabilities"
+        case .capabilities, .runtimeChanged: return "capabilities"
         case .approvals: return "approvals"
         case .approvalChanged: return "approvalChanged"
         case .questions: return "questions"
@@ -488,7 +496,7 @@ class IntegrationTestCase: XCTestCase {
         )
         _ = await collector.wait(timeout: 20) { envelopes in
             envelopes.contains { envelope in
-                if case .reset = envelope.event { return true }
+                if case .historySnapshot = envelope.event { return true }
                 return false
             }
         }
@@ -773,10 +781,11 @@ extension IntegrationTestCase {
             "watch did not report an online connection; last=\(String(describing: lastConnection(in: collector.envelopes))); events=\(eventKinds(collector.envelopes))"
         )
 
+        _ = try await live.service.sessions(hostId: environment.hostId)
         let warmSessions = try await live.service.cachedSessions(hostId: environment.hostId)
         XCTAssertFalse(
             warmSessions.isEmpty,
-            "the watch did not warm the durable session cache before the broker stopped"
+            "the online session listing did not warm the durable cache before the broker stopped"
         )
 
         try await live.control.stopBroker()
@@ -823,21 +832,23 @@ extension IntegrationTestCase {
         XCTAssertEqual(beforeTranscript, expected)
         before.cancel()
 
-        let cachedBeforeRestart = try await live.service.cachedTranscript(
-            hostId: environment.hostId,
-            sessionId: environment.sessionId
-        )
-        XCTAssertFalse(
-            cachedBeforeRestart.isEmpty,
-            "the first watch did not commit its baseline to the encrypted cache"
-        )
-
         try await live.recreate()
         let hosts = try await live.waitForHost()
         XCTAssertTrue(hosts.contains { $0.hostId == environment.hostId })
 
         // The pairing grant and encrypted transcript survive a Core restart.
         let after = try await startWatching(live)
+        let restoredCachedPage = after.envelopes.compactMap { envelope -> ConversationHistoryPage? in
+            guard case let .historySnapshot(page, _) = envelope.event, page.source == .cache else {
+                return nil
+            }
+            return page
+        }.first
+        XCTAssertEqual(
+            restoredCachedPage?.messages.map(\.messageId),
+            transcript(from: before.envelopes).map(\.messageId),
+            "the restart should emit the encrypted recent baseline before the online handoff"
+        )
         let replayed = await after.wait(timeout: 20) {
             transcript(from: $0).count >= expected.count
         }
@@ -927,6 +938,13 @@ extension IntegrationTestCase {
                 + "queue=\(queue), events=\(eventKinds(watcher.envelopes)))"
         )
         XCTAssertEqual(echoes.count, 1, "the idle send must be committed exactly once")
+        if let echo = echoes.first {
+            XCTAssertNotNil(receipt.deliveryId)
+            XCTAssertEqual(
+                receipt.deliveryId, echo.deliveryId,
+                "The receipt and streamed user echo must identify the same delivery"
+            )
+        }
     }
 
     func testAC06_defaultQueue() async throws {

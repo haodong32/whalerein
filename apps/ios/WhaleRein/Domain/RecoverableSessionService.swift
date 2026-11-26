@@ -123,6 +123,10 @@ final class RecoverableSessionService: SessionService {
         try await current().startWatch(hostId: hostId, sessionId: sessionId)
     }
 
+    func acceptsWatchEvent(_ envelope: SessionEventEnvelope) -> Bool {
+        underlying?.acceptsWatchEvent(envelope) ?? false
+    }
+
     func stopWatch() {
         underlying?.stopWatch()
     }
@@ -396,5 +400,32 @@ extension RecoverableSessionService: OperationRecoveryService {
             throw SessionServiceError(.unsupportedCapability)
         }
         return service
+    }
+}
+
+extension RecoverableSessionService: ConversationHistoryService {
+    private func historyService() async throws -> any ConversationHistoryService {
+        guard let history = try await current() as? any ConversationHistoryService else {
+            throw SessionServiceError(.unsupportedCapability)
+        }
+        return history
+    }
+
+    func historyPage(
+        hostId: String,
+        sessionId: String,
+        source: HistorySource,
+        continuation: String?,
+        maxMessages: Int,
+        maxBytes: Int
+    ) async throws -> ConversationHistoryPage {
+        try await historyService().historyPage(
+            hostId: hostId, sessionId: sessionId, source: source,
+            continuation: continuation, maxMessages: maxMessages, maxBytes: maxBytes
+        )
+    }
+
+    func historyMessage(_ reference: MessageReference) async throws -> ConversationMessage {
+        try await historyService().historyMessage(reference)
     }
 }

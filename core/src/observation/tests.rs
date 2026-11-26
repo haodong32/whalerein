@@ -234,6 +234,16 @@ fn delta_event(core: &Core, session: &str, watch: &str, seq: u64, text: &str) ->
 }
 
 fn state_event(core: &Core, session: &str, watch: &str, revision: u64) -> EventEnvelope {
+    state_event_with_projection(core, session, watch, revision, "projection-1")
+}
+
+fn state_event_with_projection(
+    core: &Core,
+    session: &str,
+    watch: &str,
+    revision: u64,
+    projection: &str,
+) -> EventEnvelope {
     seal(
         core,
         SessionUpdate {
@@ -253,7 +263,7 @@ fn state_event(core: &Core, session: &str, watch: &str, revision: u64) -> EventE
                     history_head: "bookmark:committed".into(),
                     run_phase: whalerein_proto::RunPhase::Idle as i32,
                     questions: None,
-                    projection_id: "projection-1".into(),
+                    projection_id: projection.into(),
                 },
             )),
         },
@@ -394,6 +404,7 @@ fn session_observation_ac_01_interests_select_only_requested_facets() {
         ObservationInterests::conversation(),
         ObservationInterests {
             conversation: true,
+            recent_page: None,
             questions: false
         }
     );
@@ -401,6 +412,7 @@ fn session_observation_ac_01_interests_select_only_requested_facets() {
         ObservationInterests::questions(),
         ObservationInterests {
             conversation: false,
+            recent_page: None,
             questions: true
         }
     );
@@ -1574,4 +1586,597 @@ async fn a_malformed_lease_refusal_ends_the_watch_with_its_real_code() {
         "invalid_argument"
     );
     peer.abort();
+}
+
+fn history_rows(count: usize) -> Vec<whalerein_proto::ConversationMessage> {
+    (1..=count)
+        .map(|index| crate::api::test_support::history_message(&format!("row-{index}"), "fixture"))
+        .collect()
+}
+
+fn history_position(index: usize) -> String {
+    format!("position:{index}")
+}
+
+fn set_source_history(access: &FakeAccess, count: usize) {
+    let mut host = access.host.lock().unwrap();
+    host.history_messages = history_rows(count);
+    host.history_positions = (0..=count)
+        .map(|index| (history_position(index), index))
+        .collect();
+    host.history_cut = history_position(count);
+}
+
+async fn setup_paged_observation() -> (tempfile::TempDir, Core, FakeAccess, SessionKey) {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::new(CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets: Arc::new(MemorySecretStore::new()),
+    })
+    .unwrap();
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    // The FakeBroker gates the reply lane while still delivering control
+    // notifications and other query replies.
+    core.use_mqtt_queries();
+    core.sessions("host-1").await.unwrap();
+    let key = SessionKey::new("host-1", "session-1").unwrap();
+    (dir, core, access, key)
+}
+
+fn publish_committed(core: &Core, access: &FakeAccess, index: usize) {
+    let batch = whalerein_proto::HistoryBatch {
+        from_cursor: history_position(index - 1),
+        to_cursor: history_position(index),
+        batch_id: format!("batch-{index}"),
+        projection_id: "projection-1".into(),
+        changes: vec![whalerein_proto::MessageUpsert {
+            message: Some(crate::api::test_support::history_message(
+                &format!("row-{index}"),
+                "fixture",
+            )),
+            origin: None,
+        }],
+    };
+    access
+        .broker
+        .publish_event(&history_event(core, "session-1", "watch-1", batch));
+}
+
+async fn next_history_snapshot(
+    observation: &mut SessionObservation,
+) -> crate::api::HistorySnapshot {
+    loop {
+        match next_event(observation).await.payload {
+            SessionEventPayload::HistorySnapshot(snapshot) => return snapshot,
+            SessionEventPayload::HistoryUnavailable { code } => {
+                panic!("history unavailable: {code}")
+            }
+            _ => {}
+        }
+    }
+}
+
+fn snapshot_ids(snapshot: &crate::api::HistorySnapshot) -> Vec<&str> {
+    snapshot
+        .page
+        .messages
+        .iter()
+        .map(|message| message.message_id.as_str())
+        .collect()
+}
+
+async fn wait_history_request(started: tokio::sync::oneshot::Receiver<()>, access: &FakeAccess) {
+    match tokio::time::timeout(Duration::from_secs(5), started).await {
+        Ok(Ok(())) => {}
+        outcome => {
+            let host = access.host.lock().unwrap();
+            panic!(
+                "pinned read did not enter the gate: {outcome:?}; reads: {}; gate pending: {}",
+                host.history_reads,
+                host.history_reverse_gate.is_some()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn paged_observation_cold_cut_keeps_questions_live_and_does_not_certify_full_history() {
+    use crate::api::test_support::HistoryReadGate;
+    use crate::history::{HistoryPageRequest, HistorySource};
+    let (_dir, core, access, key) = setup_paged_observation().await;
+    set_source_history(&access, 2);
+    let (entered, request_entered) = tokio::sync::oneshot::channel();
+    let (release, held) = tokio::sync::oneshot::channel();
+    access.host.lock().unwrap().history_reverse_gate = Some(HistoryReadGate {
+        entered,
+        release: held,
+    });
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::paged_conversation(1, 256 * 1024),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    wait_history_request(request_entered, &access).await;
+    let mut running_state = false;
+    let mut question_ready = false;
+    while !running_state || !question_ready {
+        match next_event(&mut observation).await.payload {
+            SessionEventPayload::HistorySnapshot(_)
+            | SessionEventPayload::HistoryUnavailable { .. } => {
+                panic!("cold history was not pending while holding its response");
+            }
+            SessionEventPayload::Conversation(ViewUpdate::State(_)) => running_state = true,
+            SessionEventPayload::Questions(view)
+                if view.freshness == QuestionFreshness::Current =>
+            {
+                question_ready = true;
+            }
+            _ => {}
+        }
+    }
+    // Queue the pre-cut replay and a post-cut commit ahead of the Questions
+    // marker. Receipt of that facet confirms the watch processed both events
+    // while the reverse reply was still held.
+    set_source_history(&access, 3);
+    publish_committed(&core, &access, 2);
+    publish_committed(&core, &access, 3);
+
+    let newer = descriptor_with(2);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.question_descriptor = newer.clone();
+        host.question_pages.push_back(proto_page(
+            2,
+            "",
+            true,
+            vec![proto_batch("session-1", "revision-2")],
+        ));
+    }
+    access
+        .broker
+        .publish_event(&question_event(&core, "session-1", "watch-1", newer));
+    let questions = loop {
+        match next_event(&mut observation).await.payload {
+            SessionEventPayload::Questions(view)
+                if view.stamp.as_ref().is_some_and(|stamp| stamp.revision == 2)
+                    && view.freshness == QuestionFreshness::Current =>
+            {
+                break view
+            }
+            SessionEventPayload::HistorySnapshot(_)
+            | SessionEventPayload::HistoryUnavailable { .. }
+            | SessionEventPayload::Conversation(ViewUpdate::Message { .. }) => {
+                panic!("history escaped the held baseline");
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(questions.batches[0].batch_id, "revision-2");
+
+    release.send(()).unwrap();
+
+    let first = next_history_snapshot(&mut observation).await;
+    assert_eq!(first.page.source, HistorySource::Online);
+    assert_eq!(snapshot_ids(&first), ["row-2"]);
+    let continuation = first.page.continuation.clone().expect("older cut");
+    loop {
+        match next_event(&mut observation).await.payload {
+            SessionEventPayload::Conversation(ViewUpdate::Message { message, .. }) => {
+                assert_eq!(message.message_id, "row-3");
+                break;
+            }
+            SessionEventPayload::HistorySnapshot(_) => panic!("unexpected replacement"),
+            _ => {}
+        }
+    }
+    let older = core
+        .history_page(&HistoryPageRequest::new(key.clone()).continuation(continuation))
+        .await
+        .unwrap();
+    assert_eq!(
+        older
+            .messages
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["row-1"]
+    );
+    assert!(older.complete);
+
+    // Deliver an actual reconnect after a committed event is lost. Recovery
+    // uses an incremental read, leaving the established reverse cut alone.
+    set_source_history(&access, 4);
+    let reads_before_reconnect = access.host.lock().unwrap().history_reads;
+    core.disconnect_host(&key.host_id);
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            match observation
+                .next_event()
+                .await
+                .expect("observation ended during reconnect")
+                .payload
+            {
+                SessionEventPayload::Conversation(ViewUpdate::Message { message, .. }) => {
+                    assert_eq!(message.message_id, "row-4");
+                    break;
+                }
+                SessionEventPayload::HistorySnapshot(_) => {
+                    panic!("continuous reconnect replaced the window")
+                }
+                SessionEventPayload::HistoryUnavailable { code } => {
+                    panic!("connection interruption invalidated readable history: {code}")
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("idle observation did not recover before its lease check");
+    assert_eq!(
+        access.host.lock().unwrap().history_reads,
+        reads_before_reconnect + 1,
+        "continuous reconnect reads only the missing forward range"
+    );
+    observation.close().await;
+
+    let cache = core.cache().unwrap();
+    assert!(cache.history_view(&key).unwrap().is_none());
+    let recent = cache.recent_history(&key).unwrap().unwrap();
+    assert_eq!(recent.cut_cursor, history_position(4));
+    assert_eq!(
+        recent.batch.unwrap().changes[0]
+            .message
+            .as_ref()
+            .unwrap()
+            .message_id,
+        "row-4"
+    );
+
+    // Exercise the normal cache-matching sync path on the same Core. With
+    // only recent coverage it must build the complete prefix from scratch.
+    core.sync_conversation(
+        &key,
+        &mut Conversation::default(),
+        false,
+        false,
+        "projection-1",
+        &mut crate::api::core::watch::AcceptAll,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        cache.history_message_ids(&key).unwrap(),
+        ["row-1", "row-2", "row-3", "row-4"]
+    );
+}
+
+#[tokio::test]
+async fn paged_observation_retains_disjoint_cache_until_forward_proof_or_explicit_replacement() {
+    use crate::api::{test_support::HistoryReadGate, HistoryContinuity};
+    use crate::history::HistorySource;
+    for bridge in [true, false] {
+        let (_dir, core, access, key) = setup_paged_observation().await;
+        set_source_history(&access, 2);
+        core.sync_session(&key).await.unwrap();
+        let cache = core.cache().unwrap();
+        let full_view = cache.history_view(&key).unwrap();
+        set_source_history(&access, 6);
+
+        let (entered, request_entered) = tokio::sync::oneshot::channel();
+        let (release, held) = tokio::sync::oneshot::channel();
+        {
+            let mut host = access.host.lock().unwrap();
+            host.history_reverse_gate = Some(HistoryReadGate {
+                entered,
+                release: held,
+            });
+            host.history_forward_error =
+                (!bridge).then_some(whalerein_proto::ErrorCode::SnapshotRequired);
+        }
+        let mut observation = core
+            .observe_session(
+                &key,
+                ObservationInterests::paged_conversation(2, 256 * 1024),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        let warm = next_history_snapshot(&mut observation).await;
+        assert_eq!(warm.page.source, HistorySource::Cache);
+        assert_eq!(snapshot_ids(&warm), ["row-1", "row-2"]);
+        wait_history_request(request_entered, &access).await;
+
+        set_source_history(&access, 7);
+        publish_committed(&core, &access, 7);
+        release.send(()).unwrap();
+        let mut merged = Vec::new();
+        loop {
+            match next_event(&mut observation).await.payload {
+                SessionEventPayload::Conversation(ViewUpdate::Message { message, .. }) => {
+                    merged.push(message.message_id)
+                }
+                SessionEventPayload::HistorySnapshot(snapshot) => {
+                    assert_eq!(snapshot_ids(&snapshot), ["row-5", "row-6"]);
+                    assert_eq!(
+                        snapshot.continuity,
+                        if bridge {
+                            HistoryContinuity::Continuous
+                        } else {
+                            HistoryContinuity::Replacement
+                        }
+                    );
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            merged,
+            if bridge {
+                vec!["row-3", "row-4", "row-5", "row-6"]
+            } else {
+                Vec::new()
+            }
+        );
+        loop {
+            if let SessionEventPayload::Conversation(ViewUpdate::Message { message, .. }) =
+                next_event(&mut observation).await.payload
+            {
+                assert_eq!(message.message_id, "row-7");
+                break;
+            }
+        }
+        // Installing the recent window and processing further live changes
+        // must neither rewrite nor advance independently certified coverage.
+        assert_eq!(cache.history_view(&key).unwrap(), full_view);
+        assert_eq!(cache.history_message_ids(&key).unwrap(), ["row-1", "row-2"]);
+        observation.close().await;
+    }
+}
+
+#[tokio::test]
+async fn paged_observation_explicit_read_failure_retains_cache_and_questions() {
+    use crate::history::HistorySource;
+    let (_dir, core, access, key) = setup_paged_observation().await;
+    set_source_history(&access, 1);
+    core.sync_session(&key).await.unwrap();
+    access.host.lock().unwrap().history_reverse_error =
+        Some(whalerein_proto::ErrorCode::Unavailable);
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::paged_conversation(1, 256 * 1024),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let warm = next_history_snapshot(&mut observation).await;
+    assert_eq!(warm.page.source, HistorySource::Cache);
+    assert_eq!(snapshot_ids(&warm), ["row-1"]);
+    let mut unavailable = false;
+    let mut questions = false;
+    while !unavailable || !questions {
+        match next_event(&mut observation).await.payload {
+            SessionEventPayload::HistoryUnavailable { code } => {
+                assert_eq!(code, "unavailable");
+                unavailable = true;
+            }
+            SessionEventPayload::Questions(view)
+                if view.freshness == QuestionFreshness::Current =>
+            {
+                questions = true
+            }
+            SessionEventPayload::HistorySnapshot(_) => {
+                panic!("failed read replaced retained history")
+            }
+            _ => {}
+        }
+    }
+    observation.close().await;
+}
+
+#[tokio::test]
+async fn paged_observation_recent_only_offline_cache_is_bounded_and_incomplete() {
+    use crate::history::HistorySource;
+    let (_dir, core, access, key) = setup_paged_observation().await;
+    set_source_history(&access, 4);
+    let mut online = core
+        .observe_session(
+            &key,
+            ObservationInterests::paged_conversation(3, 256 * 1024),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let page = next_history_snapshot(&mut online).await;
+    assert_eq!(page.page.source, HistorySource::Online);
+    assert_eq!(snapshot_ids(&page), ["row-2", "row-3", "row-4"]);
+    assert!(page.page.continuation.is_some());
+    online.close().await;
+
+    access.host.lock().unwrap().host_online = false;
+    let mut offline = core
+        .observe_session(
+            &key,
+            ObservationInterests::paged_conversation(2, 256 * 1024),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let page = next_history_snapshot(&mut offline).await;
+    assert_eq!(page.page.source, HistorySource::Cache);
+    assert_eq!(snapshot_ids(&page), ["row-3", "row-4"]);
+    assert!(!page.page.complete);
+    assert!(page.page.continuation.is_none());
+    assert!(core.cache().unwrap().history_view(&key).unwrap().is_none());
+    offline.close().await;
+}
+
+#[tokio::test]
+async fn paged_observation_source_complete_empty_is_explicit() {
+    use crate::history::HistorySource;
+    let (_dir, core, access, key) = setup_paged_observation().await;
+    set_source_history(&access, 0);
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::paged_conversation(5, 256 * 1024),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let page = next_history_snapshot(&mut observation).await;
+    assert_eq!(page.page.source, HistorySource::Online);
+    assert!(page.page.messages.is_empty());
+    assert!(page.page.complete);
+    assert!(page.page.continuation.is_none());
+    observation.close().await;
+}
+
+#[tokio::test]
+async fn paged_observation_empty_source_page_preserves_a_progressing_older_cut() {
+    use crate::history::{HistoryPageRequest, HistorySource};
+    let (_dir, core, access, key) = setup_paged_observation().await;
+    set_source_history(&access, 2);
+    access.host.lock().unwrap().history_empty_first_page = true;
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::paged_conversation(1, 256 * 1024),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+
+    let first = next_history_snapshot(&mut observation).await;
+    assert_eq!(first.page.source, HistorySource::Online);
+    assert!(first.page.messages.is_empty());
+    assert!(!first.page.complete);
+    let continuation = first
+        .page
+        .continuation
+        .expect("incomplete window has an older cut");
+    let older = core
+        .history_page(&HistoryPageRequest::new(key).continuation(continuation))
+        .await
+        .unwrap();
+    assert_eq!(
+        older
+            .messages
+            .iter()
+            .map(|row| row.message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["row-1"]
+    );
+    assert!(older.complete);
+    observation.close().await;
+}
+
+#[tokio::test]
+async fn paged_observation_cancellation_fences_the_held_reply_on_reopen() {
+    use crate::api::test_support::HistoryReadGate;
+    let (_dir, core, access, key) = setup_paged_observation().await;
+    set_source_history(&access, 1);
+    let (entered, request_entered) = tokio::sync::oneshot::channel();
+    let (release, held) = tokio::sync::oneshot::channel();
+    access.host.lock().unwrap().history_reverse_gate = Some(HistoryReadGate {
+        entered,
+        release: held,
+    });
+
+    let cancellation = Cancellation::new();
+    let interests = ObservationInterests::paged_conversation(1, 256 * 1024);
+    let mut old = core
+        .observe_session(&key, interests, cancellation.clone())
+        .await
+        .unwrap();
+    wait_history_request(request_entered, &access).await;
+    let old_generation = old.generation();
+    cancellation.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), old.next_event())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(core
+        .cache()
+        .unwrap()
+        .recent_history(&key)
+        .unwrap()
+        .is_none());
+
+    set_source_history(&access, 2);
+    let mut replacement = core
+        .observe_session(&key, interests, Cancellation::new())
+        .await
+        .unwrap();
+    assert_ne!(replacement.generation(), old_generation);
+    release.send(()).unwrap();
+    let page = next_history_snapshot(&mut replacement).await;
+    assert_eq!(snapshot_ids(&page), ["row-2"]);
+    assert!(old.next_event().await.is_none());
+    replacement.close().await;
+}
+
+#[tokio::test]
+async fn paged_observation_active_projection_rotation_replaces_and_fences_old_pages() {
+    use crate::api::{test_support::HistoryReadGate, HistoryContinuity};
+    use crate::history::HistoryPageRequest;
+    let (_dir, core, access, key) = setup_paged_observation().await;
+    set_source_history(&access, 2);
+    let mut observation = core
+        .observe_session(
+            &key,
+            ObservationInterests::paged_conversation(1, 256 * 1024),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+    let initial = next_history_snapshot(&mut observation).await;
+    assert_eq!(initial.page.projection, "projection-1");
+    assert_eq!(snapshot_ids(&initial), ["row-2"]);
+    let old_continuation = initial.page.continuation.unwrap();
+
+    let (entered, request_entered) = tokio::sync::oneshot::channel();
+    let (release, held) = tokio::sync::oneshot::channel();
+    set_source_history(&access, 3);
+    {
+        let mut host = access.host.lock().unwrap();
+        host.history_projection = "projection-2".into();
+        host.history_watch_projection = Some("projection-2".into());
+        host.history_reverse_gate = Some(HistoryReadGate {
+            entered,
+            release: held,
+        });
+    }
+    access.broker.publish_event(&state_event_with_projection(
+        &core,
+        "session-1",
+        "watch-1",
+        2,
+        "projection-2",
+    ));
+    wait_history_request(request_entered, &access).await;
+    let retained = core.cache().unwrap().recent_history(&key).unwrap().unwrap();
+    assert_eq!(retained.projection_id, "projection-1");
+    assert_eq!(
+        core.history_page(&HistoryPageRequest::new(key).continuation(old_continuation))
+            .await
+            .unwrap_err()
+            .code(),
+        "snapshot_required"
+    );
+    release.send(()).unwrap();
+    let replacement = next_history_snapshot(&mut observation).await;
+    assert_eq!(replacement.page.projection, "projection-2");
+    assert_eq!(replacement.continuity, HistoryContinuity::Replacement);
+    assert_eq!(snapshot_ids(&replacement), ["row-3"]);
+    observation.close().await;
 }

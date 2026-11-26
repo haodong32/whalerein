@@ -7,6 +7,7 @@
 //! `SessionEvent`s; wire messages never leave this module.
 
 pub mod bench;
+mod history;
 mod questions;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -36,6 +37,7 @@ use crate::session::SessionKey;
 use crate::sync::BatchOutcome;
 use crate::util::random_id;
 
+use history::{HistoryReadFuture, PagedHistory};
 use questions::{PageFuture, QuestionPageSource, QuestionReconciler, Step};
 
 /// Monotonic observer generation. One profile has one active observation, so a
@@ -200,7 +202,7 @@ impl Pump {
 
 #[derive(Default)]
 struct ObservationShared {
-    stop: AtomicBool,
+    stop: Cancellation,
     terminal: Mutex<Option<CoreError>>,
     last: Mutex<Option<CoreError>>,
     admission: Mutex<Option<(WatchLease, WatchGuard)>>,
@@ -208,7 +210,7 @@ struct ObservationShared {
 
 impl ObservationShared {
     fn cancelled(&self) -> bool {
-        self.stop.load(Ordering::SeqCst)
+        self.stop.is_cancelled()
     }
 
     fn release_admission(&self) {
@@ -305,10 +307,7 @@ impl SessionObservation {
     }
 
     async fn shutdown(&mut self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
-        // Release the profile lease with the tasks so a new observation can
-        // attach immediately after close.
-        self.shared.release_admission();
+        self.shared.stop.cancel();
         let tasks = std::mem::take(&mut self.tasks);
         for mut task in tasks {
             if tokio::time::timeout(Duration::from_millis(700), &mut task)
@@ -319,6 +318,9 @@ impl SessionObservation {
                 let _ = task.await;
             }
         }
+        // Do not let a replacement attach before the old owner's bounded
+        // Unwatch cleanup has ended.
+        self.shared.release_admission();
         self.closed = true;
     }
 
@@ -352,7 +354,7 @@ impl SessionObservation {
 
 impl Drop for SessionObservation {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
+        self.shared.stop.cancel();
         for task in self.tasks.drain(..) {
             task.abort();
         }
@@ -362,7 +364,8 @@ impl Drop for SessionObservation {
 
 impl Core {
     /// Start one session observation selecting Conversation, Questions, or
-    /// both. The native watch registration happens before any facet read.
+    /// both. An authorized recent cache may be delivered immediately. Native
+    /// watch registration precedes online baseline reads.
     pub async fn observe_session(
         &self,
         key: &SessionKey,
@@ -462,6 +465,22 @@ async fn run_owner(
     let mut fresh = false;
     let mut last_watch = None;
     let mut conversation = Conversation::default();
+    let mut approvals = ApprovalCache::default();
+    let mut paged = interests
+        .recent_page
+        .map(|limits| PagedHistory::new(&key, limits));
+    if let Some(paged) = paged.as_mut() {
+        let mut sink = paged_sink(&core, &events, &key, &observation_id, generation);
+        if let Err(error) = paged
+            .publish_cache(&core, &mut conversation, &mut sink)
+            .await
+        {
+            sink.publish(SessionEventPayload::HistoryUnavailable {
+                code: error.code().into(),
+            })
+            .await;
+        }
+    }
     loop {
         if shared.cancelled() || cancellation.is_cancelled() {
             break;
@@ -479,6 +498,8 @@ async fn run_owner(
             fresh,
             &mut last_watch,
             &mut conversation,
+            paged.as_mut(),
+            &mut approvals,
             &events,
             &cancellation,
             questions.as_ref(),
@@ -488,6 +509,8 @@ async fn run_owner(
             () = wait_for_cloud_session_end(cloud_session.as_deref().map(|id| (&core, id))) => {
                 Err(CoreError::AuthenticationRequired)
             }
+            _ = cancellation.cancelled() => Ok(End::Done),
+            _ = shared.stop.cancelled() => Ok(End::Done),
             result = connection => result,
         };
         if matches!(result, Err(CoreError::AuthenticationRequired)) {
@@ -504,9 +527,17 @@ async fn run_owner(
                     .runtime
                     .set_state(&key.host_id, ConnectionState::Reconnecting);
                 fresh = true;
-                wait_to_reconnect(&core, &key, cloud_session.as_deref()).await;
+                tokio::select! {
+                    _ = shared.stop.cancelled() => {}
+                    _ = cancellation.cancelled() => {}
+                    _ = wait_to_reconnect(&core, &key, cloud_session.as_deref()) => {}
+                }
             }
             Err(error) if !watch_fatal(&error) => {
+                if let Some(paged) = paged.as_mut() {
+                    let mut sink = paged_sink(&core, &events, &key, &observation_id, generation);
+                    paged.transport_unavailable(error.code(), &mut sink).await;
+                }
                 signal_lost(questions.as_ref(), error.code());
                 // Keep the latest transient failure visible while the retry
                 // loop is still running, so a bounded caller reports the
@@ -516,7 +547,11 @@ async fn run_owner(
                     .runtime
                     .set_state(&key.host_id, ConnectionState::Reconnecting);
                 fresh = true;
-                wait_to_reconnect(&core, &key, cloud_session.as_deref()).await;
+                tokio::select! {
+                    _ = shared.stop.cancelled() => {}
+                    _ = cancellation.cancelled() => {}
+                    _ = wait_to_reconnect(&core, &key, cloud_session.as_deref()) => {}
+                }
             }
             Err(error) => {
                 signal_lost(questions.as_ref(), error.code());
@@ -709,7 +744,7 @@ async fn emit_question(
 }
 
 struct EventSink<'a> {
-    bench: &'a BenchContext,
+    bench: Arc<BenchContext>,
     frame: String,
     events: &'a mpsc::Sender<SessionEvent>,
     key: &'a SessionKey,
@@ -718,11 +753,45 @@ struct EventSink<'a> {
     failed: bool,
 }
 
+impl EventSink<'_> {
+    async fn publish(&mut self, payload: SessionEventPayload) -> bool {
+        let sent = send_event(
+            self.events,
+            self.key,
+            self.observation_id,
+            self.generation,
+            payload,
+        )
+        .await;
+        self.failed |= !sent;
+        sent
+    }
+}
+
+
+fn paged_sink<'a>(
+    core: &Core,
+    events: &'a mpsc::Sender<SessionEvent>,
+    key: &'a SessionKey,
+    observation_id: &'a str,
+    generation: u64,
+) -> EventSink<'a> {
+    EventSink {
+        bench: core.diagnostics.bench().clone(),
+        frame: String::new(),
+        events,
+        key,
+        observation_id,
+        generation,
+        failed: false,
+    }
+}
+
 impl UpdateSink for EventSink<'_> {
     fn emit<'a>(&'a mut self, update: &'a ViewUpdate) -> SinkFuture<'a> {
         Box::pin(async move {
             let (sent, _) = send_conversation(
-                self.bench,
+                self.bench.as_ref(),
                 self.events,
                 self.key,
                 self.observation_id,
@@ -750,6 +819,8 @@ async fn run_connection(
     fresh: bool,
     last_watch: &mut Option<String>,
     conversation: &mut Conversation,
+    paged: Option<&mut PagedHistory>,
+    approvals: &mut ApprovalCache,
     events: &mpsc::Sender<SessionEvent>,
     cancellation: &Cancellation,
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
@@ -894,10 +965,7 @@ async fn run_connection(
         .as_ref()
         .map(|state| state.projection_id.clone())
         .unwrap_or_default();
-    // The last approvals delivered to the viewer. A bounded read that fails
-    // transiently must not publish an empty list, so the cache survives until
-    // a later read succeeds.
-    let mut approvals = ApprovalCache::default();
+    let mut paged_state = None;
     if interests.conversation {
         let initial = initial.as_ref().expect("conversation baseline");
         if projection.is_empty() || projection.len() > 128 {
@@ -906,15 +974,10 @@ async fn run_connection(
             ));
         }
         conversation.reset(&epoch);
-        // Anything already in the local committed view predates this watch:
-        // it is baseline, not output, and a reconnect must not replay it.
-        for message_id in core.sync_service()?.history_message_ids(key)? {
-            conversation.mark_delivered_id(&message_id);
-        }
         let bench = core.diagnostics.bench();
         let attach_frame = bench.token(TokenDomain::Frame, &format!("attach:{observation_id}"));
         let mut sink = EventSink {
-            bench: bench.as_ref(),
+            bench: bench.clone(),
             frame: attach_frame,
             events,
             key,
@@ -922,19 +985,25 @@ async fn run_connection(
             generation,
             failed: false,
         };
-        if !sink.emit(&ViewUpdate::Reset).await {
-            pump.finish().await;
-            return Ok(End::Done);
+        if paged.is_none() {
+            // Anything already in the full local view predates the CLI watch.
+            for message_id in core.sync_service()?.history_message_ids(key)? {
+                conversation.mark_delivered_id(&message_id);
+            }
+            if !sink.emit(&ViewUpdate::Reset).await {
+                pump.finish().await;
+                return Ok(End::Done);
+            }
+            core.sync_conversation(key, conversation, false, false, &projection, &mut sink)
+                .await?;
+            emit_join(
+                core,
+                &ready.watch_id,
+                &connection_id,
+                connection_generation,
+                JoinMilestone::CaughtUp,
+            );
         }
-        core.sync_conversation(key, conversation, false, false, &projection, &mut sink)
-            .await?;
-        emit_join(
-            core,
-            &ready.watch_id,
-            &connection_id,
-            connection_generation,
-            JoinMilestone::CaughtUp,
-        );
         let _ = core
             .runtime
             .set_state(&key.host_id, ConnectionState::Connected);
@@ -942,15 +1011,22 @@ async fn run_connection(
         // through their own bounded query. A failed read must not erase the
         // pending approvals a later event or lease tick will restore, so the
         // baseline is emitted only with what Core actually read.
-        approvals.items = fetch_approvals(core, key).await.unwrap_or_default();
+        if paged.is_none() {
+            approvals.items = fetch_approvals(core, key).await.unwrap_or_default();
+        } else {
+            approvals.stale = true;
+        }
         let mut baseline: crate::conversation::SessionState = initial.clone().into();
         baseline.approvals = approvals.items.clone();
+        if paged.is_some() {
+            paged_state = Some(baseline.clone());
+        }
         if sink.failed || !sink.emit(&ViewUpdate::State(baseline)).await {
             pump.finish().await;
             return Ok(End::Done);
         }
     }
-    let sync = if interests.conversation {
+    let sync = if interests.conversation && paged.is_none() {
         Some(core.sync_service()?)
     } else {
         None
@@ -970,7 +1046,10 @@ async fn run_connection(
         epoch,
         state_revision,
         projection,
+        initial.map(|state| state.history_head).unwrap_or_default(),
         conversation,
+        paged,
+        paged_state,
         approvals,
         control_rx,
         live_rx,
@@ -1023,8 +1102,11 @@ async fn conversation_loop(
     epoch: String,
     initial_revision: u64,
     mut projection: String,
+    initial_head: String,
     conversation: &mut Conversation,
-    mut approvals: ApprovalCache,
+    mut paged: Option<&mut PagedHistory>,
+    mut paged_state: Option<crate::conversation::SessionState>,
+    approvals: &mut ApprovalCache,
     mut control_rx: mpsc::Receiver<QueuedEvent>,
     mut live_rx: mpsc::Receiver<QueuedEvent>,
     events: &mpsc::Sender<SessionEvent>,
@@ -1041,6 +1123,12 @@ async fn conversation_loop(
     live_depth: Arc<AtomicUsize>,
     sync: Option<crate::sync::SyncService>,
 ) -> CoreResult<End> {
+    let mut connection_state = connection.subscribe_state();
+    let byte_budget = connection.control_queue_bytes();
+    let mut history_read: Option<HistoryReadFuture> = paged
+        .as_deref_mut()
+        .map(|paged| paged.prepare(core, &projection, &initial_head));
+    let mut baseline_approvals = Box::pin(fetch_approvals(core, key));
     let mut live_open = true;
     let mut state_revision = initial_revision;
     let mut first_update = true;
@@ -1077,6 +1165,49 @@ async fn conversation_loop(
         }
         tokio::select! {
             biased;
+            // The connection marks interruptions before publishing its
+            // state. Wake an idle observation without waiting for its lease.
+            _ = connection_state.changed() => {}
+            result = async { history_read.as_mut().expect("pending history read").await }, if history_read.is_some() => {
+                history_read = None;
+                let paged = paged.as_deref_mut().expect("paged history mode");
+                let buffered = paged.finish_read();
+                let mut sink = paged_sink(core, events, key, observation_id, generation);
+                match result {
+                    Ok(history) => {
+                        paged.install(core, conversation, history, &mut sink).await?;
+                        for batch in buffered {
+                            if sink.failed {
+                                break;
+                            }
+                            if !paged.receive(core, conversation, batch, byte_budget, &mut sink).await? {
+                                pump.finish().await;
+                                return Ok(End::Reconnect);
+                            }
+                        }
+                    }
+                    Err(error) => paged.unavailable(error.code(), &mut sink).await,
+                }
+                if sink.failed {
+                    pump.finish().await;
+                    return Ok(End::Done);
+                }
+            }
+            fresh = &mut baseline_approvals, if paged_state.is_some() => {
+                let mut baseline = paged_state.take().expect("pending approvals baseline");
+                // An authoritative state event may have already superseded
+                // this bounded initial read while it was in flight.
+                if let Some(fresh) = fresh.filter(|_| state_revision == initial_revision) {
+                        approvals.items = fresh;
+                        approvals.stale = false;
+                        baseline.approvals = approvals.items.clone();
+                        let mut sink = paged_sink(core, events, key, observation_id, generation);
+                        if !sink.emit(&ViewUpdate::State(baseline)).await {
+                            pump.finish().await;
+                            return Ok(End::Done);
+                        }
+                }
+            }
             received = control_rx.recv() => {
                 let Some(queued_event) = received else {
                     let failure = error.lock().expect("watch error mutex").take();
@@ -1105,10 +1236,12 @@ async fn conversation_loop(
                     &mut state_revision,
                     &mut projection,
                     conversation,
-                    &mut approvals,
+                    approvals,
                     events,
                     questions,
                     sync.as_ref(),
+                    paged.as_deref_mut(),
+                    byte_budget,
                     &envelope,
                     &frame,
                     wait_ns,
@@ -1162,10 +1295,12 @@ async fn conversation_loop(
                     &mut state_revision,
                     &mut projection,
                     conversation,
-                    &mut approvals,
+                    approvals,
                     events,
                     questions,
                     sync.as_ref(),
+                    paged.as_deref_mut(),
+                    byte_budget,
                     &envelope,
                     &frame,
                     wait_ns,
@@ -1235,7 +1370,7 @@ async fn conversation_loop(
                     continue;
                 }
                 if lease.projection_id.is_empty() || lease.projection_id != projection {
-                    if !send_event(
+                    if paged.is_none() && !send_event(
                         events,
                         key,
                         observation_id,
@@ -1290,6 +1425,9 @@ async fn conversation_loop(
                         }
                     }
                 }
+                if let Some(paged) = paged.as_deref_mut().filter(|_| history_read.is_none()) {
+                    history_read = Some(paged.prepare(core, &projection, &lease.history_head));
+                }
                 if let Some(sync) = sync.as_ref() {
                     // A moved history head means committed content was missed.
                     // Repair it through the paged history read, which keeps
@@ -1300,7 +1438,7 @@ async fn conversation_loop(
                             &format!("lease:{observation_id}"),
                         );
                         let mut sink = EventSink {
-                            bench: core.diagnostics.bench().as_ref(),
+                            bench: core.diagnostics.bench().clone(),
                             frame: lease_frame,
                             events,
                             key,
@@ -1610,6 +1748,8 @@ async fn handle_envelope(
     events: &mpsc::Sender<SessionEvent>,
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
     sync: Option<&crate::sync::SyncService>,
+    paged: Option<&mut PagedHistory>,
+    byte_budget: usize,
     envelope: &EventEnvelope,
     frame: &str,
     wait_ns: u64,
@@ -1802,6 +1942,8 @@ async fn handle_envelope(
         events,
         questions,
         sync,
+        paged,
+        byte_budget,
         payload,
         frame,
     )
@@ -1839,6 +1981,8 @@ async fn handle_update(
     events: &mpsc::Sender<SessionEvent>,
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
     sync: Option<&crate::sync::SyncService>,
+    paged: Option<&mut PagedHistory>,
+    byte_budget: usize,
     payload: session_update::Payload,
     frame: &str,
 ) -> CoreResult<Handling> {
@@ -1904,6 +2048,42 @@ async fn handle_update(
                     disposition: DequeueDisposition::Applied,
                     reason: None,
                     delivered: false,
+                });
+            }
+            if let Some(paged) = paged {
+                if batch.projection_id != *projection {
+                    return Ok(Handling {
+                        flow: Flow::Reconnect,
+                        disposition: DequeueDisposition::Stale,
+                        reason: Some("projection_changed"),
+                        delivered: false,
+                    });
+                }
+                let mut sink = paged_sink(core, events, key, observation_id, generation);
+                let contiguous = paged
+                    .receive(core, conversation, batch, byte_budget, &mut sink)
+                    .await?;
+                return Ok(if sink.failed {
+                    Handling {
+                        flow: Flow::Done,
+                        disposition: DequeueDisposition::Rejected,
+                        reason: None,
+                        delivered: false,
+                    }
+                } else if contiguous {
+                    Handling {
+                        flow: Flow::Continue,
+                        disposition: DequeueDisposition::Applied,
+                        reason: None,
+                        delivered: true,
+                    }
+                } else {
+                    Handling {
+                        flow: Flow::Reconnect,
+                        disposition: DequeueDisposition::Applied,
+                        reason: None,
+                        delivered: false,
+                    }
                 });
             }
             let Some(sync) = sync else {
@@ -1983,7 +2163,7 @@ async fn handle_update(
                 }),
                 BatchOutcome::Gap => {
                     let mut sink = EventSink {
-                        bench: bench.as_ref(),
+                        bench: bench.clone(),
                         frame: frame.to_owned(),
                         events,
                         key,
@@ -2028,7 +2208,9 @@ async fn handle_update(
                 });
             }
             if state.projection_id.is_empty() || state.projection_id != *projection {
-                conversation.reset_projection("");
+                if paged.is_none() {
+                    conversation.reset_projection("");
+                }
                 *projection = state.projection_id.clone();
                 return Ok(Handling {
                     flow: Flow::Reconnect,
@@ -2100,8 +2282,12 @@ async fn handle_update(
                     delivered: false,
                 });
             }
-            conversation.reset("");
-            core.sync_service()?.discard_stage(key)?;
+            if let Some(paged) = paged {
+                paged.invalidate();
+            } else {
+                conversation.reset("");
+                core.sync_service()?.discard_stage(key)?;
+            }
             Ok(Handling {
                 flow: Flow::Reconnect,
                 disposition: DequeueDisposition::Applied,

@@ -43,11 +43,14 @@ final class ContractParityTests: XCTestCase {
 
     /// Send: one settled command, one committed echo, no duplicate optimistic row.
     func testSendContract() async {
-        let model = makeModel("conversation.baseline")
+        let model = makeModel("conversation.send-echo")
         await startLoaded(model)
         model.draft = "parity send"
         await model.send()
-        await waitUntil { model.state.lifecycle.isSettled }
+        await waitUntil {
+            model.state.lifecycle.isSettled
+                && model.state.messages.contains { $0.messageId == "msg-echo-cmd-0001" }
+        }
 
         guard case .delivered(let receipt) = model.state.lifecycle else {
             return XCTFail("a sent command must settle as delivered")
@@ -55,7 +58,7 @@ final class ContractParityTests: XCTestCase {
         XCTAssertEqual(receipt.commandId, "cmd-0001")
         XCTAssertEqual(model.state.commandError, nil)
         let matches = model.state.messages.filter { $0.plainText == "parity send" }
-        XCTAssertEqual(matches.count, 1, "the echo must replace, not duplicate, the optimistic row")
+        XCTAssertEqual(matches.map(\.messageId), ["msg-echo-cmd-0001"])
     }
 
     /// Approval: a decision resolves exactly one card; a refresh never revives it.

@@ -7,15 +7,6 @@ import XCTest
 final class ConversationReduceTests: XCTestCase {
     // MARK: - Builders
 
-    private func message(_ id: String, role: MessageRole = .assistant) -> ConversationMessage {
-        ConversationMessage(
-            messageId: id,
-            role: role,
-            blocks: [],
-            createdAtUnixMs: 1_700_000_000_000
-        )
-    }
-
     private func approval(
         _ id: String = "approval-1",
         version: Int = 3,
@@ -76,43 +67,22 @@ final class ConversationReduceTests: XCTestCase {
         XCTAssertFalse(state.isLoaded)
     }
 
-    func testSnapshotLoadsAndLeavesNoLoadError() {
-        var state = ConversationState()
-        state.loadError = .timeout
-        let loaded = ConversationReduce.reduce(
-            state,
-            .snapshot(messages: [message("m1")], approvals: [])
-        )
+    func testContentLoadedClearsLoadError() {
+        let failed = ConversationReduce.reduce(.init(), .loadFailed(.timeout))
+        let loaded = ConversationReduce.reduce(failed, .contentLoaded)
         XCTAssertTrue(loaded.isLoaded)
+        XCTAssertFalse(loaded.isLoading)
         XCTAssertNil(loaded.loadError)
-        XCTAssertEqual(loaded.messages.map(\.messageId), ["m1"])
     }
 
-    func testSnapshotDropsApprovalThatDisappearedElsewhere() {
-        var state = ConversationState()
-        state.approval = .resolving(approval())
-        let loaded = ConversationReduce.reduce(state, .snapshot(messages: [], approvals: []))
-        XCTAssertEqual(loaded.approval, .none)
-    }
-
-    func testSnapshotClearsAnEndedWatch() {
-        var state = ConversationState()
-        state.watch.ended = true
-        let reconnected = ConversationReduce.reduce(state, .snapshot(messages: [], approvals: []))
-        XCTAssertFalse(reconnected.watch.ended)
-        XCTAssertTrue(reconnected.isLoaded)
-    }
-
-    func testCapabilitiesRemoveUnsupportedQueueAndHistory() {
+    func testCapabilitiesRemoveUnsupportedQueue() {
         var state = ConversationState()
         state.queue = .ready(queue())
-        state.history = .idle(complete: false)
         let reduced = ConversationReduce.reduce(
             state,
             .capabilitiesLoaded(capabilities(queueRead: false, historyPage: false))
         )
         XCTAssertEqual(reduced.queue, .unavailable)
-        XCTAssertEqual(reduced.history, .unavailable)
     }
 
     // MARK: - Commands
@@ -298,38 +268,14 @@ final class ConversationReduceTests: XCTestCase {
     }
 
     func testHistoryTransitions() {
-        var state = ConversationReduce.reduce(.init(), .historyCachedOnly)
-        state = ConversationReduce.reduce(state, .historyLoadingMore)
-        XCTAssertEqual(state.history, .cachedOnly, "loading requires an idle history")
-        state = ConversationReduce.reduce(state, .historyLoaded(complete: false))
-        state = ConversationReduce.reduce(state, .historyLoadingMore)
-        XCTAssertEqual(state.history, .loadingMore)
-        state = ConversationReduce.reduce(state, .historyFailed(.staleHistory))
-        XCTAssertEqual(state.history, .failed(.staleHistory))
-    }
-
-    // MARK: - Content
-
-    func testMessageIsIdempotentByMessageId() {
-        var state = ConversationState()
-        state = ConversationReduce.reduce(
-            state,
-            .messageReceived(message("m1"), provenance: .optimistic)
-        )
-        XCTAssertEqual(state.provenance, .optimistic)
-        state = ConversationReduce.reduce(
-            state,
-            .messageReceived(message("m1"), provenance: .confirmed)
-        )
-        XCTAssertEqual(state.messages.count, 1)
-        XCTAssertEqual(state.provenance, .confirmed)
-    }
-
-    func testReplacedMessageUpdatesInPlace() {
-        var state = ConversationState()
-        state = ConversationReduce.reduce(state, .messageReceived(message("m1"), provenance: .confirmed))
-        let updated = message("m1", role: .user)
-        state = ConversationReduce.reduce(state, .messageReplaced(updated))
-        XCTAssertEqual(state.messages.first, updated)
+        var state = ConversationReduce.reduce(.init(), .olderHistoryStarted)
+        XCTAssertFalse(state.historyFacet.loading)
+        state.historyFacet.continuation = "known-cut"
+        state = ConversationReduce.reduce(state, .olderHistoryStarted)
+        XCTAssertTrue(state.historyFacet.loading)
+        state = ConversationReduce.reduce(state, .historyTraversalInvalidated)
+        XCTAssertFalse(state.historyFacet.loading)
+        XCTAssertNil(state.historyFacet.continuation)
+        XCTAssertEqual(state.historyFacet.traversal, 1)
     }
 }

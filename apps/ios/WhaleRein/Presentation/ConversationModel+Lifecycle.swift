@@ -7,7 +7,7 @@ extension ConversationModel {
     // MARK: - Lifecycle
 
     func start() async {
-        guard loadState != .loading, loadState != .loaded else { return }
+        guard !isClosed, loadState != .loading, loadState != .loaded else { return }
         state = ConversationReduce.reduce(state, .loadStarted)
         errorKey = nil
         watchEnded = false
@@ -18,34 +18,26 @@ extension ConversationModel {
         questionErrorKey = nil
         questionAnswerState = .idle
         questionCancelReceipt = nil
-        ensureSubscription()
-        // A draft read is an enhancement, not a precondition for the watch. A
-        // storage failure must never leave the user with a conversation that
-        // never opens.
-        do {
-            let claim = try await drafts.claim(hostId: hostId, sessionId: sessionId)
-            draftLease = claim.lease
-            draft = claim.text
-            draftLoadErrorKey = nil
-        } catch {
-            draftLoadErrorKey = .errorDraftUnavailable
+        for row in outgoingStore?.attach(self) ?? [] {
+            optimisticMessages[row.message.messageId] = row.submission
+            state.messages.append(row.message)
         }
+        ensureSubscription()
+        async let restoredDraft: Void = restoreConversationDraft()
+        async let updatedCapabilities: Void = refreshConversationCapabilities(opening: true)
         do {
-            let loaded = try await service.capabilities(hostId: hostId, sessionId: sessionId)
-            state = ConversationReduce.reduce(state, .capabilitiesLoaded(loaded))
-            if capabilities.running {
-                delivery = .steer
-            }
-            queue.applyCapabilities(capabilities)
             try await service.startWatch(hostId: hostId, sessionId: sessionId)
-            await queue.refresh()
         } catch {
+            guard !isClosed else { return }
             let code = (error as? SessionServiceError)?.code ?? .internalError
             state = ConversationReduce.reduce(state, .loadFailed(code))
             errorKey = L10nKey.errorKey(for: code)
             reportFatalIfNeeded(code)
             return
         }
+        _ = await (restoredDraft, updatedCapabilities)
+        guard !isClosed else { return }
+        await queue.refresh()
         // Core retains the original send operation. After a relaunch the app
         // has no in-memory identity, so recover the one unresolved send for
         // this exact scope from that durable journal. Recovery is read-only and
@@ -53,43 +45,65 @@ extension ConversationModel {
         await recoverRetainedSendIfNeeded()
     }
 
-    /// Flushes the pending draft and stops the watch before the app is
-    /// backgrounded. The local transcript is kept so a resume can render it
-    /// immediately while the fresh watch resets it.
+    private func restoreConversationDraft() async {
+        do {
+            let claim = try await drafts.claim(hostId: hostId, sessionId: sessionId) { [weak self] editID, persisted in
+                self?.applySubmittedDraftClear(editID: editID, persisted: persisted)
+            }
+            if isClosed {
+                try await drafts.release(claim.lease, text: claim.text, editID: claim.editID)
+                return
+            }
+            draftLease = claim.lease
+            if draft.isEmpty, clearedDraftBeforeRestore != claim.editID {
+                draft = claim.text
+                draftEditID = claim.editID
+            }
+            clearedDraftBeforeRestore = nil
+            draftLoadErrorKey = nil
+        } catch {
+            draftLoadErrorKey = .errorDraftUnavailable
+        }
+    }
+
+    func refreshConversationCapabilities(opening: Bool = false) async {
+        let runEpoch = authoritativeRunEpoch
+        guard var loaded = try? await service.capabilities(hostId: hostId, sessionId: sessionId),
+              !isClosed else { return }
+        if runEpoch != authoritativeRunEpoch {
+            loaded.running = capabilities.running
+        }
+        applyCapabilities(loaded)
+        if opening, loaded.running, loaded.supportsSteer { delivery = .steer }
+    }
+
+    /// Flushes the draft while keeping the single observation alive. Core owns
+    /// continuity even when iOS suspends the app's network execution.
     func suspendForBackground() async {
         guard !isSuspended else { return }
         isSuspended = true
         await persistDraftNow()
         stopApprovalTimer()
-        consumeTask?.cancel()
-        consumeTask = nil
         wait.close()
-        service.stopWatch()
     }
 
-    /// Restarts the watch and resyncs the visible session after returning to the
-    /// foreground, instead of leaving a half-open stream and stale rows.
     func resumeAfterForeground() async {
         guard isSuspended else { return }
         isSuspended = false
-        watchEnded = false
-        errorKey = nil
-        lastAppliedSequence = -1
         approvalClock = now()
-        questions = .loading
-        questionReview = nil
-        questionErrorKey = nil
-        preserveQuestionCancellation()
-        if consumeTask == nil {
-            ensureSubscription()
+        restartApprovalTimer()
+        if watchEnded || consumeTask == nil {
+            await reconnectWatch()
+        } else {
+            await queue.refresh()
         }
-        await restartWatch()
     }
 
     /// Recovery path for a watch that ended on its own. The composer disables
     /// Send while ended and offers this reconnect action.
     func reconnectWatch() async {
-        guard !isReconnecting else { return }
+        guard !isClosed, !isReconnecting else { return }
+        invalidateHistoryTraversal()
         watchEnded = false
         errorKey = nil
         lastAppliedSequence = -1
@@ -106,8 +120,14 @@ extension ConversationModel {
     }
 
     func close() {
+        guard !isClosed else { return }
         isClosed = true
-        historyGeneration &+= 1
+        outgoingStore?.detach(self, rows: messages.compactMap { message in
+            optimisticMessages[message.messageId].map {
+                ConversationOutgoingStore.Row(message: message, submission: $0)
+            }
+        })
+        history.traversal &+= 1
         attachments.cancelAll()
         consumeTask?.cancel()
         consumeTask = nil
@@ -116,19 +136,21 @@ extension ConversationModel {
         draftSaveTask?.cancel()
         draftSaveTask = nil
         let text = draft
+        let editID = draftEditID
         let hostId = hostId
         let sessionId = sessionId
         let service = service
+        let drafts = drafts
         let lease = draftLease
         closeDraftFlushDidComplete = false
         closeDraftFlushErrorKey = nil
         // The coordinator owns ordering and generation fencing. Releasing this
         // lease is a final save only while this conversation still owns the
         // session.
-        Task { [weak self] in
+        closeDraftFlushTask = Task { [weak self] in
             do {
                 if let lease {
-                    try await self?.drafts.release(lease, text: text)
+                    try await drafts.release(lease, text: text, editID: editID)
                 } else {
                     try await service.saveDraft(hostId: hostId, sessionId: sessionId, text: text)
                 }

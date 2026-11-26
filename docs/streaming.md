@@ -91,8 +91,13 @@ fails integrity validation. Receipt fingerprints are encrypted at rest and bound
 
 HistoryRead opens/paginates a fixed cut. Every page and batch carries the active
 content projection; a page from another projection or cut cannot continue the
-traversal and requests a fresh snapshot. Snapshot pages stage in encrypted cache
-under one projection and replace a complete view only after the final page.
+traversal and requests a fresh snapshot. Comprehensive snapshot pages stage in
+encrypted cache under one projection and replace a complete view after the final
+page. Paged Conversation observation requests just the recent page at the Watch
+head and keeps a separate forward position. Core verifies continuity from that
+position during recovery. If bounded repair cannot establish continuity, Core
+publishes a replacement recent window and resumes from its cut. Independent
+older-page reads use the continuation from the snapshot.
 Failed, interrupted or missing-range snapshots leave the old view and its
 receipts in place. A new projection fences old positions, receipts, cache rows
 and continuations; cached rows stay until an atomic replacement commits.

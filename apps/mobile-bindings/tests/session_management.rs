@@ -37,7 +37,7 @@ fn wait_for_pairing(core: &MobileCore) -> (Option<String>, Option<String>) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         for event in core.poll_events(500) {
-            if let ConversationEvent::PairingFinished { host_id, code } = event {
+            if let ConversationEvent::PairingFinished { host_id, code } = event.event {
                 return (host_id, code);
             }
         }

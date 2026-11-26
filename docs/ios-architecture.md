@@ -72,6 +72,28 @@ Features/Conversation/
 
 File budgets: `*View.swift` ≤ 300 lines, `*Model.swift` ≤ 500 lines.
 
+## Conversation history and viewport
+
+Opening a conversation starts a paged Core observation. The typed snapshot
+supplies recent rows, their provenance and an optional older-page continuation.
+The session service preserves the producer's watch scope through polling.
+The conversation model applies snapshots and live updates and makes independent
+older-page reads when the reader approaches the older edge. It fences those
+requests by traversal so a replaced window cannot receive an old page.
+
+The persistent transcript reports geometry and reader intent. It follows the
+bottom while the reader is there and restores a visible row at its previous
+viewport offset while reading earlier messages. SwiftUI lays out the rows already loaded by the history pager in one stable
+stack. Offset correction reads the current native scroll position alongside
+the measured row. Send receipts, question changes,
+history prepends and keyboard changes share this viewport policy.
+Command status has its own identity. A committed message settles a pending
+presentation row only when the command has an authoritative association.
+An accepted send keeps its local row while that association is absent.
+A Source delivery ID can associate the receipt with a committed user row
+whose canonical message ID differs. The association works with either
+arrival order and is scoped to the selected session.
+
 ## App shell
 
 - `AppEnvironment` is the only assembly point: service factory, preferences

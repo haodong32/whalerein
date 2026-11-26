@@ -90,14 +90,14 @@ pub use proto_compat::{
 };
 pub use types::{
     ApprovalInfo, Cancellation, CommandDiagnostics, CommandHandle, CreateSessionInput,
-    DoctorReport, ExportManifest, HostCapabilities, HostInfo, InputKind, LifecycleReceipt,
-    ModelCatalog, ModelChoice, ModelSelectionReceipt, ObservationInterests, OnlineStatus,
-    PairingHistoryRecord, PairingOutcome, PairingPrompt, PendingCommand, PendingQueue,
-    PendingQueueAction, PendingQueueBlock, PendingQueueItem, QuestionAnswer, QuestionBatchInfo,
-    QuestionFreshness, QuestionItemInfo, QuestionOptionInfo, QuestionPageInfo, QuestionReceiptInfo,
-    QuestionStamp, QuestionView, RevocationOutcome, RevocationRetention, SessionCapabilities,
-    SessionEvent, SessionEventPayload, SessionList, SessionModel, SessionSummary, WaitInput,
-    WaitObservation, WaitReason, WaitState,
+    DoctorReport, ExportManifest, HistoryContinuity, HistorySnapshot, HostCapabilities, HostInfo,
+    InputKind, LifecycleReceipt, ModelCatalog, ModelChoice, ModelSelectionReceipt,
+    ObservationInterests, OnlineStatus, PairingHistoryRecord, PairingOutcome, PairingPrompt,
+    PendingCommand, PendingQueue, PendingQueueAction, PendingQueueBlock, PendingQueueItem,
+    QuestionAnswer, QuestionBatchInfo, QuestionFreshness, QuestionItemInfo, QuestionOptionInfo,
+    QuestionPageInfo, QuestionReceiptInfo, QuestionStamp, QuestionView, RevocationOutcome,
+    RevocationRetention, SessionCapabilities, SessionEvent, SessionEventPayload, SessionList,
+    SessionModel, SessionSummary, WaitInput, WaitObservation, WaitReason, WaitState,
 };
 
 // Delivery choices are Core-owned; wire conversion stays internal.

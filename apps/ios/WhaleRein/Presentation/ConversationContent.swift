@@ -12,13 +12,4 @@ enum ConversationContent {
         guard !reasoningVisible else { return blocks }
         return blocks.filter { $0.kind != .reasoning }
     }
-
-    /// Stable provenance label for an older-history page.
-    static func provenanceKey(_ provenance: HistoryProvenance) -> L10nKey {
-        switch provenance {
-        case .online: return .conversationHistoryOnline
-        case .cache: return .conversationHistoryCache
-        case .unavailable: return .conversationHistoryUnavailable
-        }
-    }
 }

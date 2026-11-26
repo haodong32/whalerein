@@ -57,6 +57,7 @@ final class FixtureSessionService: SessionService {
     private var didStream = false
     private var didSimulateApprovalChange = false
     private var didReturnUncertain = false
+    var didFailOlderFixturePage = false
     private var runningSessions: Set<String> = []
     var messagesBySession: [String: [ConversationMessage]] = [:]
     /// Deterministic history projection and attachment transfer fixture.
@@ -326,9 +327,15 @@ final class FixtureSessionService: SessionService {
             didStream = false
         }
         activeWatch = context
-        let messages = messages(for: hostId, sessionId: sessionId)
-        let approval = approval(for: hostId, sessionId: sessionId)
-        emit(.reset(messages: messages, approvals: [approval]))
+        let page = try await historyPage(
+            hostId: hostId, sessionId: sessionId, source: .online,
+            continuation: nil,
+            maxMessages: ConversationHistoryLimit.messages, maxBytes: ConversationHistoryLimit.bytes
+        )
+        emit(.historySnapshot(page, replacing: !sameWatch))
+        let approvals = options.delaysViewportTransitions || options.shortHistoryWithRetry
+            ? [] : [approval(for: hostId, sessionId: sessionId)]
+        emit(.approvals(approvals))
         if options.questionsOnOpen {
             emitQuestionsForTesting(hostId: hostId, sessionId: sessionId)
         }
@@ -449,6 +456,8 @@ final class FixtureSessionService: SessionService {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SessionServiceError(.invalidInvitation, detail: "empty message")
         }
+        await delayViewportTransition()
+        try Task.checkCancellation()
         let capabilities = try await capabilities(hostId: hostId, sessionId: sessionId)
         if capabilities.running {
             switch delivery {
@@ -507,7 +516,31 @@ final class FixtureSessionService: SessionService {
                 sessionId: sessionId
             )
         }
+        if options.replyWithoutUserEcho {
+            scheduleReplyWithoutEcho(hostId: hostId, sessionId: sessionId)
+        }
         return receipt
+    }
+
+    private func scheduleReplyWithoutEcho(hostId: String, sessionId: String) {
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.clock.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self.emit(.preview(attemptId: "fixture-reply", text: "Streaming fixture reply", replace: true, incomplete: true),
+                      hostId: hostId, sessionId: sessionId)
+            await self.clock.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            let reply = ConversationMessage(
+                messageId: "fixture-reply", role: .assistant,
+                blocks: [ConversationBlock(blockId: "fixture-reply-text", kind: .text, text: "Completed fixture reply")],
+                createdAtUnixMs: 2
+            )
+            self.emit(.message(reply), hostId: hostId, sessionId: sessionId)
+            self.emit(.attemptEnded(attemptId: "fixture-reply", outcome: .completed),
+                      hostId: hostId, sessionId: sessionId)
+        }
+        settlementTasks.append(task)
     }
 
     // MARK: - Pending queue
@@ -860,6 +893,8 @@ final class FixtureSessionService: SessionService {
               answers.allSatisfy({ questionIds.contains($0.id) }) else {
             throw SessionServiceError(.invalidInvitation, detail: "unknown question id")
         }
+        await delayViewportTransition()
+        try Task.checkCancellation()
         if options.delayQuestionRemoval {
             let task = Task { [weak self] in
                 guard let self else { return }
@@ -1103,7 +1138,9 @@ final class FixtureSessionService: SessionService {
               questionInitializedSessions.insert(sessionId).inserted else {
             return []
         }
-        let batch = FixtureCatalog.questionBatch(sessionId: sessionId)
+        let batch = FixtureCatalog.questionBatch(
+            sessionId: sessionId, compact: options.delaysViewportTransitions
+        )
         questionBatchesBySession[sessionId] = [batch]
         questionRevisionBySession[sessionId] = 1
         return [batch]
@@ -1132,6 +1169,12 @@ final class FixtureSessionService: SessionService {
     func requirePaired() throws {
         if revoked { throw SessionServiceError(.revoked) }
         guard paired else { throw SessionServiceError(.notPaired) }
+    }
+
+    func delayViewportTransition(for duration: Duration = .seconds(4)) async {
+        if options.delaysViewportTransitions {
+            await clock.sleep(for: duration)
+        }
     }
 
     func messages(for hostId: String, sessionId: String) -> [ConversationMessage] {

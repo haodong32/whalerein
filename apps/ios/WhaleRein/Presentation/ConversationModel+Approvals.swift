@@ -200,27 +200,25 @@ extension ConversationModel {
     func restartWatch() async {
         guard !isReconnecting else { return }
         isReconnecting = true
+        watchEnded = false
         defer { isReconnecting = false }
         do {
             // The draft is owned by this model and its DraftService lease.
             // Restarting the watch must not re-read and overwrite in-memory
             // text with a stale persisted value.
-            let loaded = try await service.capabilities(hostId: hostId, sessionId: sessionId)
-            state = ConversationReduce.reduce(state, .capabilitiesLoaded(loaded))
-            try await service.startWatch(hostId: hostId, sessionId: sessionId)
             errorKey = nil
             if loadState != .loaded {
                 state = ConversationReduce.reduce(state, .loadStarted)
             }
-            queue.applyCapabilities(capabilities)
+            try await service.startWatch(hostId: hostId, sessionId: sessionId)
+            guard !isClosed else { return }
+            await refreshConversationCapabilities()
             await refreshApprovals()
             await queue.refresh()
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             errorKey = L10nKey.errorKey(for: code)
-            if case .failed = loadState {
-                // Keep the retry screen that is already visible.
-            } else if loadState != .loaded {
+            if loadState != .loaded {
                 state = ConversationReduce.reduce(state, .loadFailed(code))
             } else {
                 watchEnded = true

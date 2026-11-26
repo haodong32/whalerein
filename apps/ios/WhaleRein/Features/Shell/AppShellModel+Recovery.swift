@@ -12,6 +12,7 @@ extension AppShellModel {
     func enterRevoked() {
         conversation?.close()
         conversation = nil
+        outgoingStore = ConversationOutgoingStore()
         connectivity.stopMonitoring()
         isRevoked = true
         isPrivacyShieldVisible = false
@@ -64,6 +65,7 @@ extension AppShellModel {
     }
 
     func resetLocalNavigation() {
+        outgoingStore = ConversationOutgoingStore()
         isRevoked = false
         dismissSheet()
         dismissSheet()
@@ -130,6 +132,7 @@ extension AppShellModel {
         Task { try? await service.clearDiagnostics() }
         conversation?.close()
         conversation = nil
+        outgoingStore = ConversationOutgoingStore()
         isPaired = false
         isRevoked = false
         prefersInvitationAfterDeviceReset = true

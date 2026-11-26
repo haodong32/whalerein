@@ -495,6 +495,7 @@ pub struct ConversationMessage {
     pub role: MessageRole,
     pub blocks: Vec<ContentBlock>,
     pub authored_at_unix_ms: i64,
+    pub delivery_id: Option<String>,
 }
 
 /// One typed notice with its ordered placement.
@@ -714,6 +715,8 @@ impl From<whalerein_proto::ConversationMessage> for ConversationMessage {
             role,
             blocks,
             authored_at_unix_ms: value.authored_at_unix_ms,
+            delivery_id: (role == MessageRole::User && !value.delivery_id.is_empty())
+                .then_some(value.delivery_id),
         }
     }
 }
@@ -933,6 +936,13 @@ impl Conversation {
         self.delivered_order.clear();
         self.tools = ToolActivities::default();
         self.reset(epoch)
+    }
+
+    /// Discard an invalidated committed range while retaining the active
+    /// connection's epoch for subsequent live frames.
+    pub(crate) fn clear_history_projection(&mut self) {
+        let epoch = self.epoch.clone();
+        self.reset_projection(&epoch);
     }
 
     /// Drain tool activity updates produced by committed folds.

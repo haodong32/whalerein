@@ -6,40 +6,25 @@ import Foundation
 extension ConversationModel {
     // MARK: - Events
 
-    /// Replaces the transcript from a cache snapshot or a fresh watch baseline.
-    /// A watch baseline also invalidates the old question observation, while a
-    /// cache-only replacement leaves the live question stream in place.
-    private func applyReset(
-        messages: [ConversationMessage],
-        approvals: [Approval],
-        resetQuestions: Bool
-    ) {
+    #if DEBUG
+    /// Installs a synthetic fixture transcript without a Core watch.
+    private func applyReset(messages: [ConversationMessage], approvals: [Approval]) {
         let carriedOptimistic = optimisticMessages
         let optimisticRows = state.messages.filter {
             optimisticMessages[$0.messageId] != nil
         }
-        var previousUserTextCounts: [String: Int] = [:]
-        for message in state.messages
-        where message.role == .user && optimisticMessages[message.messageId] == nil {
-            let text = normalizedText(message.plainText)
-            previousUserTextCounts[text, default: 0] += 1
-        }
         state.messages = messages
         liveMessageIds = Set(messages.map(\.messageId))
-        pagedMessageIds.removeAll()
-        historyGeneration &+= 1
-        isLoadingOlderHistory = false
+        invalidateHistoryTraversal()
         // The new snapshot replaces the transcript, so every paged row is
         // gone. Its continuation, projection and completion flag described
         // the old traversal and must not suppress reaching those older
         // messages from the new snapshot.
-        historyContinuation = nil
-        historyProjection = nil
-        historySource = nil
-        historyComplete = false
-        historyNeedsFreshTraversal = false
-        historyProvenance = nil
-        historyErrorKey = nil
+        history.projection = nil
+        history.source = nil
+        history.complete = false
+        history.provenance = nil
+        history.errorKey = nil
         liveToolActivities.removeAll()
         reasoningPreviewText = nil
         trustedPendingApprovalIds.removeAll()
@@ -48,21 +33,10 @@ extension ConversationModel {
         // A reconnect reset can arrive after an accepted send but before
         // its committed echo. Re-attach those optimistic rows instead of
         // making the user's message vanish, unless the snapshot already
-        // contains the committed identity/text.
+        // contains the committed identity.
         optimisticMessages = carriedOptimistic.filter { _, pending in
-            if let committed = pending.committedMessageId,
-               messages.contains(where: { $0.messageId == committed }) {
-                return false
-            }
-            let text = normalizedText(pending.text)
-            // Count identical committed user messages: one more than the
-            // previous transcript proves this send was already committed.
-            // An older message with the same text must not hide a second,
-            // distinct send.
-            let committedCount = messages.filter {
-                $0.role == .user && normalizedText($0.plainText) == text
-            }.count
-            return committedCount <= (previousUserTextCounts[text] ?? 0)
+            guard let committed = pending.committedMessageId else { return true }
+            return !messages.contains { $0.messageId == committed }
         }
         for row in optimisticRows where optimisticMessages[row.messageId] != nil {
             if !state.messages.contains(where: { $0.messageId == row.messageId }) {
@@ -74,20 +48,10 @@ extension ConversationModel {
         authoritativeRunEpoch += 1
         state = ConversationReduce.reduce(state, .contentLoaded)
         approvalClock = now()
-        scroll.reset()
+        scroll.jumpToLatest()
         restartApprovalTimer()
-
-        if resetQuestions {
-            questions = .loading
-            questionReview = nil
-            settledQuestionReviews.removeAll()
-            settledQuestionAnswers.removeAll()
-            questionErrorKey = nil
-            if case .submitted = questionAnswerState {
-                questionAnswerState = .idle
-            }
-        }
     }
+    #endif
 
     func ensureSubscription() {
         guard consumeTask == nil else { return }
@@ -114,63 +78,69 @@ extension ConversationModel {
     /// Applies one envelope. Events from another Host/session or an older
     /// sequence are dropped so a late update from a previous watch cannot leak.
     func handle(_ envelope: SessionEventEnvelope) {
-        guard envelope.hostId == hostId, envelope.sessionId == sessionId else { return }
+        guard !isClosed, envelope.hostId == hostId, envelope.sessionId == sessionId,
+              service.acceptsWatchEvent(envelope) else { return }
         guard envelope.sequence > lastAppliedSequence else { return }
         lastAppliedSequence = envelope.sequence
 
         switch envelope.event {
+        #if DEBUG
         case .reset(let messages, let approvals):
-            applyReset(messages: messages, approvals: approvals, resetQuestions: false)
+            applyReset(messages: messages, approvals: approvals)
+        #endif
 
-        case .watchReset(let messages, let approvals):
-            applyReset(messages: messages, approvals: approvals, resetQuestions: true)
+        case .historySnapshot(let page, let replacing):
+            applyHistorySnapshot(page, replacing: replacing)
+
+        case .historyUnavailable(let code):
+            let key = L10nKey.errorKey(for: code)
+            if loadState == .loaded {
+                history.errorKey = key
+                history.needsFreshTraversal = history.continuation == nil
+            } else {
+                history.provenance = .unavailable
+                state = ConversationReduce.reduce(state, .loadFailed(code))
+                errorKey = key
+            }
+            reportFatalIfNeeded(code)
 
         case .message(let message):
             liveMessageIds.insert(message.messageId)
-            pagedMessageIds.remove(message.messageId)
-            settleAuthoritativeContent(message)
-            // A committed message identity is idempotent: a replay must not
-            // touch (or consume) any optimistic row.
-            guard !messages.contains(where: { $0.messageId == message.messageId }) else { return }
-            let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
-            if let echoIndex {
-                state.messages.insert(message, at: min(echoIndex, state.messages.count))
-            } else {
-                state.messages.append(message)
-            }
-            if message.role == .assistant {
-                previewText = nil
-                previewAttemptId = nil
-            }
-            if scroll.recordIncoming(isOwnMessage: false) {
-                requestScroll(animated: false)
-            }
-
-        case .replace(let message):
-            liveMessageIds.insert(message.messageId)
-            pagedMessageIds.remove(message.messageId)
             settleAuthoritativeContent(message)
             if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
                 state.messages[index] = message
-            } else if message.role == .user, let echoIndex = reconcileUserEcho(message) {
-                state.messages.insert(message, at: min(echoIndex, state.messages.count))
+                return
+            }
+            let insertion = reconcileUserEcho(message) ?? state.messages.endIndex
+            state.messages.insert(message, at: insertion)
+            if message.role == .assistant {
+                previewText = nil
+                previewAttemptId = nil
+            }
+            scroll.markLayoutChange()
+            _ = scroll.recordIncoming(isOwnMessage: false)
+
+        case .replace(let message):
+            liveMessageIds.insert(message.messageId)
+            settleAuthoritativeContent(message)
+            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
+                state.messages[index] = message
             } else {
-                state.messages.append(message)
+                let insertion = reconcileUserEcho(message) ?? state.messages.endIndex
+                state.messages.insert(message, at: insertion)
             }
             if message.role == .assistant {
                 previewText = nil
                 previewAttemptId = nil
             }
-            if scroll.recordIncoming(isOwnMessage: false) {
-                requestScroll(animated: false)
-            }
+            scroll.markLayoutChange()
+            _ = scroll.recordIncoming(isOwnMessage: false)
 
         case .preview(let attemptId, let text, _, _):
             previewAttemptId = attemptId
             previewText = text
-            if scroll.recordIncoming(isOwnMessage: false) {
-                requestScroll(animated: false)
-            }
+            scroll.markLayoutChange()
+            _ = scroll.recordIncoming(isOwnMessage: false)
 
         case .reasoningPreview(_, let text, _, _):
             reasoningPreviewText = text.isEmpty ? nil : text
@@ -195,6 +165,10 @@ extension ConversationModel {
             // neither owns nor overrides it.
             break
 
+        case .runtimeChanged(let running):
+            authoritativeRunEpoch += 1
+            updateCapabilities(running: running)
+
         case .capabilities(let capabilities):
             // Any capabilities refresh advances the epoch, including an
             // approval-only or same-running update. A Stop submitted just before
@@ -217,6 +191,7 @@ extension ConversationModel {
             restartApprovalTimer()
 
         case .questions(let state):
+            scroll.markLayoutChange()
             applyQuestions(state)
 
         case .commandStatus(let receipt):
@@ -342,7 +317,7 @@ extension ConversationModel {
                 questionReview = nil
                 questionDrafts[batchID] = nil
                 switch questionAnswerState {
-                case .submitted, .uncertain:
+                case .submitting, .submitted, .uncertain:
                     break
                 default:
                     questionErrorKey = .questionsGuardChanged

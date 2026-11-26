@@ -30,6 +30,9 @@ DSH remains authoritative for its sessions. The adapter listens to committed
 normalized Messages, text deltas/resets, Attempt outcomes and state invalidations.
 Native revision/index handling and cumulative/native block completion checks stay
 here. Source-specific fields never require Core or CLI JSON parsing.
+A committed user message can carry the same delivery ID as its send receipt.
+The adapter derives it from the native submission identity and keeps the
+canonical history message ID scoped to the history projection and position.
 
 Archive state is a source fact, not a Session record field. The DSH adapter reads
 the workspace registry's `archivedSessionIds` when it lists Sessions and marks

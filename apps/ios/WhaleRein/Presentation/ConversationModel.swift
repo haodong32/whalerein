@@ -85,31 +85,6 @@ final class ConversationModel {
         set { state.question.loadingTruncated = newValue }
     }
 
-    var historyProvenance: HistoryProvenance? {
-        get { state.historyFacet.provenance }
-        set { state.historyFacet.provenance = newValue }
-    }
-    var isLoadingOlderHistory: Bool {
-        get { state.historyFacet.loading }
-        set { state.historyFacet.loading = newValue }
-    }
-    var historyComplete: Bool {
-        get { state.historyFacet.complete }
-        set { state.historyFacet.complete = newValue }
-    }
-    var historyNeedsFreshTraversal: Bool {
-        get { state.historyFacet.needsFreshTraversal }
-        set { state.historyFacet.needsFreshTraversal = newValue }
-    }
-    var historyErrorKey: L10nKey? {
-        get { state.historyFacet.errorKey }
-        set { state.historyFacet.errorKey = newValue }
-    }
-    var historyPrepend: HistoryFacet.Prepend? {
-        get { state.historyFacet.prepend }
-        set { state.historyFacet.prepend = newValue }
-    }
-
     var previewText: String? {
         get { state.previewFacet.text }
         set { state.previewFacet.text = newValue }
@@ -214,7 +189,10 @@ final class ConversationModel {
     var resolvingApprovalId: String?
     var lastAppliedSequence = -1
     var expandedBlockIds: Set<String> = []
-    var scroll = ScrollAnchorState()
+    var scroll: ScrollAnchorState {
+        get { state.viewport }
+        set { state.viewport = newValue }
+    }
     var scrollRequest: ConversationScrollRequest?
     /// Timestamp used for expiry display. It advances on a timer and on every
     /// server refresh, not by reading `Date()` in the view body.
@@ -227,17 +205,16 @@ final class ConversationModel {
     /// Verified attachment transfers for committed attachment blocks.
     let attachments: AttachmentTransferModel
 
-    var historyContinuation: String?
-    var historyProjection: String?
-    var historySource: HistorySource?
-    var historyGeneration = 0
     var isClosed = false
-    var pagedMessageIds: Set<String> = []
     var liveMessageIds: Set<String> = []
-    let historyPageMessages = 50
-    let historyPageBytes = 256 * 1024
 
-    var draft: String = ""
+    var draft: String = "" {
+        didSet {
+            if oldValue != draft { draftEditID = UUID() }
+        }
+    }
+    var draftEditID = UUID()
+    var clearedDraftBeforeRestore: UUID?
     var delivery: DeliveryChoice = .queue
     /// Storage outcome for the composer draft. The in-memory text always stays
     /// usable; these values tell the user whether it is likely to survive a
@@ -270,13 +247,22 @@ final class ConversationModel {
     }
 
     struct OptimisticMessage {
-        let localId: String
-        let commandId: String
-        let text: String
-        let committedMessageId: String?
+        var commandId: String?
+        var committedMessageId: String?
+        var deliveryId: String?
+        var preservesPosition = false
+        var queuedBehindRun = false
+
+        func matches(_ message: ConversationMessage) -> Bool {
+            if let deliveryId, !deliveryId.isEmpty, let committedDelivery = message.deliveryId {
+                return deliveryId == committedDelivery
+            }
+            return committedMessageId == message.messageId
+        }
     }
 
     let service: any SessionService
+    let historyService: (any ConversationHistoryService)?
     /// App-level authoritative Host status; the conversation never owns a
     /// second connection state of its own.
     let connectivity: HostConnectivityModel
@@ -291,15 +277,19 @@ final class ConversationModel {
     var consumeTask: Task<Void, Never>?
     var consumeGeneration = 0
     let drafts: DraftService
+    let outgoingStore: ConversationOutgoingStore?
+    var outgoingScope: SessionContext { SessionContext(hostId: hostId, sessionId: sessionId) }
     var draftLease: DraftService.Lease?
     var draftSaveTask: Task<Void, Never>?
+    var closeDraftFlushTask: Task<Void, Never>?
     var approvalExpiryTask: Task<Void, Never>?
     var scrollRequestCounter = 0
     var optimisticMessages: [String: OptimisticMessage] = [:]
+    var committedPresentationIDs: [String: String] = [:]
     /// Text submitted with the currently uncertain send. A later confirmation
     /// may only consume the draft that was actually submitted, never a newer
     /// draft the user typed while the response was in flight.
-    var inFlightSendText: String?
+    var inFlightDraftSubmission: DraftService.Submission?
     /// Monotonic epoch for authoritative running/preview state. A Stop receipt
     /// captured before this epoch advanced must not overwrite a newer run.
     var authoritativeRunEpoch = 0
@@ -309,7 +299,7 @@ final class ConversationModel {
     /// Status events for commands whose method response has not arrived yet.
     /// Core can queue `commandStatus` before returning the command view, so the
     /// event may legitimately precede the pending admission.
-    var earlyCommandStatuses: [String: CommandStatus] = [:]
+    var earlyCommandStatuses: [String: CommandReceipt] = [:]
     var earlyCommandStatusOrder: [String] = []
     /// Approvals the Host has confirmed as still pending even though the local
     /// clock says their TTL passed. This is how a fast device clock stops
@@ -329,12 +319,14 @@ final class ConversationModel {
         onFatalError: ((AppErrorCode) -> Void)? = nil,
         onReconnected: (() -> Void)? = nil,
         now: @escaping () -> Date = Date.init,
-        drafts: DraftService? = nil
+        drafts: DraftService? = nil,
+        outgoingStore: ConversationOutgoingStore? = nil
     ) {
         self.hostId = hostId
         self.sessionId = sessionId
         self.sessionTitle = sessionTitle
         self.service = service
+        self.historyService = service as? any ConversationHistoryService
         self.connectivity = connectivity
         self.queue = ConversationQueueController(
             hostId: hostId,
@@ -351,6 +343,7 @@ final class ConversationModel {
         self.onReconnected = onReconnected
         self.now = now
         self.drafts = drafts ?? DraftService(service: service)
+        self.outgoingStore = outgoingStore
         self.attachments = AttachmentTransferModel(
             service: service as? any AttachmentTransferService
         )

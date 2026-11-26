@@ -506,6 +506,7 @@ pub struct MessageView {
     pub role: String,
     pub blocks: Vec<BlockView>,
     pub created_at_unix_ms: i64,
+    pub delivery_id: Option<String>,
 }
 
 impl From<&ConversationMessage> for MessageView {
@@ -526,6 +527,7 @@ pub(crate) fn message_view(message: &ConversationMessage) -> MessageView {
             .map(|block| block_view(&block.block_id, block.content.as_ref()))
             .collect(),
         created_at_unix_ms: message.authored_at_unix_ms,
+        delivery_id: message.delivery_id.clone(),
     }
 }
 
@@ -1074,6 +1076,35 @@ pub struct HostConnectionView {
     pub since_unix_ms: u64,
 }
 
+/// The producer identity attached to a Watch event before it enters the queue.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct WatchEventScope {
+    pub generation: u64,
+    pub host_id: String,
+    pub session_id: String,
+    /// Assigned by Core. Absent when attachment fails before Core opens an observation.
+    pub observation_id: Option<String>,
+}
+
+/// Ordered Watch and independent app events, with their original scope.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct ConversationEventEnvelope {
+    pub scope: Option<WatchEventScope>,
+    pub event: ConversationEvent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum WatchHistoryBaseline {
+    Recent { max_messages: u32, max_bytes: u32 },
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum HistoryContinuityView {
+    Continuous,
+    Replacement,
+}
+
 /// Ordered events produced by a running watch and by pairing.
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum ConversationEvent {
@@ -1087,6 +1118,13 @@ pub enum ConversationEvent {
         approvals: Vec<ApprovalView>,
     },
     HistoryReset,
+    HistorySnapshot {
+        page: HistoryPageView,
+        continuity: HistoryContinuityView,
+    },
+    HistoryUnavailable {
+        code: String,
+    },
     Message {
         message: MessageView,
         /// The Attempt that produced this canonical message, when Core
@@ -1135,6 +1173,7 @@ pub enum ConversationEvent {
         code: Option<String>,
     },
     CommandStatus {
+        session: SessionKeyView,
         command: CommandView,
     },
     ApprovalChanged {
@@ -1563,6 +1602,7 @@ mod tests {
                 content,
             }],
             authored_at_unix_ms: 7,
+            delivery_id: None,
         }
     }
 
@@ -1862,6 +1902,7 @@ mod tests {
             convert_update(&update, &mut seen),
             vec![ConversationEvent::Message {
                 message: MessageView {
+                    delivery_id: None,
                     message_id: "m-1".into(),
                     role: "user".into(),
                     blocks: vec![BlockView {

@@ -231,6 +231,7 @@ struct ConversationMessage: Identifiable, Hashable, Sendable {
     let role: MessageRole
     let blocks: [ConversationBlock]
     let createdAtUnixMs: Int64
+    var deliveryId: String? = nil
 
     var id: String { messageId }
 
@@ -266,7 +267,7 @@ enum HistoryProvenance: String, Codable, Sendable {
     case unavailable
 }
 
-struct ConversationHistoryPage: Sendable {
+struct ConversationHistoryPage: Equatable, Sendable {
     let source: HistorySource
     let projection: String
     let complete: Bool
@@ -550,11 +551,12 @@ enum AttemptOutcome: String, Codable, Sendable {
 }
 
 enum MessageEvent: Sendable {
-    /// A replaced local cache snapshot. The questions facet remains valid.
+    #if DEBUG
+    /// A synthetic transcript used by unit fixtures.
     case reset(messages: [ConversationMessage], approvals: [Approval])
-    /// A fresh Core watch baseline. Cached history is only a seed; the old
-    /// question observation is no longer authoritative.
-    case watchReset(messages: [ConversationMessage], approvals: [Approval])
+    #endif
+    case historySnapshot(ConversationHistoryPage, replacing: Bool)
+    case historyUnavailable(AppErrorCode)
     case message(ConversationMessage)
     case replace(message: ConversationMessage)
     case preview(attemptId: String, text: String, replace: Bool, incomplete: Bool)
@@ -566,6 +568,7 @@ enum MessageEvent: Sendable {
     /// Host-scoped, unscoped connection transition. Delivered with no session
     /// open and never dropped when a watch is replaced.
     case hostConnection(hostId: String, state: String, code: String?, sinceUnixMs: UInt64)
+    case runtimeChanged(running: Bool)
     case capabilities(SessionCapabilities)
     case approvals([Approval])
     case approvalChanged(Approval)
@@ -585,6 +588,13 @@ struct SessionEventEnvelope: Sendable {
     let sessionId: String
     let sequence: Int
     let event: MessageEvent
+    var watchGeneration: UInt64? = nil
+    var observationID: String? = nil
+
+    func belongsToActiveWatch(generation: UInt64?, scope: SessionContext?) -> Bool {
+        guard let watchGeneration else { return true }
+        return generation == watchGeneration && scope == SessionContext(hostId: hostId, sessionId: sessionId)
+    }
 }
 
 // MARK: - Errors

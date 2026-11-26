@@ -63,12 +63,15 @@ struct FixtureScenario: Equatable, Sendable {
     }
 
     var initiallyPaired = false
+    var delaysViewportTransitions = false
     var streamOnOpen = false
     var lateEventLeak = false
     var sendUncertain = false
     /// Echo the committed user message back from the Host with a Core message
     /// id, exercising optimistic-send deduplication.
     var sendEcho = false
+    var replyWithoutUserEcho = false
+    var shortHistoryWithRetry = false
     var approvalVariant: ApprovalVariant = .current
     /// Emit a remote-revocation error after the first watch starts.
     var revokedOnOpen = false

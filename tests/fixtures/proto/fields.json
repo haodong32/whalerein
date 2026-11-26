@@ -1512,6 +1512,13 @@
           "number": 4,
           "repeated": false,
           "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "deliveryId",
+          "name": "delivery_id",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },

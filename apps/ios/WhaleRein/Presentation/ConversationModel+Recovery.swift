@@ -20,7 +20,7 @@ extension ConversationModel {
         defer { isRecoveringOperation = false }
         do {
             let receipt = try await recovery.recoverSend(operationId: operationId, follow: true)
-            applyOperationReceipt(receipt)
+            await applyOperationReceipt(receipt)?.value
         } catch {
             let code = (error as? SessionServiceError)?.code ?? .internalError
             operationErrorKey = L10nKey.errorKey(for: code)
@@ -92,7 +92,7 @@ extension ConversationModel {
                 operationId: candidate.operationId,
                 follow: true
             )
-            applyOperationReceipt(receipt)
+            await applyOperationReceipt(receipt)?.value
         } catch {
             // Leave the original operation listed for the Settings recovery
             // path; a failed startup lookup cannot fabricate a result.
@@ -125,13 +125,14 @@ extension ConversationModel {
         applyOperationReceipt(receipt)
     }
 
-    func applyOperationReceipt(_ receipt: OperationReceipt) {
-        guard receipt.kind == .send else { return }
+    @discardableResult
+    func applyOperationReceipt(_ receipt: OperationReceipt) -> Task<Void, Never>? {
+        guard receipt.kind == .send else { return nil }
         guard let scope = receipt.scope,
               scope.hostId == hostId,
               scope.sessionId == sessionId else {
             operationErrorKey = .errorOperationScope
-            return
+            return nil
         }
         operationResult = receipt
         operationErrorKey = nil
@@ -143,12 +144,11 @@ extension ConversationModel {
         } else if receipt.content != nil {
             operationReadErrorKey = nil
         }
-        if receipt.status == .confirmed || receipt.status == .failed {
-            if let commandReceipt = receipt.receipt {
-                settleUncertainCommand(with: commandReceipt)
-            }
-            inFlightSendText = nil
+        if receipt.status == .confirmed || receipt.status == .failed,
+           let commandReceipt = receipt.receipt {
+            return settleUncertainCommand(with: commandReceipt)
         }
+        return nil
     }
 
     /// Deduplicates committed messages by stable identity, including a recovered
@@ -160,11 +160,7 @@ extension ConversationModel {
             }
             return
         }
-        let echoIndex = message.role == .user ? reconcileUserEcho(message) : nil
-        if let echoIndex {
-            state.messages.insert(message, at: min(echoIndex, state.messages.count))
-        } else {
-            state.messages.append(message)
-        }
+        let insertion = reconcileUserEcho(message) ?? state.messages.endIndex
+        state.messages.insert(message, at: insertion)
     }
 }

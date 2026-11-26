@@ -105,10 +105,12 @@ export class DshHistory {
   // Fixed-cut token. `cut` is inclusive: every page for this traversal only
   // observes events at or below it even while the source keeps appending.
   #cut(sessionId,view,cutSeq) { return token([sessionId,view,'cut',cutSeq]) }
-  #parseCut(value,sessionId,view) {
+  #pageCut(value,sessionId,view) {
     const parsed=decodeToken(value)
-    if(!Array.isArray(parsed)||parsed.length!==4||parsed[0]!==sessionId||parsed[1]!==view||parsed[2]!=='cut'||!Number.isSafeInteger(parsed[3])||parsed[3]<-1)throw new AdapterError('snapshot_required','history cut changed')
-    return parsed[3]
+    if(!Array.isArray(parsed)||token(parsed)!==value||parsed[0]!==sessionId||parsed[1]!==view)throw new AdapterError('snapshot_required','history cut changed')
+    const position=parsed.length===3 ? parsed[2] : (parsed.length===4&&parsed[2]==='cut' ? parsed[3] : undefined)
+    if(!Number.isSafeInteger(position)||position < -1)throw new AdapterError('snapshot_required','history cut changed')
+    return position
   }
   // Continuation position. `before` is exclusive: the next page observes events
   // with seq < before. This is the value Core returns as page.before_cursor.
@@ -204,38 +206,21 @@ export class DshHistory {
   // the full log per read.
   async #readPage(sessionId,read,{signal}) {
     const beforeToken=read.page?.before_cursor
-    let viewId,cutSeq,beforeStart
+    const requestedCut=read.cut_cursor || ''
+    const view=await this.ensureView(sessionId,{signal})
+    const viewId=view.id
+    let cutSeq=view.head,beforeStart
     if(typeof beforeToken==='string'&&beforeToken!=='') {
       const parsed=this.#parseBoundary(beforeToken,sessionId)
-      viewId=parsed.view;cutSeq=parsed.cutSeq;beforeStart=parsed.before
-      const current=this.#views.get(sessionId)
-      if(current&&current.id!==viewId)throw new AdapterError('snapshot_required','history projection changed')
-      if(!current) {
-        const view=await this.ensureView(sessionId,{signal})
-        if(view.id!==viewId)throw new AdapterError('snapshot_required','history projection changed')
-      }
-      if(read.cut_cursor!==undefined&&read.cut_cursor!=='') {
-        const cut=this.#parseCut(read.cut_cursor,sessionId,viewId)
-        if(cut!==cutSeq)throw new AdapterError('snapshot_required','history cut changed')
-      }
-    } else if(read.cut_cursor!==undefined&&read.cut_cursor!=='') {
-      // A first page may pin an already-established cut explicitly (for
-      // example a bounded retry). The token still binds scope, view and cut.
-      const parsed=decodeToken(read.cut_cursor)
-      if(!Array.isArray(parsed)||parsed.length!==4||parsed[0]!==sessionId||parsed[2]!=='cut'||!Number.isSafeInteger(parsed[3])||parsed[3]<-1)throw new AdapterError('snapshot_required','history cut invalid')
-      viewId=parsed[1];cutSeq=parsed[3];beforeStart=undefined
-      const current=this.#views.get(sessionId)
-      if(current&&current.id!==viewId)throw new AdapterError('snapshot_required','history projection changed')
-      if(!current) {
-        const view=await this.ensureView(sessionId,{signal})
-        if(view.id!==viewId)throw new AdapterError('snapshot_required','history projection changed')
-      }
-    } else {
-      const head=await this.source.nativeHead(sessionId,{signal})
-      if(signal?.aborted)throw new AdapterError('unavailable')
-      const view=this.#view(sessionId,head,true)
-      viewId=view.id;cutSeq=head;beforeStart=undefined
+      if(parsed.view!==viewId)throw new AdapterError('snapshot_required','history projection changed')
+      cutSeq=parsed.cutSeq;beforeStart=parsed.before
     }
+    if(requestedCut) {
+      const position=this.#pageCut(requestedCut,sessionId,viewId)
+      if(beforeStart!==undefined&&position!==cutSeq)throw new AdapterError('snapshot_required','history cut changed')
+      cutSeq=position
+    }
+    if(cutSeq>view.head)throw new AdapterError('snapshot_required','source range unavailable')
     const limit=Math.max(1,Math.min(read.max_messages||100,MAX_PAGE_MESSAGES))
     const budget=Math.max(1024,Math.min(read.max_bytes||256*1024,MAX_PAGE_BYTES))
     const collected=[] // newest-first canonical messages
@@ -295,7 +280,10 @@ export class DshHistory {
     } else {
       boundary=Number.isSafeInteger(before)?before:(Number.isSafeInteger(oldestIncluded)?oldestIncluded:cutSeq+1)
     }
-    const cutToken=this.#cut(sessionId,viewId,cutSeq)
+    if(this.#views.get(sessionId)?.id!==viewId)throw new AdapterError('snapshot_required','history projection changed')
+    // Echo the validated requested token, including a Watch head, so Core
+    // can verify the fixed cut without decoding an adapter position.
+    const cutToken=requestedCut||this.#cut(sessionId,viewId,cutSeq)
     // A complete, empty page may legitimately have no older position; use the
     // cut token so the batch is still well formed and never looks like a
     // non-progressing continuation.

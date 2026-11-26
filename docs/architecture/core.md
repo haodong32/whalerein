@@ -160,15 +160,24 @@ never acquires a native answer claim.
 Watching subscribes MQTT before registering a source Watch and synchronizing its
 fixed history cut. A bounded background pump continues processing control and
 query traffic while HTTPS object reads run. Channel/watch replacement rejects
-old updates. The observation is bound to the authenticated Broker connection
+old updates. A paged Conversation observer requests a bounded recent window
+at the registered Watch head. The Source validates and echoes that opaque cut
+using the existing `HistoryRead` fields. An observation publishes the typed
+history snapshot with its provenance and continuity disposition. Its forward
+position belongs to the observation, while the older-page continuation belongs
+to the reader. Recent cache coverage is persisted separately from the full
+history synchronization position.
+
+The observation is bound to the authenticated Broker connection
 reference and observation generation, not to a renewable lease. Every five
 seconds Core issues one read-only `CheckVersions{session_id}` query per actively
 observed Host, with at most one check in flight; Host coalesces overlapping
 checks by session and facet and returns `VersionChecks`. A lost final
 notification is therefore repaired from authoritative markers without
 subsequent event traffic, and the check never extends the observation.
-A cold-cache snapshot is committed locally without being reported as new output;
-only changes after the synchronized cut and later live updates are delivered.
+For the comprehensive CLI observation, a cold-cache snapshot is committed
+locally without being reported as new output.
+Changes after the synchronized cut and later live updates are delivered.
 A one-shot `session watch` forces a fresh snapshot and reports the complete
 committed count even when the cursor is current.
 A reconnect or a `BatchOutcome::Gap` recovers the missed committed messages and

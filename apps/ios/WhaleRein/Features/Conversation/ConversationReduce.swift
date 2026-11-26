@@ -12,13 +12,8 @@ enum ConversationAction: Equatable, Sendable {
     case loadStarted
     case loadFailed(AppErrorCode)
     case contentLoaded
-    case snapshot(messages: [ConversationMessage], approvals: [Approval])
     case watchEnded
     case capabilitiesLoaded(SessionCapabilities)
-
-    // Content
-    case messageReceived(ConversationMessage, provenance: ContentProvenance)
-    case messageReplaced(ConversationMessage)
 
     // Commands
     case sendSubmitted(PendingCommand)
@@ -50,11 +45,9 @@ enum ConversationAction: Equatable, Sendable {
     case approvalRejected(AppErrorCode)
 
     // History
-    case historyUnavailable
-    case historyCachedOnly
-    case historyLoaded(complete: Bool)
-    case historyLoadingMore
-    case historyFailed(AppErrorCode)
+    case olderHistoryStarted
+    case olderHistoryFinished
+    case historyTraversalInvalidated
 }
 
 enum ConversationReduce {
@@ -76,20 +69,6 @@ enum ConversationReduce {
             state.isLoaded = true
             state.isLoading = false
 
-        case .snapshot(let messages, let approvals):
-            state.messages = messages
-            state.isLoaded = true
-            state.isLoading = false
-            state.loadError = nil
-            state.provenance = .confirmed
-            state.watch.ended = false
-            // A pending approval that is no longer reported has been decided
-            // elsewhere; the screen must not keep acting on it.
-            if let current = state.approval.approval,
-               !approvals.contains(where: { $0.id == current.id }) {
-                state.approval = .none
-            }
-
         case .watchEnded:
             state.watch.ended = true
 
@@ -97,24 +76,6 @@ enum ConversationReduce {
             state.capabilities = capabilities
             if !capabilities.supportsQueueRead {
                 state.queue = .unavailable
-            }
-            if !capabilities.supportsHistoryPage {
-                state.history = .unavailable
-            }
-
-        case .messageReceived(let message, let provenance):
-            if let index = state.messages.firstIndex(where: { $0.messageId == message.messageId }) {
-                state.messages[index] = message
-            } else {
-                state.messages.append(message)
-            }
-            state.provenance = provenance
-
-        case .messageReplaced(let message):
-            if let index = state.messages.firstIndex(where: { $0.messageId == message.messageId }) {
-                state.messages[index] = message
-            } else {
-                state.messages.append(message)
             }
 
         case .sendSubmitted(let command), .stopSubmitted(let command):
@@ -201,21 +162,24 @@ enum ConversationReduce {
             // A rejected decision returns the card to actionable, not to stale.
             state.approval = .pending(approval)
 
-        case .historyUnavailable:
-            state.history = .unavailable
+        case .olderHistoryStarted:
+            guard state.historyFacet.continuation != nil,
+                  !state.historyFacet.loading, !state.historyFacet.needsFreshTraversal else { break }
+            state.historyFacet.loading = true
+            state.historyFacet.errorKey = nil
+            state.viewport.markLayoutChange()
 
-        case .historyCachedOnly:
-            state.history = .cachedOnly
+        case .olderHistoryFinished:
+            state.historyFacet.loading = false
+            state.viewport.markLayoutChange()
 
-        case .historyLoaded(let complete):
-            state.history = .idle(complete: complete)
-
-        case .historyLoadingMore:
-            guard case .idle = state.history else { break }
-            state.history = .loadingMore
-
-        case .historyFailed(let code):
-            state.history = .failed(code)
+        case .historyTraversalInvalidated:
+            state.historyFacet.traversal &+= 1
+            state.historyFacet.loading = false
+            state.historyFacet.continuation = nil
+            state.historyFacet.baselineContinuation = nil
+            state.historyFacet.needsFreshTraversal = false
+            state.historyFacet.awaitsOnlineReplacement = false
         }
         return state
     }

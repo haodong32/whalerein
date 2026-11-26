@@ -3429,6 +3429,7 @@ mod session_observation_cli_tests {
                     })),
                 }],
                 authored_at_unix_ms: 1,
+                delivery_id: None,
             },
             origin: Some(attempt()),
             preview_prefix: None,
@@ -3614,6 +3615,7 @@ mod history_send_cli_tests {
             role: role as i32,
             blocks,
             authored_at_unix_ms: 1,
+            delivery_id: String::new(),
         }
     }
 

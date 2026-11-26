@@ -1148,7 +1148,7 @@ impl Cache {
         }
         let conn = self.conn.lock().expect("cache mutex");
         conn.execute_batch(
-            "DELETE FROM sessions; DELETE FROM commands; DELETE FROM hosts; DELETE FROM history_receipts; DELETE FROM conversation_views; DELETE FROM conversation_messages; DELETE FROM conversation_stages; DELETE FROM conversation_stage_messages; DELETE FROM drafts;
+            "DELETE FROM sessions; DELETE FROM commands; DELETE FROM hosts; DELETE FROM history_receipts; DELETE FROM conversation_views; DELETE FROM conversation_messages; DELETE FROM conversation_stages; DELETE FROM conversation_stage_messages; DELETE FROM conversation_recent; DELETE FROM drafts;
              UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='cache_generation';",
         )?;
         #[cfg(test)]

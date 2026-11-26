@@ -17,10 +17,24 @@ extension FixtureSessionService: ConversationHistoryService {
         guard FixtureCatalog.sessions(hostId: hostId).contains(where: { $0.sessionId == sessionId }) else {
             throw SessionServiceError(.unavailable)
         }
-        let all = messages(for: hostId, sessionId: sessionId)
-        let pageSize = max(1, min(maxMessages, 50))
+        let all = options.shortHistoryWithRetry
+            ? (1...3).map { index in
+                ConversationMessage(
+                    messageId: "short-\(index)", role: .assistant,
+                    blocks: [ConversationBlock(blockId: "short-text-\(index)", kind: .text, text: "Fixture row \(index)")],
+                    createdAtUnixMs: Int64(index)
+                )
+            }
+            : messages(for: hostId, sessionId: sessionId)
+        let pageSize = options.shortHistoryWithRetry ? 1 : max(1, min(maxMessages, 50))
         let end: Int
         if let continuation {
+            if options.shortHistoryWithRetry && !didFailOlderFixturePage {
+                didFailOlderFixturePage = true
+                throw SessionServiceError(.timeout)
+            }
+            await delayViewportTransition(for: .seconds(12))
+            try Task.checkCancellation()
             guard let parsed = Self.parseContinuation(continuation) else {
                 throw SessionServiceError(.staleHistory)
             }

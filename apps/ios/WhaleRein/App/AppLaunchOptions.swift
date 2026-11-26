@@ -30,6 +30,7 @@ struct LaunchOptions: Sendable {
     var serviceMode: ServiceMode = .live
     var resetState = false
     var seedPairedFixture = false
+    var delaysViewportTransitions = false
     var largeText = false
     var streamOnOpen = false
     var lateEventLeak = false
@@ -37,6 +38,8 @@ struct LaunchOptions: Sendable {
     /// Echo the committed user message back from the Host with a Core message
     /// id, exercising optimistic-send deduplication.
     var sendEcho = false
+    var replyWithoutUserEcho = false
+    var shortHistoryWithRetry = false
     var approvalVariant: FixtureApprovalVariant = .current
     var staging = false
     /// Emit a remote-revocation error after the first watch starts.
@@ -105,11 +108,14 @@ struct LaunchOptions: Sendable {
         }
         self.resetState = launch.resetState
         self.seedPairedFixture = fixture.initiallyPaired
+        self.delaysViewportTransitions = fixture.delaysViewportTransitions
         self.largeText = scenario.presentation.accessibilityTextSize
         self.streamOnOpen = fixture.streamOnOpen
         self.lateEventLeak = fixture.lateEventLeak
         self.sendUncertain = fixture.sendUncertain
         self.sendEcho = fixture.sendEcho
+        self.replyWithoutUserEcho = fixture.replyWithoutUserEcho
+        self.shortHistoryWithRetry = fixture.shortHistoryWithRetry
         self.approvalVariant = switch fixture.approvalVariant {
         case .current: .current
         case .expired: .expired
