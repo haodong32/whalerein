@@ -203,27 +203,16 @@ def facts_document(
                 "outputs": outputs,
                 "observation": {
                     "started_ms": 0,
-                    "ended_ms": final_ms
-                    + 100
-                    + bench_request.observation_window_ms
-                    + text_shift,
+                    "ended_ms": final_ms + 100 + bench_request.observation_window_ms + text_shift,
                     "cutoff_ms": min(
                         bench_request.deadline_ms,
-                        final_ms
-                        + 100
-                        + bench_request.observation_window_ms
-                        + text_shift,
+                        final_ms + 100 + bench_request.observation_window_ms + text_shift,
                     ),
                     "started_ns": 1_000_000_000,
                     "ended_ns": 1_000_000_000
                     + int(
                         round(
-                            (
-                                final_ms
-                                + 100
-                                + bench_request.observation_window_ms
-                                + text_shift
-                            )
+                            (final_ms + 100 + bench_request.observation_window_ms + text_shift)
                             * 1_000_000
                         )
                     ),
@@ -232,12 +221,7 @@ def facts_document(
                         int(round(bench_request.deadline_ms * 1_000_000)),
                         int(
                             round(
-                                (
-                                    final_ms
-                                    + 100
-                                    + bench_request.observation_window_ms
-                                    + text_shift
-                                )
+                                (final_ms + 100 + bench_request.observation_window_ms + text_shift)
                                 * 1_000_000
                             )
                         ),
@@ -374,16 +358,12 @@ def test_slot_plan_is_persisted_before_startup_and_private(tmp_path):
         captured["mode"] = source.stat().st_mode & 0o777
         env_file = Path(args[args.index("--env-file") + 1])
         captured["env"] = dict(
-            line.split("=", 1)
-            for line in env_file.read_text().splitlines()
-            if "=" in line
+            line.split("=", 1) for line in env_file.read_text().splitlines() if "=" in line
         )
         captured["env_mode"] = env_file.stat().st_mode & 0o777
         captured["argv"] = " ".join(args)
         captured["env_args"] = [
-            part.split("=", 1)[1].split("=", 1)[0]
-            for part in args
-            if part.startswith("WHALEREIN_")
+            part.split("=", 1)[1].split("=", 1)[0] for part in args if part.startswith("WHALEREIN_")
         ]
         captured["env_values"] = {
             part.split("=", 1)[0]: part.split("=", 1)[1]
@@ -458,9 +438,7 @@ def test_defaults_are_thirty_measured_four_warmup_and_zero_warmup_is_valid():
 
 # latency/AC-09.setup-failure
 def test_slot_accounting_six_successes_one_setup_failure_and_23_unstarted(tmp_path):
-    docker = Docker(
-        facts_document(request(attempts=30, warmup=0), completed=6, setup_failed=1)
-    )
+    docker = Docker(facts_document(request(attempts=30, warmup=0), completed=6, setup_failed=1))
     result = run(tmp_path, docker, attempts=30, warmup=0)
     assert result.exit_code == 1
     saved = json.loads(result.path.read_text())
@@ -631,8 +609,14 @@ def test_trace_mode_merges_the_typed_event_sidecar(tmp_path, monkeypatch):
             "seq": 1,
             "ts": 1_000_000_000,
             "event": "fixture_observe",
-            "data": {"attempt": "attempt-0000", "ordinal": 1, "kind": "preview",
-                     "bytes": 1, "prefix_bytes": 1, "correct": True},
+            "data": {
+                "attempt": "attempt-0000",
+                "ordinal": 1,
+                "kind": "preview",
+                "bytes": 1,
+                "prefix_bytes": 1,
+                "correct": True,
+            },
         }
     ]
     seen = {}
@@ -696,9 +680,7 @@ def test_matrix_interruption_keeps_pending_cases_and_partial_facts(tmp_path, mon
     def fake_run(root, docker, scenario, directory, *, prepared=None):
         calls["count"] += 1
         directory.mkdir(parents=True)
-        document = current_report(
-            runner.BenchRequest(attempts=2, warmup=0), completed=0
-        )
+        document = current_report(runner.BenchRequest(attempts=2, warmup=0), completed=0)
         path = directory / "benchmark.json"
         path.write_text(json.dumps(document))
         if calls["count"] == 2:

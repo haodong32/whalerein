@@ -116,7 +116,9 @@ class Run:
                 ROOT / "contracts/latency/observation.json"
             )
             self.outlet = outlet_module.Outlet(
-                path=str(REPORTS / "outlet" / f"fixture-{self.fixture_lifetime}.ndjson"),
+                path=str(
+                    REPORTS / "outlet" / f"fixture-{self.fixture_lifetime}.ndjson"
+                ),
                 run_id=self.capture.run_id,
                 producer="fixture",
                 lifetime=self.fixture_lifetime,
@@ -219,7 +221,9 @@ def publish_plan(run):
             schedule=run.schedule,
             attempts=[],
             trace=facts.trace_block(mode=MODE),
-            status=facts.status_block(state="incomplete", reasons=["planned_not_started"]),
+            status=facts.status_block(
+                state="incomplete", reasons=["planned_not_started"]
+            ),
         )
         facts.publish(REPORTS / "benchmark.json", document)
     except OSError:
@@ -258,7 +262,9 @@ class Fixture:
         # of the CLI's public endpoints use its separate address, including
         # HTTP recovery when MQTT delivery is disrupted.
         config = self.scenario.config.read_text()
-        config = config.replace('listen: "127.0.0.1:18080"', 'listen: "0.0.0.0:18080"', 1)
+        config = config.replace(
+            'listen: "127.0.0.1:18080"', 'listen: "0.0.0.0:18080"', 1
+        )
         config = config.replace(
             'public_url: "http://127.0.0.1:18080"',
             f'public_url: "http://{network.CLIENT_ADDRESS}:18080"',
@@ -271,7 +277,9 @@ class Fixture:
         )
         self.scenario.config.write_text(config)
         self.scenario.configure_relay_directory(
-            max_objects=1024, max_active_uploads=32, max_host_bytes=512 << 20,
+            max_objects=1024,
+            max_active_uploads=32,
+            max_host_bytes=512 << 20,
             max_node_bytes=1 << 30,
         )
         self.run.session = self.scenario
@@ -296,7 +304,9 @@ class Fixture:
         self.start_broker()
         self.run.network_probe = network.probe()
         if not model.link_probe_matches(self.run.network_probe, NETWORK):
-            raise RuntimeError("TCP RTT probes did not match the selected network link and profile")
+            raise RuntimeError(
+                "TCP RTT probes did not match the selected network link and profile"
+            )
         self.scenario.start_access(wildcard=True)
         self.register(
             "access",
@@ -329,9 +339,18 @@ class Fixture:
         entry = self.run.clock.register(
             producer, pid=pid, reading=int(value), before_ns=before_ns
         )
-        if outlet is not None and entry.get("verified") and entry.get("reason") == "membership_only":
+        if (
+            outlet is not None
+            and entry.get("verified")
+            and entry.get("reason") == "membership_only"
+        ):
             self.run.pending_clocks.append(
-                {"entry": entry, "outlet": outlet, "before_ns": before_ns, "after_ns": None}
+                {
+                    "entry": entry,
+                    "outlet": outlet,
+                    "before_ns": before_ns,
+                    "after_ns": None,
+                }
             )
         self.run.emit(
             "fixture_clock_check",
@@ -388,7 +407,9 @@ class Fixture:
         directory.chmod(0o755)
         data = directory / "data"
         data.mkdir(exist_ok=True)
-        subprocess.run(["chown", "postgres:postgres", str(data)], check=True, timeout=10)
+        subprocess.run(
+            ["chown", "postgres:postgres", str(data)], check=True, timeout=10
+        )
         prefix = ["runuser", "-u", "postgres", "--"]
         result = subprocess.run(
             [
@@ -438,7 +459,13 @@ class Fixture:
         )
         subprocess.run(
             [
-                "createdb", "-h", "127.0.0.1", "-p", "55432", "-U", "postgres",
+                "createdb",
+                "-h",
+                "127.0.0.1",
+                "-p",
+                "55432",
+                "-U",
+                "postgres",
                 "whalerein_test",
             ],
             check=True,
@@ -493,7 +520,9 @@ class Fixture:
         )
 
         def broker_ready():
-            with socket.create_connection((network.BROKER_ADDRESS, network.BROKER_PORT), timeout=1):
+            with socket.create_connection(
+                (network.BROKER_ADDRESS, network.BROKER_PORT), timeout=1
+            ):
                 return True
 
         wait(broker_ready, timeout=120, process=self.broker)
@@ -502,8 +531,17 @@ class Fixture:
 def sql(statement):
     result = subprocess.run(
         [
-            "psql", "-h", "127.0.0.1", "-p", "55432", "-U", "postgres",
-            "-d", "whalerein_test", "-c", statement,
+            "psql",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            "55432",
+            "-U",
+            "postgres",
+            "-d",
+            "whalerein_test",
+            "-c",
+            statement,
         ],
         capture_output=True,
         text=True,
@@ -540,7 +578,9 @@ def execute(run, fixture):
 def pair_device(scenario, name, keyring):
     device = CutoverClient(scenario.directory, name, keyring)
     invite = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
-    device.call("host", "connect", "--invite-stdin", "--yes", input_text=invite["pairingUri"])
+    device.call(
+        "host", "connect", "--invite-stdin", "--yes", input_text=invite["pairingUri"]
+    )
     return device
 
 
@@ -552,7 +592,9 @@ def prepare_history_reads(scenario, keyring, specification):
     """
     return [
         workflow.prepare_history(
-            scenario, pair_device(scenario, f"history-reader-{index}", keyring), specification
+            scenario,
+            pair_device(scenario, f"history-reader-{index}", keyring),
+            specification,
         )
         for index, _ in enumerate(specification.get("start_ms") or [])
     ]
@@ -592,7 +634,11 @@ def record_slot(run, fixture, slot, keyring, history, attachment):
         wait(observer.ready, timeout=120, process=observer.process)
         observer.arm()
         run.emit(
-            "fixture_slot", slot=index, phase=phase, arm=arm, pair=pair_id,
+            "fixture_slot",
+            slot=index,
+            phase=phase,
+            arm=arm,
+            pair=pair_id,
             state="measurement_entered",
         )
         attempted["entered"] = True
@@ -602,22 +648,36 @@ def record_slot(run, fixture, slot, keyring, history, attachment):
             measured = measure_recovery(run, fixture, observer, planned_start, stream)
         elif history and arm == "bulk":
             measured = measure_reads(
-                run, observer, fixture.scenario, planned_start, session, stream,
-                history, attachment,
+                run,
+                observer,
+                fixture.scenario,
+                planned_start,
+                session,
+                stream,
+                history,
+                attachment,
             )
         else:
             measured = measure_watch(run, observer, planned_start, stream)
         apply_measurement(run, attempted, measured)
         attempted["status"] = "finished"
         run.emit(
-            "fixture_slot", slot=index, phase=phase, arm=arm, pair=pair_id,
+            "fixture_slot",
+            slot=index,
+            phase=phase,
+            arm=arm,
+            pair=pair_id,
             state="finished",
         )
     except KeyboardInterrupt:
         attempted["status"] = "interrupted"
         attempted["failure"] = {"attribution": "fixture", "reason": "run_interrupted"}
         run.emit(
-            "fixture_slot", slot=index, phase=phase, arm=arm, pair=pair_id,
+            "fixture_slot",
+            slot=index,
+            phase=phase,
+            arm=arm,
+            pair=pair_id,
             state="interrupted",
         )
         append_attempt(run, slot, attempted)
@@ -629,7 +689,9 @@ def record_slot(run, fixture, slot, keyring, history, attachment):
             "attribution": "fixture",
             "reason": stable_reason(error),
         }
-        attempted["setup_errors"] = [] if attempted["entered"] else [stable_reason(error)]
+        attempted["setup_errors"] = (
+            [] if attempted["entered"] else [stable_reason(error)]
+        )
         run.emit(
             "fixture_slot", slot=index, phase=phase, arm=arm, pair=pair_id, state=status
         )
@@ -651,7 +713,9 @@ def append_attempt(run, slot, attempted):
             cutoff_ns=attempted.get("origin_ns", clock_module.monotonic_ns()),
             origin_ns=attempted.get("origin_ns", clock_module.monotonic_ns()),
             origin=attempted.get("origin", source_module.FIRST_EMISSION),
-            early_stop="interrupted" if attempted["status"] == "interrupted" else "error",
+            early_stop="interrupted"
+            if attempted["status"] == "interrupted"
+            else "error",
         )
     fact = facts.attempt(
         slot=slot["slot"],
@@ -690,33 +754,40 @@ def measure_watch(run, observer, planned_start, stream):
     }
 
 
-def measure_reads(run, observer, scenario, planned_start, session, stream, history, attachment):
+def measure_reads(
+    run, observer, scenario, planned_start, session, stream, history, attachment
+):
     history_offsets = (CONTROLS.get("history") or {}).get("start_ms", [])
     attachment_offsets = (CONTROLS.get("attachment") or {}).get("start_ms", [])
     readers = len(history_offsets) + len(attachment_offsets)
     reads = []
     with ThreadPoolExecutor(max_workers=max(1, readers)) as executor:
+
         def spawn(pid):
             run.clock.register("cli", pid=pid)
 
         def read_environment(op):
-            return run.capture.environment(
-                "cli", f"{op}-{uuid.uuid4().hex[:16]}"
-            )
+            return run.capture.environment("cli", f"{op}-{uuid.uuid4().hex[:16]}")
 
         if len(history) != len(history_offsets):
             raise RuntimeError("history reader plan does not match its schedule")
         history_futures = [
             executor.submit(
-                reader.read, planned_start + offset * 1_000_000, DEADLINE_MS,
-                environment=read_environment("history"), on_spawn=spawn,
+                reader.read,
+                planned_start + offset * 1_000_000,
+                DEADLINE_MS,
+                environment=read_environment("history"),
+                on_spawn=spawn,
             )
             for reader, offset in zip(history, history_offsets, strict=True)
         ]
         attachment_futures = [
             executor.submit(
-                attachment.read, planned_start + offset * 1_000_000, DEADLINE_MS,
-                environment=read_environment("attachment"), on_spawn=spawn,
+                attachment.read,
+                planned_start + offset * 1_000_000,
+                DEADLINE_MS,
+                environment=read_environment("attachment"),
+                on_spawn=spawn,
             )
             for offset in attachment_offsets
         ]
@@ -784,7 +855,9 @@ def apply_measurement(run, attempted, measured):
     origin_ns = measured["origin_ns"]
     ended_ns = measured["ended_ns"]
     emitted_sizes = SOURCE_SIZES[: len(measured["emissions_ns"])]
-    times = source_module.source_series(measured["emissions_ns"], emitted_sizes, origin_ns)
+    times = source_module.source_series(
+        measured["emissions_ns"], emitted_sizes, origin_ns
+    )
     attempted["source"] = times
     raw_outputs = measured["outputs"]
     outputs = []
@@ -900,7 +973,8 @@ def relative_read(observation, origin_ns, op):
         "bytes_expected": int(observation.get("bytes_expected") or 0),
         "bytes_verified": int(observation.get("bytes_verified") or 0),
         "physical_bytes": int(observation.get("physical_bytes") or 0),
-        "route": observation.get("route") or ("reference" if op == "attachment" else "inline"),
+        "route": observation.get("route")
+        or ("reference" if op == "attachment" else "inline"),
         "outcome": observation.get("outcome") or "product_error",
         "verified": bool(observation.get("verified")),
         "token_repeats": int(observation.get("token_repeats") or 0),
@@ -960,7 +1034,12 @@ class Observer:
         }
         self.process = Process(
             device.args(
-                "session", "watch", session, "--host", self.host, "--timeout",
+                "session",
+                "watch",
+                session,
+                "--host",
+                self.host,
+                "--timeout",
                 str(int(DEADLINE_MS / 1000) + 60),
             ),
             scenario.directory,
@@ -1012,11 +1091,15 @@ class Observer:
                 value = json.loads(line)
             except ValueError:
                 continue
-            if value.get("schema") != "whalerein/client/v1" or value.get("command") != "session.watch":
+            if (
+                value.get("schema") != "whalerein/client/v1"
+                or value.get("command") != "session.watch"
+            ):
                 continue
             event = value.get("data", {}).get("event")
             if not isinstance(event, dict) or event.get("session") != {
-                "host_id": self.host, "session_id": self.session
+                "host_id": self.host,
+                "session_id": self.session,
             }:
                 continue
             if event.get("type") == "state":
@@ -1053,7 +1136,9 @@ class Observer:
             self.record(at_ns, "reset", 0, 0, True, "text-0")
         elif kind == "message":
             origin = event.get("origin") or {}
-            if event.get("role") != "ASSISTANT" or (origin and origin.get("attempt_id") != self.stream):
+            if event.get("role") != "ASSISTANT" or (
+                origin and origin.get("attempt_id") != self.stream
+            ):
                 return
             content = workflow.text_of(event)
             correct = content == FINAL_TEXT
@@ -1096,13 +1181,18 @@ class Observer:
 
     def settle(self, planned_start):
         """Observe through the terminal window or the horizon."""
-        horizon = planned_start + (
-            DEADLINE_MS + OBSERVATION_WINDOW_MS + SOURCE_START_ALLOWANCE_MS
-        ) * 1_000_000
+        horizon = (
+            planned_start
+            + (DEADLINE_MS + OBSERVATION_WINDOW_MS + SOURCE_START_ALLOWANCE_MS)
+            * 1_000_000
+        )
         early_stop = "deadline"
         while clock_module.monotonic_ns() < horizon:
             now = clock_module.monotonic_ns()
-            if self.terminal_ns is not None and now >= self.terminal_ns + OBSERVATION_WINDOW_MS * 1_000_000:
+            if (
+                self.terminal_ns is not None
+                and now >= self.terminal_ns + OBSERVATION_WINDOW_MS * 1_000_000
+            ):
                 early_stop = "terminal_window"
                 break
             if self.process.child.poll() is not None:
@@ -1192,7 +1282,11 @@ def emit_sampler_events(run):
         state = window["state"]
         if state not in ("sampled", "idle", "unsupported", "replaced", "dropped"):
             state = "sampled"
-        payload = {"role": window["role"], "generation": int(window["generation"]), "state": state}
+        payload = {
+            "role": window["role"],
+            "generation": int(window["generation"]),
+            "state": state,
+        }
         if window.get("rtt_us") is not None:
             payload["rtt_us"] = int(window["rtt_us"])
         if window.get("retransmits") is not None:
@@ -1258,7 +1352,10 @@ def per_attempt_coverage(run, events):
 def document_for(run):
     ensure_all_slots(run)
     reconciliation = slots.reconcile(run.schedule, run.attempts)
-    if not reconciliation["complete"] and "slot_reconciliation_failed" not in run.reasons:
+    if (
+        not reconciliation["complete"]
+        and "slot_reconciliation_failed" not in run.reasons
+    ):
         run.fail("slot_reconciliation_failed")
     sampler_summary = None
     resources = None
@@ -1371,7 +1468,11 @@ def fingerprint_block(run):
             "fingerprint": values.get("cli", "unavailable"),
         },
         "fixture": {"name": "FakeDSH", "fingerprint": run.fixture},
-        "schemas": {"case": facts.SCHEMA_VERSION, "event": 1, "workload": facts.SCENARIO_VERSION},
+        "schemas": {
+            "case": facts.SCHEMA_VERSION,
+            "event": 1,
+            "workload": facts.SCENARIO_VERSION,
+        },
         "platform": {
             "os": platform.system().lower(),
             "arch": platform.machine(),
@@ -1441,8 +1542,10 @@ def source_fingerprint(directories, files):
     paths = {ROOT / name for name in files}
     for folder in directories:
         paths.update(
-            path for path in (ROOT / folder).rglob("*")
-            if path.is_file() and path.suffix in (".js", ".mjs", ".json", ".py")
+            path
+            for path in (ROOT / folder).rglob("*")
+            if path.is_file()
+            and path.suffix in (".js", ".mjs", ".json", ".py")
             and "node_modules" not in path.relative_to(ROOT).parts
         )
     digest = hashlib.sha256()
@@ -1463,7 +1566,11 @@ def fingerprint(path):
 def node_version():
     try:
         return subprocess.run(
-            ["node", "--version"], check=False, capture_output=True, text=True, timeout=10
+            ["node", "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return "unavailable"

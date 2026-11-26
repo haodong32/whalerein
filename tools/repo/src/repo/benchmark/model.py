@@ -330,16 +330,26 @@ _CLI_STAGE = ("invoke", "terminal")
 # and for edge-completeness coverage; the global attribution above remains the
 # bounded aggregate view.
 EDGE_PAIRS = (
-    ("source_to_callback_ms", "fixture_emit", "dsh_callback",
-     ("stream", "block", "seq_start", "seq_end")),
-    ("callback_to_handoff_ms", "dsh_callback", "dsh_handoff",
-     ("stream", "block", "seq_start", "seq_end", "batch")),
-    ("handoff_to_enqueue_ms", "dsh_handoff", "host_enqueue",
-     ("stream", "block", "seq_start", "seq_end", "batch")),
-    ("enqueue_to_publish_ms", "host_enqueue", "host_publish",
-     ("stream", "seq_start", "seq_end")),
-    ("publish_to_receipt_ms", "host_publish", "core_receipt",
-     ("stream", "seq_start", "seq_end")),
+    (
+        "source_to_callback_ms",
+        "fixture_emit",
+        "dsh_callback",
+        ("stream", "block", "seq_start", "seq_end"),
+    ),
+    (
+        "callback_to_handoff_ms",
+        "dsh_callback",
+        "dsh_handoff",
+        ("stream", "block", "seq_start", "seq_end", "batch"),
+    ),
+    (
+        "handoff_to_enqueue_ms",
+        "dsh_handoff",
+        "host_enqueue",
+        ("stream", "block", "seq_start", "seq_end", "batch"),
+    ),
+    ("enqueue_to_publish_ms", "host_enqueue", "host_publish", ("stream", "seq_start", "seq_end")),
+    ("publish_to_receipt_ms", "host_publish", "core_receipt", ("stream", "seq_start", "seq_end")),
     # Core stamps core_dequeue after handling; the delivery therefore precedes
     # it. Join receipt->delivery and keep wait_ns as the queue-wait fact instead
     # of inventing a reversed dequeue->delivery edge.
@@ -614,8 +624,10 @@ def _run(run):
     if not isinstance(fingerprint, dict):
         invalid("run fingerprint is not an object")
     build = fingerprint.get("build")
-    if not isinstance(build, dict) or not text(build.get("revision")) or not text(
-        build.get("fingerprint")
+    if (
+        not isinstance(build, dict)
+        or not text(build.get("revision"))
+        or not text(build.get("fingerprint"))
     ):
         invalid("run fingerprint requires a build identity")
     schemas = fingerprint.get("schemas")
@@ -1296,14 +1308,11 @@ def derive(facts):
         "counts": {name: by_outcome.get(name, 0) for name in OUTCOMES},
         "measured": len(measured),
         "correct_by_deadline": by_outcome.get("completed", 0),
-        "success_share": (
-            by_outcome.get("completed", 0) / len(measured) if measured else None
-        ),
+        "success_share": (by_outcome.get("completed", 0) / len(measured) if measured else None),
         "warmup": {
             "attempts": sum(item["phase"] == "warmup" for item in attempts),
             "completed": sum(
-                item["phase"] == "warmup" and item["outcome"] == "completed"
-                for item in attempts
+                item["phase"] == "warmup" and item["outcome"] == "completed" for item in attempts
             ),
         },
     }
@@ -1364,10 +1373,7 @@ def _clock_quality(clock):
         ],
         "reason": reasons[0] if reasons else None,
         "reasons": reasons,
-        "restarted": len(
-            {(item["producer"], item["lifetime"]) for item in clock["producers"]}
-        )
-        > 1
+        "restarted": len({(item["producer"], item["lifetime"]) for item in clock["producers"]}) > 1
         and len({item["lifetime"] for item in clock["producers"]}) > 1,
     }
 
@@ -1671,9 +1677,7 @@ def _terminal_integrity(outputs, ended, cutoff, window):
         kinds = {event["kind"] for event in violations}
         result["verdict"] = "fail"
         result["reason"] = (
-            "duplicate_terminal"
-            if kinds & {"terminal", "duplicate"}
-            else "post_terminal_output"
+            "duplicate_terminal" if kinds & {"terminal", "duplicate"} else "post_terminal_output"
         )
         return result
     if ended >= window_end:
@@ -1746,9 +1750,7 @@ def _populations(attempts, measured):
         "finished": bucket(finished),
         "on_time_correct": bucket(correct),
         "denominators": {
-            "on_time_correct_over_planned": (
-                len(correct) / denominator if denominator else None
-            ),
+            "on_time_correct_over_planned": (len(correct) / denominator if denominator else None),
             "on_time_correct_over_measurement_entered": (
                 len(correct) / len(measured_entered) if measured_entered else None
             ),
@@ -1769,9 +1771,7 @@ def _populations(attempts, measured):
 
 def _latency(measured, facts):
     first = sorted(
-        float(item["first_text_ms"])
-        for item in measured
-        if item["first_text_ms"] is not None
+        float(item["first_text_ms"]) for item in measured if item["first_text_ms"] is not None
     )
     final = sorted(
         float(item["terminal_ms"])
@@ -1806,8 +1806,7 @@ def _latency(measured, facts):
                         sorted(
                             float(item["terminal_ms"])
                             for item in selected
-                            if item["outcome"] == "completed"
-                            and item["terminal_ms"] is not None
+                            if item["outcome"] == "completed" and item["terminal_ms"] is not None
                         )
                     ),
                 },
@@ -1815,8 +1814,7 @@ def _latency(measured, facts):
         result["arms"] = arms
         if _per_arm_p95(facts["run"]["configuration"]):
             result["per_arm_p95"] = {
-                arm: (entry["samples"]["first_text_ms"]["quantiles"].get("p95"))
-                is not None
+                arm: (entry["samples"]["first_text_ms"]["quantiles"].get("p95")) is not None
                 for arm, entry in arms.items()
             }
     return result
@@ -1827,9 +1825,7 @@ def _outcomes_for_analysis(measured):
     return {
         "measured": len(measured),
         "correct_by_deadline": by_outcome.get("completed", 0),
-        "success_share": (
-            by_outcome.get("completed", 0) / len(measured) if measured else None
-        ),
+        "success_share": (by_outcome.get("completed", 0) / len(measured) if measured else None),
     }
 
 
@@ -1859,28 +1855,22 @@ def _streaming(measured, scenario):
         times = item.get("_source_times")
         if not outputs or times is None:
             continue
-        segments = _segment_values(
-            {"_outputs": outputs, "_source_times": times}, sizes
-        )
+        segments = _segment_values({"_outputs": outputs, "_source_times": times}, sizes)
         rows.append(
             {
                 "max_display_delay_ms": max(segments) if segments else None,
                 "longest_pending_stall_ms": item["longest_pending_stall_ms"],
                 "peak_backlog_bytes": item["peak_backlog_bytes"],
                 "pending_bytes_at_cutoff": item["pending_bytes"],
-                "largest_output_share": max(event["bytes"] for event in outputs)
-                / final_bytes,
+                "largest_output_share": max(event["bytes"] for event in outputs) / final_bytes,
                 "final_output_share": outputs[-1]["bytes"] / final_bytes,
-                "largest_burst_share": _largest_burst(outputs, BURST_WINDOW_MS)
-                / final_bytes,
+                "largest_burst_share": _largest_burst(outputs, BURST_WINDOW_MS) / final_bytes,
                 "zero_preview": len(outputs) == 1,
             }
         )
     result = {}
     for metric in (*STREAMING_METRICS, "largest_output_share", "final_output_share"):
-        values = sorted(
-            float(row[metric]) for row in rows if row.get(metric) is not None
-        )
+        values = sorted(float(row[metric]) for row in rows if row.get(metric) is not None)
         result[metric] = sample_entry(values)
     result["largest_burst_share"] = sample_entry(
         sorted(float(row["largest_burst_share"]) for row in rows)
@@ -1888,6 +1878,7 @@ def _streaming(measured, scenario):
     result["zero_preview"] = sum(row["zero_preview"] for row in rows)
     result["attempts"] = len(rows)
     return result
+
 
 def _diagnostics(measured, scenario):
     sizes = source_sizes(scenario)
@@ -1966,9 +1957,7 @@ def _recovery_summary(measured):
         "catch_up_ms": sample_entry(sorted(catch_ups)),
         "assessable": assessable,
         "terminal_first": counts["terminal_first"],
-        "terminal_first_share": (
-            counts["terminal_first"] / assessable if assessable else None
-        ),
+        "terminal_first_share": (counts["terminal_first"] / assessable if assessable else None),
         "verified_timeouts": counts["verified_timeouts"],
         "already_current": counts["already_current"],
         "never_restored": counts["never_restored"],
@@ -2080,10 +2069,7 @@ def _mixed_summary(attempts, measured, facts):
     exposure["union_ms"] = round(exposure["union_ms"], 3)
     required_ok = all(
         entry["overlapping_reads"] > 0
-        and (
-            required_exposure is None
-            or entry["union_ms"] >= required_exposure
-        )
+        and (required_exposure is None or entry["union_ms"] >= required_exposure)
         for entry in exposure["attempts"]
         if entry["scheduled_reads"]
     )
@@ -2102,9 +2088,11 @@ def _mixed_summary(attempts, measured, facts):
     read_buckets = _read_buckets(rows)
     return {
         "pairs": pairs,
-        "pair_counts": {"pairs": len(pairs), "idle_first": sum(
-            pair["order"] == ["idle", "bulk"] for pair in pairs
-        ), "bulk_first": sum(pair["order"] == ["bulk", "idle"] for pair in pairs)},
+        "pair_counts": {
+            "pairs": len(pairs),
+            "idle_first": sum(pair["order"] == ["idle", "bulk"] for pair in pairs),
+            "bulk_first": sum(pair["order"] == ["bulk", "idle"] for pair in pairs),
+        },
         "deltas": _pair_deltas(pairs),
         "exposure": exposure,
         "reads": read_buckets,
@@ -2156,9 +2144,7 @@ def _pair_delta_values(values):
             continue
         idle = values["idle"].get(metric)
         bulk = values["bulk"].get(metric)
-        deltas[metric] = (
-            round(bulk - idle, 6) if idle is not None and bulk is not None else None
-        )
+        deltas[metric] = round(bulk - idle, 6) if idle is not None and bulk is not None else None
     return deltas
 
 
@@ -2167,14 +2153,11 @@ def _pair_values(item, scenario):
     outputs = item["_outputs"]
     values = {
         "max_display_delay_ms": max(
-            _segment_values(
-                {"_outputs": outputs, "_source_times": item["_source_times"]}, sizes
-            ),
+            _segment_values({"_outputs": outputs, "_source_times": item["_source_times"]}, sizes),
             default=None,
         ),
         "longest_pending_stall_ms": item["longest_pending_stall_ms"],
-        "largest_output_share": max(event["bytes"] for event in outputs)
-        / max(1, sum(sizes)),
+        "largest_output_share": max(event["bytes"] for event in outputs) / max(1, sum(sizes)),
         "final_output_share": outputs[-1]["bytes"] / max(1, sum(sizes)),
     }
     values["max_display_delay_ms"] = (
@@ -2214,17 +2197,10 @@ def _delta_entry(values):
 def _read_buckets(rows):
     buckets = {}
     for arm in ARMS:
-        selected = [
-            read
-            for item in rows
-            if item["arm"] == arm
-            for read in item["reads"]
-        ]
+        selected = [read for item in rows if item["arm"] == arm for read in item["reads"]]
         completed = [read for read in selected if read["outcome"] == "completed"]
         by_op = Counter(read["op"] for read in selected)
-        errors = Counter(
-            read["error_code"] for read in selected if read.get("error_code")
-        )
+        errors = Counter(read["error_code"] for read in selected if read.get("error_code"))
         buckets[arm] = {
             "expected_reads": len(selected),
             "successful_reads": len(completed),
@@ -2287,16 +2263,8 @@ def _pair_events(events, start_name, end_name, fields, *, stage=None):
     starts = [event for event in events if event["event"] == start_name]
     ends = [event for event in events if event["event"] == end_name]
     if stage is not None:
-        starts = [
-            event
-            for event in starts
-            if event["data"].get("stage") == stage[0]
-        ]
-        ends = [
-            event
-            for event in ends
-            if event["data"].get("stage") == stage[1]
-        ]
+        starts = [event for event in starts if event["data"].get("stage") == stage[0]]
+        ends = [event for event in ends if event["data"].get("stage") == stage[1]]
     intervals = []
     unresolved = []
     for start in starts:
@@ -2488,12 +2456,16 @@ def _transport_summary(events):
     )
     return {
         "events": len(selected),
-        "connections": len({
-            event["data"].get("connection") for event in selected
-            if event["data"].get("connection")
-        }),
+        "connections": len(
+            {
+                event["data"].get("connection")
+                for event in selected
+                if event["data"].get("connection")
+            }
+        ),
         "bytes": sum(
-            event["data"].get("bytes", 0) for event in selected
+            event["data"].get("bytes", 0)
+            for event in selected
             if isinstance(event["data"].get("bytes"), int)
         ),
         "counts": [
@@ -2539,11 +2511,7 @@ def _pending_evidence(events, attempt_id, cutoff_ns=None, attempts=()):
 
 def _attempt_attribution(events, attempt_id, attempts=()):
     index = _join_index(events, attempts)
-    relevant = [
-        event
-        for event in events
-        if _event_attempt(event, index) == attempt_id
-    ]
+    relevant = [event for event in events if _event_attempt(event, index) == attempt_id]
     relevant.sort(key=lambda event: event["ts"])
     last = relevant[-1] if relevant else None
     return {
@@ -2577,11 +2545,13 @@ def _pair_edge(events, start_name, end_name, fields):
         key = _edge_key(start, fields)
         if key is None:
             if start_name == "dsh_callback" and start["data"].get("disposition") == "suppressed":
-                unresolved.append({
-                    "name": start_name + "->" + end_name,
-                    "key": [],
-                    "reason": "inapplicable",
-                })
+                unresolved.append(
+                    {
+                        "name": start_name + "->" + end_name,
+                        "key": [],
+                        "reason": "inapplicable",
+                    }
+                )
             continue
         matches = [event for event in ends if _edge_key(event, fields) == key]
         if len(matches) != 1:
@@ -2590,28 +2560,34 @@ def _pair_edge(events, start_name, end_name, fields):
                 reason = "dropped"
             elif start_name == "dsh_callback" and start["data"].get("disposition") == "suppressed":
                 reason = "inapplicable"
-            unresolved.append({
-                "name": start_name + "->" + end_name,
-                "key": list(key),
-                "reason": reason,
-            })
+            unresolved.append(
+                {
+                    "name": start_name + "->" + end_name,
+                    "key": list(key),
+                    "reason": reason,
+                }
+            )
             continue
         end = matches[0]
         if end["ts"] < start["ts"]:
-            unresolved.append({
-                "name": start_name + "->" + end_name,
-                "key": list(key),
-                "reason": "reversed_boundary",
-            })
+            unresolved.append(
+                {
+                    "name": start_name + "->" + end_name,
+                    "key": list(key),
+                    "reason": "reversed_boundary",
+                }
+            )
             continue
-        intervals.append({
-            "name": start_name + "->" + end_name,
-            "start_ns": start["ts"],
-            "end_ns": end["ts"],
-            "duration_ms": round((end["ts"] - start["ts"]) / 1_000_000, 6),
-            "owners": [start["producer"], end["producer"]],
-            "key": list(key),
-        })
+        intervals.append(
+            {
+                "name": start_name + "->" + end_name,
+                "start_ns": start["ts"],
+                "end_ns": end["ts"],
+                "duration_ms": round((end["ts"] - start["ts"]) / 1_000_000, 6),
+                "owners": [start["producer"], end["producer"]],
+                "key": list(key),
+            }
+        )
     return intervals, unresolved
 
 
@@ -2644,7 +2620,8 @@ def _pair_handoff_enqueue(events):
             # increment and has no source predecessor to join.
             continue
         members = [
-            event for event in handoffs
+            event
+            for event in handoffs
             if event["data"].get("stream") == stream
             and event["data"].get("block") == block
             and isinstance(event["data"].get("seq_start"), int)
@@ -2654,22 +2631,26 @@ def _pair_handoff_enqueue(events):
             and event["ts"] <= enqueue["ts"]
         ]
         if not members:
-            unresolved.append({
-                "name": "handoff_to_enqueue_ms",
-                "key": [stream, block, start, end],
-                "reason": "missing_boundary",
-            })
+            unresolved.append(
+                {
+                    "name": "handoff_to_enqueue_ms",
+                    "key": [stream, block, start, end],
+                    "reason": "missing_boundary",
+                }
+            )
             continue
         last = max(members, key=lambda event: event["ts"])
-        intervals.append({
-            "name": "handoff_to_enqueue_ms",
-            "start_ns": last["ts"],
-            "end_ns": enqueue["ts"],
-            "duration_ms": round((enqueue["ts"] - last["ts"]) / 1_000_000, 6),
-            "owners": [last["producer"], enqueue["producer"]],
-            "key": [stream, block, start, end],
-            "coalesced_frames": len(members),
-        })
+        intervals.append(
+            {
+                "name": "handoff_to_enqueue_ms",
+                "start_ns": last["ts"],
+                "end_ns": enqueue["ts"],
+                "duration_ms": round((enqueue["ts"] - last["ts"]) / 1_000_000, 6),
+                "owners": [last["producer"], enqueue["producer"]],
+                "key": [stream, block, start, end],
+                "coalesced_frames": len(members),
+            }
+        )
     return intervals, unresolved
 
 
@@ -2678,9 +2659,9 @@ def _pair_receipt_delivery(events):
     deliveries from the same frame are not missing receipt edges."""
     receipts = [event for event in events if event["event"] == "core_receipt"]
     deliveries = [
-        event for event in events
-        if event["event"] == "core_delivery"
-        and event["data"].get("kind") == "preview"
+        event
+        for event in events
+        if event["event"] == "core_delivery" and event["data"].get("kind") == "preview"
     ]
     intervals = []
     unresolved = []
@@ -2689,25 +2670,30 @@ def _pair_receipt_delivery(events):
         if not frame:
             continue
         matches = [
-            event for event in receipts
+            event
+            for event in receipts
             if event["data"].get("frame") == frame and event["ts"] <= delivery["ts"]
         ]
         if not matches:
-            unresolved.append({
-                "name": "receipt_to_delivery_ms",
-                "key": [frame],
-                "reason": "missing_boundary",
-            })
+            unresolved.append(
+                {
+                    "name": "receipt_to_delivery_ms",
+                    "key": [frame],
+                    "reason": "missing_boundary",
+                }
+            )
             continue
         receipt = max(matches, key=lambda event: event["ts"])
-        intervals.append({
-            "name": "receipt_to_delivery_ms",
-            "start_ns": receipt["ts"],
-            "end_ns": delivery["ts"],
-            "duration_ms": round((delivery["ts"] - receipt["ts"]) / 1_000_000, 6),
-            "owners": [receipt["producer"], delivery["producer"]],
-            "key": [frame],
-        })
+        intervals.append(
+            {
+                "name": "receipt_to_delivery_ms",
+                "start_ns": receipt["ts"],
+                "end_ns": delivery["ts"],
+                "duration_ms": round((delivery["ts"] - receipt["ts"]) / 1_000_000, 6),
+                "owners": [receipt["producer"], delivery["producer"]],
+                "key": [frame],
+            }
+        )
     return intervals, unresolved
 
 
@@ -2722,40 +2708,47 @@ def _write_observe_edge(events, index):
         if not attempt or not isinstance(ordinal, int):
             continue
         matches = [
-            event for event in observes
+            event
+            for event in observes
             if _event_attempt(event, index) == attempt
             and event["data"].get("record", event["data"].get("ordinal")) == ordinal
         ]
         if len(matches) != 1:
-            unresolved.append({
-                "name": "cli_write->fixture_observe",
-                "key": [attempt, ordinal],
-                "reason": "ambiguous_join" if matches else "missing_boundary",
-            })
+            unresolved.append(
+                {
+                    "name": "cli_write->fixture_observe",
+                    "key": [attempt, ordinal],
+                    "reason": "ambiguous_join" if matches else "missing_boundary",
+                }
+            )
             continue
         observe = matches[0]
         if observe["ts"] < write["ts"]:
             # The reader can consume the bytes after write(2) but before the
             # CLI's post-flush stamp. Keep the pair and report a zero-length
             # reordered edge instead of losing a real record.
-            intervals.append({
+            intervals.append(
+                {
+                    "name": "write_to_observe_ms",
+                    "start_ns": write["ts"],
+                    "end_ns": write["ts"],
+                    "duration_ms": 0.0,
+                    "owners": [write["producer"], observe["producer"]],
+                    "key": [attempt, ordinal],
+                    "reordered": True,
+                }
+            )
+            continue
+        intervals.append(
+            {
                 "name": "write_to_observe_ms",
                 "start_ns": write["ts"],
-                "end_ns": write["ts"],
-                "duration_ms": 0.0,
+                "end_ns": observe["ts"],
+                "duration_ms": round((observe["ts"] - write["ts"]) / 1_000_000, 6),
                 "owners": [write["producer"], observe["producer"]],
                 "key": [attempt, ordinal],
-                "reordered": True,
-            })
-            continue
-        intervals.append({
-            "name": "write_to_observe_ms",
-            "start_ns": write["ts"],
-            "end_ns": observe["ts"],
-            "duration_ms": round((observe["ts"] - write["ts"]) / 1_000_000, 6),
-            "owners": [write["producer"], observe["producer"]],
-            "key": [attempt, ordinal],
-        })
+            }
+        )
     return intervals, unresolved
 
 
@@ -2790,7 +2783,8 @@ def _waterfall(events, attempt_id, cutoff_ns=None):
         if not stream or start_seq is None or end_seq is None:
             continue
         emits = [
-            event for event in relevant
+            event
+            for event in relevant
             if event["event"] == "fixture_emit"
             and event["data"].get("stream") == stream
             and isinstance(event["data"].get("seq_start"), int)
@@ -2800,7 +2794,8 @@ def _waterfall(events, attempt_id, cutoff_ns=None):
             continue
         start_ns = min(event["ts"] for event in emits)
         deliveries = [
-            event for event in relevant
+            event
+            for event in relevant
             if event["event"] == "core_delivery"
             and event["data"].get("stream") == stream
             and event["data"].get("seq_start") is not None
@@ -2825,12 +2820,17 @@ def _waterfall(events, attempt_id, cutoff_ns=None):
         # Keep source/adapter events from the batch range, but never let a
         # neighbouring batch's publish/receipt/delivery leak into this window.
         window = [
-            event for event in relevant
+            event
+            for event in relevant
             if start_ns <= event["ts"] <= end_ns
             and (
-                event["event"] not in (
-                    "host_enqueue", "host_dequeue", "host_publish",
-                    "core_receipt", "core_delivery",
+                event["event"]
+                not in (
+                    "host_enqueue",
+                    "host_dequeue",
+                    "host_publish",
+                    "core_receipt",
+                    "core_delivery",
                 )
                 or event["data"].get("batch") == batch
             )
@@ -2859,15 +2859,17 @@ def _waterfall(events, attempt_id, cutoff_ns=None):
         edges.extend(matched)
         total_ns += end_ns - start_ns
         matched_ns += covered
-        batches.append({
-            "batch": batch,
-            "start_ns": start_ns,
-            "end_ns": end_ns,
-            "total_ms": round((end_ns - start_ns) / 1_000_000, 6),
-            "matched_ms": round(covered / 1_000_000, 6),
-            "residual_ms": round(max(0, end_ns - start_ns - covered) / 1_000_000, 6),
-            "records": len(observes),
-        })
+        batches.append(
+            {
+                "batch": batch,
+                "start_ns": start_ns,
+                "end_ns": end_ns,
+                "total_ms": round((end_ns - start_ns) / 1_000_000, 6),
+                "matched_ms": round(covered / 1_000_000, 6),
+                "residual_ms": round(max(0, end_ns - start_ns - covered) / 1_000_000, 6),
+                "records": len(observes),
+            }
+        )
     residual = round(max(0, total_ns - matched_ns) / 1_000_000, 6)
     last = max(edges, key=lambda edge: edge["end_ns"]) if edges else None
     return {
@@ -2882,8 +2884,7 @@ def _waterfall(events, attempt_id, cutoff_ns=None):
         "complete": (
             bool(batches)
             and not [
-                item for item in unresolved
-                if item["reason"] not in ("inapplicable", "dropped")
+                item for item in unresolved if item["reason"] not in ("inapplicable", "dropped")
             ]
             and residual <= 0.001
         ),
@@ -2992,22 +2993,21 @@ def _coverage(facts, events=()):
             "share": share,
             "complete": complete,
             "missing": dict(sorted(missing.items())),
-            "reason": None if complete else (
-                "no_eligible_attempts" if not denominator else "missing_required_boundary"
-            ),
+            "reason": None
+            if complete
+            else ("no_eligible_attempts" if not denominator else "missing_required_boundary"),
         }
         if path == "preview":
             required_edges = PREVIEW_EDGES
             edge_covered = 0
             edge_missing = Counter()
-            waterfalls = [
-                _waterfall(events, attempt["id"]) for attempt in path_attempts
-            ]
+            waterfalls = [_waterfall(events, attempt["id"]) for attempt in path_attempts]
             for waterfall in waterfalls:
                 observed = {edge["name"] for edge in waterfall["edges"]}
                 lacking = [name for name in required_edges if name not in observed]
                 lacking.extend(
-                    item["name"] for item in waterfall["unresolved"]
+                    item["name"]
+                    for item in waterfall["unresolved"]
                     if item["name"] in required_edges
                     and item["reason"] not in ("inapplicable", "dropped")
                 )
@@ -3017,7 +3017,8 @@ def _coverage(facts, events=()):
                 edge_covered += 1
             edge_complete = denominator > 0 and edge_covered == denominator
             inapplicable = sum(
-                1 for waterfall in waterfalls
+                1
+                for waterfall in waterfalls
                 for item in waterfall["unresolved"]
                 if item["reason"] in ("inapplicable", "dropped")
             )
@@ -3028,9 +3029,9 @@ def _coverage(facts, events=()):
                 "complete": edge_complete,
                 "inapplicable": inapplicable,
                 "missing": dict(sorted(edge_missing.items())),
-                "reason": None if edge_complete else (
-                    "no_eligible_attempts" if not denominator else "incomplete_edge_chain"
-                ),
+                "reason": None
+                if edge_complete
+                else ("no_eligible_attempts" if not denominator else "incomplete_edge_chain"),
             }
             if not edge_complete:
                 result["edge_complete"] = False
@@ -3114,6 +3115,7 @@ def _quality(facts, clock, coverage, trace):
         "edge_coverage_complete": coverage.get("edge_complete"),
     }
 
+
 # ---------------------------------------------------------------------------
 # Exemplars
 # ---------------------------------------------------------------------------
@@ -3158,9 +3160,7 @@ def _exemplars(measured, facts, trace, coverage, quality):
             index = len(values) - 1
             method = "observed_max"
         chosen = candidates[index]
-        exemplars.append(
-            _exemplar("tail", metric, chosen, facts, trace, coverage, quality, method)
-        )
+        exemplars.append(_exemplar("tail", metric, chosen, facts, trace, coverage, quality, method))
     failed = next(
         (
             item
@@ -3171,8 +3171,9 @@ def _exemplars(measured, facts, trace, coverage, quality):
     )
     if failed is not None:
         exemplars.append(
-            _exemplar("failed", "outcome", failed, facts, trace, coverage, quality,
-                      "first_failed_slot")
+            _exemplar(
+                "failed", "outcome", failed, facts, trace, coverage, quality, "first_failed_slot"
+            )
         )
     return {
         "exemplars": exemplars,
@@ -3220,9 +3221,7 @@ def _exemplar(kind, metric, item, facts, trace, coverage, quality, selection):
         "phase": item["phase"],
         "selection": selection,
         "reason": (
-            "nearest_rank"
-            if selection in ("nearest_rank_p95", "observed_max")
-            else selection
+            "nearest_rank" if selection in ("nearest_rank_p95", "observed_max") else selection
         ),
         "attempt_range_ms": {"start_ms": start_ms, "end_ms": end_ms},
         "coverage": {
@@ -3274,9 +3273,7 @@ def suite_document(cases, *, suite_id="suite", started_at=None, configuration=No
             "network": (run.get("configuration") or {}).get("network"),
             "path": case.get("path") if isinstance(case, dict) else None,
             "status": (
-                "complete"
-                if source.get("status", {}).get("state") == "complete"
-                else "incomplete"
+                "complete" if source.get("status", {}).get("state") == "complete" else "incomplete"
             )
             if source
             else "planned",
@@ -3309,8 +3306,7 @@ def validate_suite(suite):
         invalid("suite is not an object")
     if suite.get("schema_version") != SUITE_SCHEMA_VERSION:
         unsupported(
-            f"suite schema {suite.get('schema_version')!r}; "
-            f"expected {SUITE_SCHEMA_VERSION}"
+            f"suite schema {suite.get('schema_version')!r}; expected {SUITE_SCHEMA_VERSION}"
         )
     if suite.get("kind") != "benchmark-suite":
         unsupported("suite kind; expected benchmark-suite")
@@ -3340,10 +3336,7 @@ def validate_suite(suite):
         ):
             invalid("suite case has an unknown status")
         if case.get("case_schema") != SCHEMA_VERSION:
-            unsupported(
-                f"suite case schema {case.get('case_schema')!r}; "
-                f"expected {SCHEMA_VERSION}"
-            )
+            unsupported(f"suite case schema {case.get('case_schema')!r}; expected {SCHEMA_VERSION}")
     if indexes != list(range(len(cases))):
         invalid("suite case indexes must be contiguous and ordered")
     status = suite.get("status")

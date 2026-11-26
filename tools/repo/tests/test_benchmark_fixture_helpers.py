@@ -404,9 +404,7 @@ def test_sanitize_drops_forbidden_and_unknown_fields(manifest):
 
 
 def test_sanitize_rejects_unknown_event_and_foreign_run(manifest):
-    clean, dropped = events.sanitize(
-        record("core", "made_up", 1), manifest, run_id="run-1"
-    )
+    clean, dropped = events.sanitize(record("core", "made_up", 1), manifest, run_id="run-1")
     assert clean is None and dropped["unknown_event"] == 1
     clean, dropped = events.sanitize(
         record("core", "core_delivery", 1, frame="f", delivery=1, kind="preview", bytes=1),
@@ -421,9 +419,19 @@ def test_merge_is_deterministic_and_caps_with_loss(manifest, tmp_path):
     second = tmp_path / "core-b.ndjson"
     first.write_text(
         "\n".join(
-            events.serialise(record("fixture", "fixture_observe", ts, attempt="a-1",
-                                    ordinal=ts, kind="preview", bytes=1, prefix_bytes=1,
-                                    correct=True))
+            events.serialise(
+                record(
+                    "fixture",
+                    "fixture_observe",
+                    ts,
+                    attempt="a-1",
+                    ordinal=ts,
+                    kind="preview",
+                    bytes=1,
+                    prefix_bytes=1,
+                    correct=True,
+                )
+            )
             for ts in (3, 1)
         )
         + "\n{not-json}\n"
@@ -459,10 +467,28 @@ def test_merge_is_deterministic_and_caps_with_loss(manifest, tmp_path):
 def test_coverage_lists_observed_mandatory_boundaries(manifest):
     coverage = events.coverage_report(
         [
-            record("fixture", "fixture_emit", 1, stream="s", attempt="a", block="b",
-                   seq_start=0, seq_end=0, bytes=1),
-            record("fixture", "fixture_observe", 2, attempt="a", ordinal=1, kind="preview",
-                   bytes=1, prefix_bytes=1, correct=True),
+            record(
+                "fixture",
+                "fixture_emit",
+                1,
+                stream="s",
+                attempt="a",
+                block="b",
+                seq_start=0,
+                seq_end=0,
+                bytes=1,
+            ),
+            record(
+                "fixture",
+                "fixture_observe",
+                2,
+                attempt="a",
+                ordinal=1,
+                kind="preview",
+                bytes=1,
+                prefix_bytes=1,
+                correct=True,
+            ),
         ],
         manifest,
     )
@@ -489,12 +515,14 @@ def test_parse_ss_extracts_rtt_retransmits_and_queue():
     assert sockets[0]["rtt_us"] == 30500
     assert sockets[0]["retransmits"] == 2
     assert sockets[1]["send_queue_bytes"] == 128
-    assert sampler.socket_role(
-        sockets[0], host_address="127.0.0.2", client_address="127.0.0.3"
-    ) == "host"
-    assert sampler.socket_role(
-        sockets[1], host_address="127.0.0.2", client_address="127.0.0.3"
-    ) == "client"
+    assert (
+        sampler.socket_role(sockets[0], host_address="127.0.0.2", client_address="127.0.0.3")
+        == "host"
+    )
+    assert (
+        sampler.socket_role(sockets[1], host_address="127.0.0.2", client_address="127.0.0.3")
+        == "client"
+    )
 
 
 def test_sampler_windows_record_gaps_and_replacement():
@@ -549,7 +577,7 @@ def test_parse_metrics_and_cgroup_limits():
     metrics = sampler.parse_metrics(
         "# HELP go_goroutines\n"
         "go_goroutines 12\n"
-        "go_gc_duration_seconds{quantile=\"0\"} 0.1\n"
+        'go_gc_duration_seconds{quantile="0"} 0.1\n'
         "process_cpu_seconds_total 3.5\n"
         "unrelated_metric 9\n"
     )
@@ -600,9 +628,7 @@ def test_synthetic_fixture_document_matches_the_model_contract():
             "unit": "ns",
             "boot_id_verified": True,
             "namespace_verified": True,
-            "producers": [
-                {"producer": "core", "lifetime": "lt-1", "verified": True}
-            ],
+            "producers": [{"producer": "core", "lifetime": "lt-1", "verified": True}],
         },
         capture_origin_ns=1000,
     )
@@ -660,12 +686,19 @@ def test_synthetic_fixture_document_matches_the_model_contract():
                 source={"times_ms": [0.0, 100.0], "sizes": [4, 4]},
                 outputs=[
                     facts.output_fact(
-                        at_ms=0.0, ordinal=1, kind="preview", bytes_=4,
-                        prefix_bytes=4, correct=True,
+                        at_ms=0.0,
+                        ordinal=1,
+                        kind="preview",
+                        bytes_=4,
+                        prefix_bytes=4,
+                        correct=True,
                     )
                 ],
                 observation=facts.observation_block(
-                    started_ns=1000, ended_ns=2000, cutoff_ns=2000, origin_ns=1000,
+                    started_ns=1000,
+                    ended_ns=2000,
+                    cutoff_ns=2000,
+                    origin_ns=1000,
                     origin=source.FIRST_EMISSION,
                 ),
                 reads=reads,
@@ -684,6 +717,7 @@ def test_synthetic_fixture_document_matches_the_model_contract():
     model.validate_case(document)
     derived = model.derive(document)
     assert derived["populations"]["planned"]["measured"] == 2
+
 
 def test_trace_finalization_brackets_cli_and_computes_attempt_coverage():
     """The two run-level trace helpers stay testable without a container."""

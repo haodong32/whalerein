@@ -255,6 +255,7 @@ def test_comparison_and_method_render_declared_dimensions():
     assert "observation: same build" in protocol
     assert "predecessor:" in protocol
 
+
 def test_comparison_renders_a_predecessor_revision_string():
     result = {
         "pairs": 5,

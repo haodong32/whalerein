@@ -768,7 +768,6 @@ impl EventSink<'_> {
     }
 }
 
-
 fn paged_sink<'a>(
     core: &Core,
     events: &'a mpsc::Sender<SessionEvent>,

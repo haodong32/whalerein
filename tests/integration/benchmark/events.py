@@ -43,9 +43,8 @@ def value_matches(kind, value):
     if kind == "u64":
         return _is_int(value) and value >= 0
     if kind.startswith("enum:"):
-        return isinstance(value, str) and value in kind[len("enum:"):].split(",")
+        return isinstance(value, str) and value in kind[len("enum:") :].split(",")
     return False
-
 
 
 def sanitize(record, manifest, *, run_id=None):
@@ -172,7 +171,9 @@ def serialise(event):
     return json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def merge(outlet_files, manifest, *, run_id, cap_bytes, reserve_bytes=DEFAULT_RESERVE_BYTES):
+def merge(
+    outlet_files, manifest, *, run_id, cap_bytes, reserve_bytes=DEFAULT_RESERVE_BYTES
+):
     """Drain, allowlist and cap every outlet into one deterministic capture.
 
     ``outlet_files`` maps an outlet path to its producer role. ``cap_bytes`` is

@@ -706,7 +706,6 @@ pub fn validate_record(value: &Value) -> Result<BenchRecord, BenchViolation> {
     Ok(record)
 }
 
-
 /// Check the baked contract against the checked-in manifest. The adapter tests
 /// use it so a schema change cannot silently leave Rust behind.
 pub fn validate_manifest(manifest: &Value) -> Result<(), BenchViolation> {

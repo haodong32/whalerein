@@ -72,7 +72,9 @@ def plan(configuration):
     for phase, count in (("warmup", warmups), ("measured", attempts)):
         if workflow == "mixed-load":
             if count % 2:
-                raise ValueError("mixed load requires an even number of slots per phase")
+                raise ValueError(
+                    "mixed load requires an even number of slots per phase"
+                )
             prefix = "warmup" if phase == "warmup" else "pair"
             for pair_index, order in enumerate(pair_orders(seed, count // 2)):
                 for position, arm in enumerate(order):

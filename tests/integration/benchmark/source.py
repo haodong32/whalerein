@@ -26,7 +26,9 @@ def milliseconds(value_ns, origin_ns):
     return round((value_ns - origin_ns) / 1_000_000, 3)
 
 
-def origin(workflow, *, first_emission_ns=None, client_invocation_ns=None, restored_ns=None):
+def origin(
+    workflow, *, first_emission_ns=None, client_invocation_ns=None, restored_ns=None
+):
     """Return the named measurement cut for one attempt.
 
     Returns ``(origin_ns, name)``. A missing required boundary raises: the
@@ -77,7 +79,11 @@ def catch_up(outputs, times_ms, sizes, restored_ms):
         if event.get("prefix_bytes", 0) >= target:
             kind = event.get("kind")
             via = "terminal" if kind == "terminal" else "preview"
-            return {"at_ms": event["at_ms"], "via": via, "prefix_bytes": event["prefix_bytes"]}
+            return {
+                "at_ms": event["at_ms"],
+                "via": via,
+                "prefix_bytes": event["prefix_bytes"],
+            }
     return None
 
 
@@ -120,7 +126,11 @@ def recovery_facts(
             "via": "preview",
         }
     first_visible = next(
-        (event for event in outputs if event.get("correct") and event.get("prefix_bytes", 0) > 0),
+        (
+            event
+            for event in outputs
+            if event.get("correct") and event.get("prefix_bytes", 0) > 0
+        ),
         None,
     )
     if first_visible is not None:

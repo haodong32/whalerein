@@ -64,7 +64,9 @@ def parse_ss(text):
         for index, field in enumerate(fields):
             if field.startswith("rtt:"):
                 value = field.split(":", 1)[1].split("/")[0]
-                current["rtt_us"] = round(float(value) * 1000) if _float(value) is not None else None
+                current["rtt_us"] = (
+                    round(float(value) * 1000) if _float(value) is not None else None
+                )
             elif field.startswith("retrans:"):
                 value = field.split(":", 1)[1].split("/")[-1]
                 current["retransmits"] = _int(value)
@@ -147,8 +149,6 @@ def parse_cgroup_limits(cpu_max=None, memory_max=None):
     return limits
 
 
-
-
 def proc_peak_rss(pid="self"):
     try:
         with open(f"/proc/{pid}/status", "r", encoding="utf-8") as handle:
@@ -163,7 +163,8 @@ def fixture_cpu_ms():
     usage = resource.getrusage(resource.RUSAGE_SELF)
     children = resource.getrusage(resource.RUSAGE_CHILDREN)
     return round(
-        (usage.ru_utime + usage.ru_stime + children.ru_utime + children.ru_stime) * 1000,
+        (usage.ru_utime + usage.ru_stime + children.ru_utime + children.ru_stime)
+        * 1000,
         3,
     )
 
@@ -210,9 +211,13 @@ def windows(samples, interval_ms):
             if sample.get("retransmits") is not None:
                 window["retransmits"] = sample["retransmits"]
             if sample.get("queue_bytes") is not None:
-                window["queue_bytes"] = max(window.get("queue_bytes") or 0, sample["queue_bytes"])
+                window["queue_bytes"] = max(
+                    window.get("queue_bytes") or 0, sample["queue_bytes"]
+                )
             if sample.get("gap_ms") is not None:
-                window["gap_ms"] = round((window.get("gap_ms") or 0) + sample["gap_ms"], 3)
+                window["gap_ms"] = round(
+                    (window.get("gap_ms") or 0) + sample["gap_ms"], 3
+                )
             window["state"] = sample["state"]
             continue
         result.append(
@@ -256,8 +261,6 @@ def _float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +308,9 @@ class EnvironmentSampler:
     def start(self):
         if self._thread is not None:
             return self
-        self._thread = threading.Thread(target=self._loop, name="bench-environment-sampler", daemon=True)
+        self._thread = threading.Thread(
+            target=self._loop, name="bench-environment-sampler", daemon=True
+        )
         self._thread.start()
         return self
 
@@ -316,7 +321,10 @@ class EnvironmentSampler:
             self._thread = None
 
     def _now_ms(self):
-        return round((time.clock_gettime_ns(time.CLOCK_MONOTONIC) - self.origin_ns) / 1_000_000, 3)
+        return round(
+            (time.clock_gettime_ns(time.CLOCK_MONOTONIC) - self.origin_ns) / 1_000_000,
+            3,
+        )
 
     def _loop(self):
         while not self._stop.is_set():
@@ -422,7 +430,8 @@ class EnvironmentSampler:
             access = list(self._access)
             qdisc = list(self._qdisc)
         now_ms = round(
-            (time.clock_gettime_ns(time.CLOCK_MONOTONIC) - self.origin_ns) / 1_000_000, 3
+            (time.clock_gettime_ns(time.CLOCK_MONOTONIC) - self.origin_ns) / 1_000_000,
+            3,
         )
         result = {
             "interval_ms": self.interval_ms,

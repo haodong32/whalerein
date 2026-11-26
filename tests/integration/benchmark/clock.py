@@ -79,7 +79,14 @@ def read_reading(reader):
 class ClockAdmission:
     """Bracket and membership checks for one capture run."""
 
-    def __init__(self, *, fixture_boot_id=None, fixture_namespace=None, clock=monotonic_ns, proc=PROC):
+    def __init__(
+        self,
+        *,
+        fixture_boot_id=None,
+        fixture_namespace=None,
+        clock=monotonic_ns,
+        proc=PROC,
+    ):
         self.clock = clock
         self.proc = proc
         self.fixture_boot_id = fixture_boot_id
@@ -90,7 +97,9 @@ class ClockAdmission:
     def local(cls, *, clock=monotonic_ns, proc=PROC):
         return cls(
             fixture_boot_id=boot_id(),
-            fixture_namespace=time_namespace("self", proc=proc) if Path(proc, "self").exists() else None,
+            fixture_namespace=time_namespace("self", proc=proc)
+            if Path(proc, "self").exists()
+            else None,
             clock=clock,
             proc=proc,
         )
@@ -166,6 +175,8 @@ class ClockAdmission:
 
     @property
     def verified(self):
-        return self.result()["boot_id_verified"] and self.result()["namespace_verified"] and all(
-            item["verified"] for item in self.producers
+        return (
+            self.result()["boot_id_verified"]
+            and self.result()["namespace_verified"]
+            and all(item["verified"] for item in self.producers)
         )

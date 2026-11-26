@@ -58,8 +58,12 @@ def render(document):
 
     latency = derived.get("latency") or {}
     lines.append("Latency")
-    lines.extend(_samples(latency.get("samples") or {}, {"first_text_ms": ("first text", "ms"),
-                                                         "final_ms": ("terminal", "ms")}))
+    lines.extend(
+        _samples(
+            latency.get("samples") or {},
+            {"first_text_ms": ("first text", "ms"), "final_ms": ("terminal", "ms")},
+        )
+    )
     for arm, entry in (latency.get("arms") or {}).items():
         lines.append(f"  {arm} arm: {entry['measured']} measured")
         lines.extend(
@@ -105,14 +109,11 @@ def render(document):
     if len(attempts) > MAX_ATTEMPT_LINES:
         lines.append(f"  ... {len(attempts) - MAX_ATTEMPT_LINES} more measured attempts")
 
-    waterfalls = [
-        item["waterfall"] for item in attempts if item.get("waterfall")
-    ]
+    waterfalls = [item["waterfall"] for item in attempts if item.get("waterfall")]
     if waterfalls:
         complete = sum(bool(item.get("complete")) for item in waterfalls)
         residuals = [
-            item["residual_ms"] for item in waterfalls
-            if item.get("residual_ms") is not None
+            item["residual_ms"] for item in waterfalls if item.get("residual_ms") is not None
         ]
         lines.append(
             f"Waterfall: complete={complete}/{len(waterfalls)}"
@@ -129,11 +130,7 @@ def render(document):
         f" union={attribution.get('union_ms')} ms"
     )
     if coverage.get("paths"):
-        missing = [
-            name
-            for name, entry in coverage["paths"].items()
-            if not entry.get("complete")
-        ]
+        missing = [name for name, entry in coverage["paths"].items() if not entry.get("complete")]
         if not attribution.get("available"):
             lines.append(
                 "Coverage: unavailable ("
@@ -152,9 +149,12 @@ def render(document):
     index = derived.get("trace_index") or {}
     exemplars = index.get("exemplars") or []
     if exemplars:
-        lines.append("Trace exemplars: " + ", ".join(
-            f"{item['kind']}:{item['attempt_id']}@{item['metric']}" for item in exemplars
-        ))
+        lines.append(
+            "Trace exemplars: "
+            + ", ".join(
+                f"{item['kind']}:{item['attempt_id']}@{item['metric']}" for item in exemplars
+            )
+        )
 
     status = document["status"]
     detail = f" ({'; '.join(status['reasons'])})" if status.get("reasons") else ""
@@ -244,8 +244,7 @@ def _workflow(workflow):
                 lines.append(f"  bulk-minus-idle {metric}: unavailable")
             else:
                 lines.append(
-                    f"  bulk-minus-idle {metric}: {entry['mean']:+.3f} "
-                    f"(n={entry.get('count', 0)})"
+                    f"  bulk-minus-idle {metric}: {entry['mean']:+.3f} (n={entry.get('count', 0)})"
                 )
     if "bulk_read_gate" in workflow:
         gate = workflow["bulk_read_gate"]
@@ -259,8 +258,12 @@ def _workflow(workflow):
             f"{workflow.get('unassessable', 0)} unassessable"
         )
     if "catch_up_ms" in workflow:
-        lines.extend(_samples({"catch_up_ms": workflow["catch_up_ms"]},
-                              {"catch_up_ms": ("catch-up after restore", "ms")}))
+        lines.extend(
+            _samples(
+                {"catch_up_ms": workflow["catch_up_ms"]},
+                {"catch_up_ms": ("catch-up after restore", "ms")},
+            )
+        )
     return lines
 
 
@@ -296,9 +299,7 @@ def comparison(result):
         lines.append(f"{name.replace('_', ' ').title()}: {section.get('state')}{detail}")
     budget = result.get("budget")
     if isinstance(budget, dict) and budget:
-        lines.append(
-            f"Budget: revision={budget.get('revision')} state={budget.get('state')}"
-        )
+        lines.append(f"Budget: revision={budget.get('revision')} state={budget.get('state')}")
         for metric, entry in (budget.get("metrics") or {}).items():
             lines.append(
                 f"  {metric}: upper {entry.get('upper_bound_observed')} vs "
@@ -316,8 +317,11 @@ def comparison(result):
 def _modes(result):
     declaration = result.get("declaration") or {}
     modes = declaration.get("observation_mode") or {}
-    return "baseline=" + ",".join(map(str, modes.get("baseline") or [])) + " candidate=" + ",".join(
-        map(str, modes.get("candidate") or [])
+    return (
+        "baseline="
+        + ",".join(map(str, modes.get("baseline") or []))
+        + " candidate="
+        + ",".join(map(str, modes.get("candidate") or []))
     )
 
 

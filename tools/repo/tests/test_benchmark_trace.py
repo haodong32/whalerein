@@ -25,26 +25,84 @@ def event(producer, ts, name, **data):
 
 def events():
     return [
-        event("fixture", 1_000, "fixture_emit", stream="s-1", attempt="a-1", block="b-1",
-              seq_start=0, seq_end=1, bytes=10),
-        event("dsh", 1_100, "dsh_callback", stream="s-1", attempt="a-1", block="b-1",
-              seq_start=0, seq_end=1, bytes=10, native="assistant-preview"),
-        event("host", 1_200, "host_enqueue", stream="s-1", block="b-1", seq_start=0,
-              seq_end=1, bytes=10, queue_depth=1, queue_bytes=10),
+        event(
+            "fixture",
+            1_000,
+            "fixture_emit",
+            stream="s-1",
+            attempt="a-1",
+            block="b-1",
+            seq_start=0,
+            seq_end=1,
+            bytes=10,
+        ),
+        event(
+            "dsh",
+            1_100,
+            "dsh_callback",
+            stream="s-1",
+            attempt="a-1",
+            block="b-1",
+            seq_start=0,
+            seq_end=1,
+            bytes=10,
+            native="assistant-preview",
+        ),
+        event(
+            "host",
+            1_200,
+            "host_enqueue",
+            stream="s-1",
+            block="b-1",
+            seq_start=0,
+            seq_end=1,
+            bytes=10,
+            queue_depth=1,
+            queue_bytes=10,
+        ),
         event("core", 1_300, "core_receipt", frame="f-1", kind="event", bytes=10, decode="ok"),
-        event("cli", 1_500, "cli_write", delivery=1, ordinal=1, bytes=10, outcome="success",
-              flush=True),
-        event("fixture", 1_600, "fixture_observe", attempt="a-1", ordinal=1, kind="preview",
-              bytes=10, prefix_bytes=10, correct=True),
+        event(
+            "cli",
+            1_500,
+            "cli_write",
+            delivery=1,
+            ordinal=1,
+            bytes=10,
+            outcome="success",
+            flush=True,
+        ),
+        event(
+            "fixture",
+            1_600,
+            "fixture_observe",
+            attempt="a-1",
+            ordinal=1,
+            kind="preview",
+            bytes=10,
+            prefix_bytes=10,
+            correct=True,
+        ),
     ]
 
 
 def exemplars():
     return [
-        {"attempt": "a-1", "metric": "first_text_ms", "reason": "median",
-         "coverage": "complete", "start_ns": 1_000, "end_ns": 1_600},
-        {"attempt": "a-1", "metric": "max_display_delay_ms", "reason": "p95",
-         "coverage": "complete", "start_ns": 1_050, "end_ns": 1_450},
+        {
+            "attempt": "a-1",
+            "metric": "first_text_ms",
+            "reason": "median",
+            "coverage": "complete",
+            "start_ns": 1_000,
+            "end_ns": 1_600,
+        },
+        {
+            "attempt": "a-1",
+            "metric": "max_display_delay_ms",
+            "reason": "p95",
+            "coverage": "complete",
+            "start_ns": 1_050,
+            "end_ns": 1_450,
+        },
     ]
 
 
@@ -89,8 +147,16 @@ def test_reversed_exemplar_range_is_rejected(tmp_path):
     with pytest.raises(RepoError):
         trace.export(
             events(),
-            [{"attempt": "a-1", "metric": "first_text_ms", "reason": "median",
-              "coverage": "complete", "start_ns": 10, "end_ns": 5}],
+            [
+                {
+                    "attempt": "a-1",
+                    "metric": "first_text_ms",
+                    "reason": "median",
+                    "coverage": "complete",
+                    "start_ns": 10,
+                    "end_ns": 5,
+                }
+            ],
             target,
             origin_ns=0,
             run_id="run-trace",
@@ -110,14 +176,21 @@ def test_unreadable_trace_is_a_clear_error(tmp_path):
     with pytest.raises(RepoError):
         trace.inspect(target)
 
+
 def test_boolean_annotations_are_not_encoded_as_integers(tmp_path):
     target = tmp_path / "case.pftrace"
     metadata = trace.export(
         events(),
-        [{
-            "attempt": "a-1", "metric": "first_text_ms", "reason": "median",
-            "coverage": True, "start_ns": 1_000, "end_ns": 1_600,
-        }],
+        [
+            {
+                "attempt": "a-1",
+                "metric": "first_text_ms",
+                "reason": "median",
+                "coverage": True,
+                "start_ns": 1_000,
+                "end_ns": 1_600,
+            }
+        ],
         target,
         origin_ns=900,
         run_id="run-trace",

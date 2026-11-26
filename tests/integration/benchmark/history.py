@@ -31,7 +31,11 @@ def verify_sequence(observed, expected):
     observed = list(observed)
     expected = list(expected)
     mismatch = next(
-        (index for index, (left, right) in enumerate(zip(observed, expected)) if left != right),
+        (
+            index
+            for index, (left, right) in enumerate(zip(observed, expected))
+            if left != right
+        ),
         None,
     )
     if mismatch is None and len(observed) != len(expected):
@@ -44,7 +48,9 @@ def verify_sequence(observed, expected):
     }
 
 
-def walk(fetch, *, expected, page_size, deadline_ms, clock_ms, text_of, max_pages=MAX_PAGES):
+def walk(
+    fetch, *, expected, page_size, deadline_ms, clock_ms, text_of, max_pages=MAX_PAGES
+):
     """Traverse every history continuation under one deadline.
 
     ``fetch(page_size, continuation, timeout_ms)`` returns one page mapping::
@@ -76,7 +82,9 @@ def walk(fetch, *, expected, page_size, deadline_ms, clock_ms, text_of, max_page
             remaining = deadline_ms - (clock_ms() - started)
             if remaining <= 0:
                 raise PageTimeout
-            page = fetch(page_size, continuation, max(1, min(int(remaining), deadline_ms)))
+            page = fetch(
+                page_size, continuation, max(1, min(int(remaining), deadline_ms))
+            )
             pages_count += 1
             physical_bytes += int(page.get("physical_bytes") or 0)
             if page.get("error_code"):
@@ -106,7 +114,15 @@ def walk(fetch, *, expected, page_size, deadline_ms, clock_ms, text_of, max_page
     except PageTimeout:
         outcome = "timeout"
         error_code = "timeout"
-    except (AssertionError, json.JSONDecodeError, OSError, TypeError, AttributeError, KeyError, ValueError) as error:
+    except (
+        AssertionError,
+        json.JSONDecodeError,
+        OSError,
+        TypeError,
+        AttributeError,
+        KeyError,
+        ValueError,
+    ) as error:
         outcome = "product_error"
         code = getattr(error, "code", None)
         error_code = code if isinstance(code, str) and code else None
@@ -115,7 +131,9 @@ def walk(fetch, *, expected, page_size, deadline_ms, clock_ms, text_of, max_page
     # the page order to reconstruct the logical, oldest-to-newest sequence.
     flattened = [text for page in reversed(pages) for text in page]
     verification = verify_sequence(flattened, expected)
-    if outcome == "completed" and (not verification["verified"] or incomplete or corrupt):
+    if outcome == "completed" and (
+        not verification["verified"] or incomplete or corrupt
+    ):
         outcome = "incorrect_content"
     verified = outcome == "completed" and verification["verified"] and not corrupt
     bytes_expected = sum(len(text.encode()) for text in expected)

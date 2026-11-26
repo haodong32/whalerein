@@ -108,8 +108,7 @@ class BenchRequest:
                 raise UsageError("mixed load requires an even --warmup count")
             if self.p95_scope == "per-arm" and self.attempts < 40:
                 raise UsageError(
-                    "per-arm P95 requires at least 40 measured attempts "
-                    "(20 eligible per arm)"
+                    "per-arm P95 requires at least 40 measured attempts (20 eligible per arm)"
                 )
         if self.timeout is not None and self.timeout <= 0:
             raise UsageError("--benchmark-timeout must be a positive number of seconds")
@@ -187,7 +186,6 @@ def slot_plan(request):
                 )
                 ordinal += 1
     return {"seed": str(request.seed), "rule": "alternating", "slots": slots}
-
 
 
 def _create_output(directory):
@@ -371,9 +369,7 @@ def _run_matrix(directory, report, document, root, runner, request):
             "state": "incomplete",
             "reasons": [sanitize(exc)],
             "pending": [
-                case["index"]
-                for case in cases
-                if case["status"] in ("planned", "interrupted")
+                case["index"] for case in cases if case["status"] in ("planned", "interrupted")
             ],
             "interruption": None,
         }
@@ -467,9 +463,7 @@ def _run_in_directory(root, runner, request, directory, prepared):
         _write_env(env_file, key)
         container = _container(context, runner, workspace, image, "benchmark")
         container.create(
-            _container_options(
-                workspace, case_dir, timeout, request, env_file, run_id, revision
-            ),
+            _container_options(workspace, case_dir, timeout, request, env_file, run_id, revision),
             [
                 "timeout",
                 "--signal=INT",
@@ -535,9 +529,7 @@ def _write_json(path, document):
     atomic_write(path, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
 
 
-def _container_options(
-    workspace, case_dir, timeout, request, env_file, run_id, revision
-):
+def _container_options(workspace, case_dir, timeout, request, env_file, run_id, revision):
     # The ephemeral capture key travels in a 0600 env file, never on argv.
     return [
         "--network",

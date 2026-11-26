@@ -27,7 +27,9 @@ def overlap_ms(read, watch):
 
 def merge_union(intervals):
     """Total length covered by a set of half-open intervals."""
-    ordered = sorted((item for item in intervals if item is not None), key=lambda item: item[0])
+    ordered = sorted(
+        (item for item in intervals if item is not None), key=lambda item: item[0]
+    )
     if not ordered:
         return 0.0
     total = 0.0

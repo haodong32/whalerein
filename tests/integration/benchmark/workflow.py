@@ -46,7 +46,9 @@ def blackout(start_ns, duration_ms, settings):
     return started, time.monotonic_ns()
 
 
-def recovery_observation(attempt, started_ns, restored_ns, origin_ns, outputs, sizes, deadline_ms):
+def recovery_observation(
+    attempt, started_ns, restored_ns, origin_ns, outputs, sizes, deadline_ms
+):
     """Keep the blackout separate; require a visible correct catch-up prefix."""
     times_ms = attempt["_source_times_ms"]
     return source.recovery_facts(
@@ -87,8 +89,12 @@ class HistoryLoad:
 
         def invoke(argv, timeout_ms):
             process = subprocess.Popen(
-                argv, cwd=ROOT, env={**self.reader.env, **(environment or {})},
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                argv,
+                cwd=ROOT,
+                env={**self.reader.env, **(environment or {})},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
             )
             if on_spawn is not None:
                 on_spawn(process.pid)
@@ -102,8 +108,13 @@ class HistoryLoad:
 
         def fetch(page_size, continuation, timeout_ms):
             argv = self.reader.args(
-                "session", "history", self.session, "--host", self.host,
-                "--max-messages", str(page_size),
+                "session",
+                "history",
+                self.session,
+                "--host",
+                self.host,
+                "--max-messages",
+                str(page_size),
             )
             if continuation:
                 argv.extend(["--continuation", continuation])
@@ -133,9 +144,7 @@ class HistoryLoad:
                     "error_code": "invalid_envelope",
                 }
             return {
-                "messages": [
-                    text_of(message) for message in data.get("messages", [])
-                ],
+                "messages": [text_of(message) for message in data.get("messages", [])],
                 "continuation": data.get("continuation"),
                 "complete": data.get("complete") is True,
                 "physical_bytes": len(stdout.encode()),
@@ -159,8 +168,12 @@ class HistoryLoad:
 def prepare_history(scenario, reader, specification):
     session = scenario.dsh.create_session()
     expected = model.history_texts(specification)
-    scenario.dsh.process.control("bench_seed_history", session_id=session, texts=expected)
-    page_size = max(1, min(specification["messages"], specification.get("page_messages", 3)))
+    scenario.dsh.process.control(
+        "bench_seed_history", session_id=session, texts=expected
+    )
+    page_size = max(
+        1, min(specification["messages"], specification.get("page_messages", 3))
+    )
     return HistoryLoad(reader, scenario.host, session, expected, page_size=page_size)
 
 
@@ -182,14 +195,23 @@ class AttachmentLoad:
             try:
                 process = subprocess.Popen(
                     self.reader.args(
-                        "session", "download", self.reference,
-                        "--to", str(directory),
-                        "--session", self.session,
-                        "--host", self.host,
-                        "--name", self.name,
+                        "session",
+                        "download",
+                        self.reference,
+                        "--to",
+                        str(directory),
+                        "--session",
+                        self.session,
+                        "--host",
+                        self.host,
+                        "--name",
+                        self.name,
                     ),
-                    cwd=ROOT, env={**self.reader.env, **(environment or {})},
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                    cwd=ROOT,
+                    env={**self.reader.env, **(environment or {})},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
                 )
                 if on_spawn is not None:
                     on_spawn(process.pid)
@@ -217,10 +239,16 @@ class AttachmentLoad:
                     }
                 else:
                     data = response.get("data") or {}
-                    path = Path(data.get("path")) if isinstance(data.get("path"), str) else None
+                    path = (
+                        Path(data.get("path"))
+                        if isinstance(data.get("path"), str)
+                        else None
+                    )
                     actual = (
                         path.read_bytes()
-                        if path is not None and path.parent == directory and path.is_file()
+                        if path is not None
+                        and path.parent == directory
+                        and path.is_file()
                         else b""
                     )
                     observation = history.attachment_facts(
@@ -292,7 +320,10 @@ def prepare_attachment(scenario, reader, specification):
         name=name,
     )
     scenario.dsh.commit_attachment(
-        session, stored["attachment"], kind="file", role="tool",
+        session,
+        stored["attachment"],
+        kind="file",
+        role="tool",
         text="benchmark attachment",
     )
     rows = reader.call("session", "history", session, "--host", scenario.host)

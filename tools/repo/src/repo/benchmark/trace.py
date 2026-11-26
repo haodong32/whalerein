@@ -187,7 +187,8 @@ def export(events, exemplars, path, *, origin_ns=None, run_id="unknown"):
     for role in sorted({event["producer"] for event in events}):
         for field, label in COUNTER_FIELDS:
             relevant = (
-                event for event in events
+                event
+                for event in events
                 if event["producer"] == role and field in (event.get("data") or {})
             )
             if next(relevant, None) is None:
@@ -310,9 +311,7 @@ def verify(path, *, events=0, exemplars=0, minimum_ns=None, maximum_ns=None):
         raise RepoError("benchmark trace timestamps are not ordered")
     if events and summary["slices"] < events:
         raise RepoError("benchmark trace is missing measured slices")
-    if exemplars and not any(
-        name.startswith(EXEMPLAR_TRACK_PREFIX) for name in summary["tracks"]
-    ):
+    if exemplars and not any(name.startswith(EXEMPLAR_TRACK_PREFIX) for name in summary["tracks"]):
         raise RepoError("benchmark trace is missing exemplar ranges")
     if minimum_ns is not None and (summary["first_ns"] is None or summary["first_ns"] < minimum_ns):
         raise RepoError("benchmark trace range precedes its capture")

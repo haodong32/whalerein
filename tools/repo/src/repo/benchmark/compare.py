@@ -70,9 +70,7 @@ def compare(baselines, candidates, *, vary="build", budget=None, now=None):
         counts = f"{len(baselines)} baseline and {len(candidates)} candidate runs"
         raise UsageError("compare requires matched counts: " + counts)
     invalid = [
-        run["path"]
-        for run in (*baselines, *candidates)
-        if run["status"]["state"] == "invalid"
+        run["path"] for run in (*baselines, *candidates) if run["status"]["state"] == "invalid"
     ]
     if invalid:
         raise RepoError("invalid benchmark runs cannot be compared: " + ", ".join(invalid))
@@ -151,9 +149,7 @@ def compare(baselines, candidates, *, vary="build", budget=None, now=None):
 def _inconclusive_predecessor(exc, baselines, candidates, budget):
     declaration = _declaration("predecessor", baselines, candidates, budget)
     reason = (
-        "unmatched_predecessor"
-        if "unmatched predecessor" in str(exc)
-        else "incompatible_baseline"
+        "unmatched_predecessor" if "unmatched predecessor" in str(exc) else "incompatible_baseline"
     )
     result = {
         "schema_version": COMPARISON_SCHEMA,
@@ -234,8 +230,7 @@ def _declaration(vary, baselines, candidates, budget):
 
 def _check_dimension(vary, baselines, candidates, all_runs):
     builds = {
-        (run["identity"].get("revision"), run["identity"].get("fingerprint"))
-        for run in all_runs
+        (run["identity"].get("revision"), run["identity"].get("fingerprint")) for run in all_runs
     }
     modes = {run["observation_mode"] for run in all_runs}
     networks = {_canonical(run["network"]) for run in all_runs}
@@ -572,9 +567,7 @@ def _predecessor_section(baselines, candidates, budget, now):
             "candidate": candidate_identity,
             "budget": None,
         }
-    release = analysis.release_comparison(
-        baseline_identity, candidate_identity, budget, evidence
-    )
+    release = analysis.release_comparison(baseline_identity, candidate_identity, budget, evidence)
     release["baseline"] = baseline_identity
     release["candidate"] = candidate_identity
     return release

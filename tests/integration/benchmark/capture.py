@@ -27,7 +27,6 @@ CONTRACT_ENV = "WHALEREIN_BENCH_CONTRACT_PATH"
 MODES = ("off", "aggregate", "trace")
 
 
-
 class Capture:
     """One run's capture identity and outlet layout."""
 

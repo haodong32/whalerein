@@ -186,9 +186,7 @@ def test_network_comparison_varies_only_the_declared_network(tmp_path):
     baseline = pair(tmp_path / "base", build=("rev-a", "build-a"))
     candidate = [
         compare.load(
-            write_run(
-                tmp_path / f"cand-{i}", network="high-rtt", build=("rev-a", "build-a")
-            )
+            write_run(tmp_path / f"cand-{i}", network="high-rtt", build=("rev-a", "build-a"))
         )
         for i in range(5)
     ]
@@ -305,9 +303,7 @@ def test_unmatched_predecessor_is_inconclusive(tmp_path):
         vary="predecessor",
     )
     assert incompatible["verdict"] == "inconclusive"
-    assert incompatible["verdicts"]["predecessor"]["reasons"] == [
-        "incompatible_baseline"
-    ]
+    assert incompatible["verdicts"]["predecessor"]["reasons"] == ["incompatible_baseline"]
 
 
 def test_predecessor_without_a_budget_is_inconclusive(tmp_path):
@@ -343,9 +339,7 @@ def test_insufficient_usable_samples_are_inconclusive(tmp_path):
         baseline.append(compare.load(directory))
         candidate.append(
             compare.load(
-                write_run(
-                    tmp_path / f"cand-{index}", shift=200, build=("rev-b", "build-b")
-                )
+                write_run(tmp_path / f"cand-{index}", shift=200, build=("rev-b", "build-b"))
             )
         )
     result = compare.compare(baseline, candidate)

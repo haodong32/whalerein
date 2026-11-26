@@ -51,14 +51,19 @@ class Outlet:
             "event": event,
             "data": data,
         }
-        clean, dropped = events_module.sanitize(record, self.manifest, run_id=self.run_id)
+        clean, dropped = events_module.sanitize(
+            record, self.manifest, run_id=self.run_id
+        )
         if clean is None:
             raise ValueError(
                 "fixture emitted an invalid event " + event + ": " + str(dict(dropped))
             )
         if dropped:
             raise ValueError(
-                "fixture event " + event + " carried undeliverable fields: " + str(dict(dropped))
+                "fixture event "
+                + event
+                + " carried undeliverable fields: "
+                + str(dict(dropped))
             )
         self.handle.write(events_module.serialise(clean) + "\n")
         return clean

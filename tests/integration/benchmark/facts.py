@@ -209,8 +209,19 @@ def environment_block(
     return environment
 
 
-def trace_block(*, path=None, checksum=None, bytes_=None, cap_bytes=None, complete=False,
-                losses=None, coverage=None, events_path=None, outlets=None, mode="off"):
+def trace_block(
+    *,
+    path=None,
+    checksum=None,
+    bytes_=None,
+    cap_bytes=None,
+    complete=False,
+    losses=None,
+    coverage=None,
+    events_path=None,
+    outlets=None,
+    mode="off",
+):
     trace = {
         "mode": mode,
         "path": path,
@@ -260,7 +271,9 @@ def publish(path, document_):
     if directory:
         os.makedirs(directory, exist_ok=True)
     with open(temporary, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(document_, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        handle.write(
+            json.dumps(document_, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        )
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)

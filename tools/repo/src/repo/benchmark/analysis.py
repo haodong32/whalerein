@@ -333,12 +333,8 @@ def compare_runs(baseline, candidate, declaration=None):
     result["conditions"] = compare_conditions(baseline[0], candidate[0])
     if not result["conditions"]["match"]:
         result["reasons"].append("conditions_mismatch")
-    baseline_attempts = [
-        item.get("derived", {}).get("attempts", []) for item in baseline
-    ]
-    candidate_attempts = [
-        item.get("derived", {}).get("attempts", []) for item in candidate
-    ]
+    baseline_attempts = [item.get("derived", {}).get("attempts", []) for item in baseline]
+    candidate_attempts = [item.get("derived", {}).get("attempts", []) for item in candidate]
     compared = compare(baseline_attempts, candidate_attempts, declaration)
     result["pairs"] = compared["pairs"]
     result["metrics"] = compared["metrics"]
@@ -412,9 +408,7 @@ def validate_budget(budget, *, now=None, current_conditions=None):
     for name, entry in metrics.items():
         if not isinstance(name, str) or not name:
             raise ValueError("budget metric names must be text")
-        if not isinstance(entry, dict) or not isinstance(
-            entry.get("upper_bound"), (int, float)
-        ):
+        if not isinstance(entry, dict) or not isinstance(entry.get("upper_bound"), (int, float)):
             raise ValueError("budget metric " + name + " needs a numeric upper bound")
         if not isinstance(entry.get("sample_floor", budget.get("sample_floor")), int):
             raise ValueError("budget metric " + name + " needs an integer sample floor")
@@ -454,8 +448,7 @@ def evaluate_budget(
     for name, declared in budget["metrics"].items():
         evidence = metric_samples.get(name) or {}
         pairs = [
-            (item.get("baseline"), item.get("candidate"))
-            for item in evidence.get("pairs", [])
+            (item.get("baseline"), item.get("candidate")) for item in evidence.get("pairs", [])
         ]
         usable = [
             (before, after)
@@ -464,9 +457,7 @@ def evaluate_budget(
         ]
         differences = [after - before for before, after in usable]
         required_pairs = max(budget.get("run_pairs", 0), declared.get("run_pairs", 0))
-        required_samples = max(
-            budget.get("sample_floor", 0), declared.get("sample_floor", 0)
-        )
+        required_samples = max(budget.get("sample_floor", 0), declared.get("sample_floor", 0))
         coverage_floor = declared.get("coverage_floor", 0.0)
         coverage = evidence.get("coverage") or {}
         entry = {
@@ -492,9 +483,10 @@ def evaluate_budget(
             or evidence.get("candidate_successes", required_samples) < required_samples
         ):
             entry["reason"] = "insufficient_successes"
-        elif coverage and min(
-            coverage.get("baseline", 1.0), coverage.get("candidate", 1.0)
-        ) < coverage_floor:
+        elif (
+            coverage
+            and min(coverage.get("baseline", 1.0), coverage.get("candidate", 1.0)) < coverage_floor
+        ):
             entry["reason"] = "insufficient_coverage"
         elif len(differences) < 2:
             entry["reason"] = "insufficient_pairs"
