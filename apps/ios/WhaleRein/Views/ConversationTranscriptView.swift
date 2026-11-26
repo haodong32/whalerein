@@ -49,8 +49,8 @@ struct ConversationTranscriptView: View {
                         model.history.positionChanged = false
                         keyboardResizing = false
                         correctionAttempts = 0
-                        if !geometry.nearLatest { model.updateScroll(isAtLatest: false) }
                     }
+                    if phase == .idle { followBottomIfNeeded() }
                 }
                 .onScrollGeometryChange(for: TranscriptGeometry.self) { geometry in
                     TranscriptGeometry(
@@ -72,8 +72,14 @@ struct ConversationTranscriptView: View {
                     }
                     if after.offset > 100 { olderEdgeArmed = true }
                     if !keyboardResizing, scrollPhase == .interacting || scrollPhase == .decelerating {
-                        if after.offset != before.offset, viewportRevision == model.scroll.layoutRevision {
-                            model.updateScroll(isAtLatest: after.offset >= before.offset && after.nearLatest)
+                        if abs(after.offset - before.offset) > 0.5,
+                           before.viewport == after.viewport, before.extent == after.extent,
+                           viewportRevision == model.scroll.layoutRevision {
+                            if after.nearLatest, after.offset > before.offset {
+                                model.updateScroll(isAtLatest: true)
+                            } else if !after.nearLatest, after.offset < before.offset {
+                                model.updateScroll(isAtLatest: false)
+                            }
                             recordReadingRows(previousRows)
                         }
                         if olderEdgeArmed, after.offset <= 100, after.offset < before.offset,
@@ -86,6 +92,7 @@ struct ConversationTranscriptView: View {
                     if before.viewport == 0 || before.canScroll != after.canScroll {
                         fillShortTranscript()
                     }
+                    followBottomIfNeeded()
                 }
                 .onPreferenceChange(TranscriptRowsPreference.self) { rows in
                     let oldRows = previousRows
@@ -114,9 +121,12 @@ struct ConversationTranscriptView: View {
                 .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidChangeFrameNotification)) { _ in
                     guard keyboardResizing else { return }
                     keyboardResizing = false
-                    guard !model.scroll.isAtLatest else { return }
-                    correctionAttempts = 0
-                    restoreReadingRows(previousRows)
+                    if model.scroll.isAtLatest {
+                        followBottomIfNeeded()
+                    } else {
+                        correctionAttempts = 0
+                        restoreReadingRows(previousRows)
+                    }
                 }
                 .onChange(of: model.scrollRequest) { _, request in
                     guard let request else { return }
@@ -219,6 +229,11 @@ struct ConversationTranscriptView: View {
             extent: scrollView.contentSize.height + insets.top + insets.bottom - scrollView.bounds.height,
             viewport: scrollView.bounds.height
         )
+    }
+
+    private func followBottomIfNeeded() {
+        guard model.scroll.isAtLatest, scrollPhase == .idle, !keyboardResizing else { return }
+        nativeOffset.followBottom()
     }
 
     private func fillShortTranscript() {
