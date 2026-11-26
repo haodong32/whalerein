@@ -41,10 +41,7 @@ function keyBytes(key) {
 
 /**
  * @param {Uint8Array|string} key ephemeral capture key.
- * @returns {{token:(domain:string, raw:unknown)=>string, session:Function,
- *   stream:Function, attempt:Function, block:Function, frame:Function,
- *   request:Function, watch:Function, connection:Function, object:Function,
- *   batch:Function}}
+ * @returns {{token:(domain:string, raw:unknown)=>string}}
  */
 export function createTokenizer(key) {
   const secret = keyBytes(key)
@@ -65,9 +62,7 @@ export function createTokenizer(key) {
       .digest('hex')
       .slice(0, TOKEN_BYTES * 2)
   }
-  const facade = { token }
-  for (const domain of TOKEN_DOMAINS) facade[domain] = raw => token(domain, raw)
-  return Object.freeze(facade)
+  return Object.freeze({ token })
 }
 
 /**
@@ -79,7 +74,7 @@ export function createTokenizer(key) {
  * from values it already holds. Tokenizing it here would hash the caller's
  * token a second time and break every join.
  */
-export const TOKEN_FIELDS = Object.freeze({
+const TOKEN_FIELDS = Object.freeze({
   stream: 'stream',
   attempt: 'attempt',
   block: 'block',
