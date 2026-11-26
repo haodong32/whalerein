@@ -13,6 +13,7 @@ import {
   validateSessionUpdate,
 } from '../contracts/source.js'
 import { BROKER_PACKET_LIMIT_BYTES, RELAY_VERSION, transportProfileBudget, validateTransportBudget } from '../contracts/transport.js'
+import { batchToken, emitFact, emitFactAt } from '../observation/index.js'
 
 const LEASE = 30000
 // Bounded replay/settlement memory per shared Source. It suppresses exact
@@ -107,8 +108,13 @@ export class WatchedEvents {
   #versionTasks = new Map()
   #livePendingBytes = 0
   #livePendingPackets = 0
-  constructor({ hostId, store, security, adapter, access, codec = defaultCodec, now = Date.now, config = {}, logger }) {
-    Object.assign(this, { hostId, store, security, adapter, access, now, config, logger }); this.codec = resolveCodec(codec)
+  constructor({ hostId, store, security, adapter, access, codec = defaultCodec, now = Date.now, config = {}, logger, observation = null }) {
+    Object.assign(this, { hostId, store, security, adapter, access, now, config, logger, observation }); this.codec = resolveCodec(codec)
+  }
+
+  #nowNs() {
+    try { return typeof this.observation?.nowNs === 'function' ? this.observation.nowNs() : null }
+    catch { return null }
   }
   start() { this.#timer = setInterval(() => this.#expire(), 1000); this.#timer.unref?.(); return this }
   async stop() {
@@ -255,7 +261,15 @@ export class WatchedEvents {
       if (!source) {
         source = {
           recipients: new Set(), controller: new AbortController(),
-          buffer: new LiveBuffer(update => this.#fanout(sessionId, update), this.config.eventBatchMs ?? 20),
+          buffer: new LiveBuffer(
+            update => this.#fanout(sessionId, update),
+            this.config.eventBatchMs ?? 20,
+            undefined,
+            coalesced => emitFact(this.observation, 'host_coalesce', {
+              ...coalesced,
+              batch: batchToken(this.observation, coalesced.stream, coalesced.seq_start, coalesced.seq_end),
+            }),
+          ),
           registration: null, subscription: null, stateTask: null,
           questionTask: null, questionDirty: false, questionGeneration: 0, questionsAccepted: null,
           projectionId: null, settled: new Map(), liveSeen: new Map(), batches: new Map(),
@@ -277,8 +291,14 @@ export class WatchedEvents {
             throw new PluginError('expired', 'watch cancelled during source registration')
           }
           source.subscription = subscription
+          emitFact(this.observation, 'host_subscribe', {
+            connection: connectionRef, generation: grantGeneration, outcome: 'subscribed',
+          })
         }
         catch (error) {
+          emitFact(this.observation, 'host_subscribe', {
+            connection: connectionRef, generation: grantGeneration, outcome: 'failed',
+          })
           // No observer may keep a watch whose source never registered.
           if (this.#sources.get(sessionId) === source) {
             this.#sources.delete(sessionId)
@@ -869,7 +889,7 @@ export class WatchedEvents {
       // Live is fire-and-forget: publish immediately, never behind a chain and
       // never on the control event topic. A disconnected or over-bound live
       // queue drops the preview and leaves the committed message authoritative.
-      this.#publishLive(watch, envelope)
+      this.#publishLive(watch, envelope, update.live)
       return
     }
 
@@ -899,17 +919,61 @@ export class WatchedEvents {
    * preserves their client order. Only the bounded per-connection queue can
    * drop a preview.
    */
-  #publishLive(watch, envelope) {
-    if (!this.access?.connected || typeof this.access.publishLive !== 'function') return false
-    if (this.#livePendingPackets >= LIVE_QUEUE_PACKETS || this.#livePendingBytes + envelope.length > LIVE_QUEUE_BYTES) {
-      this.logger?.warn('live_preview_dropped', { code: 'rate_limited', reason: 'queue' })
+  #publishLive(watch, envelope, frame = null) {
+    const boundary = frame && frame.attempt?.attempt_id
+      ? {
+          stream: frame.attempt.attempt_id,
+          block: frame.block_id,
+          seq_start: frame.first_seq,
+          seq_end: frame.last_seq,
+          bytes: envelope.length,
+        }
+      : null
+    // One batch token covers the adapter handoff, the Host queue and the
+    // transport attempt for the exact published interval.
+    const batch = boundary
+      ? batchToken(this.observation, boundary.stream, boundary.seq_start, boundary.seq_end)
+      : ''
+    const queueDepth = boundary ? this.#livePendingPackets + 1 : null
+    const queueBytes = boundary ? this.#livePendingBytes + envelope.length : null
+    const drop = () => {
+      if (boundary) {
+        emitFact(this.observation, 'host_publish', {
+          ...boundary, batch, request: '', attempt: 1, kind: 'event',
+          outcome: 'dropped', queue_depth: queueDepth, queue_bytes: queueBytes,
+        })
+      }
       return false
     }
+    if (!this.access?.connected || typeof this.access.publishLive !== 'function') return drop()
+    if (this.#livePendingPackets >= LIVE_QUEUE_PACKETS || this.#livePendingBytes + envelope.length > LIVE_QUEUE_BYTES) {
+      this.logger?.warn('live_preview_dropped', { code: 'rate_limited', reason: 'queue' })
+      return drop()
+    }
+    const enqueuedAt = boundary ? this.#nowNs() : null
     let pending
     try {
-      pending = this.access.publishLive(envelope, { deviceId: watch.deviceId })
+      pending = this.access.publishLive(envelope, boundary
+        ? {
+            deviceId: watch.deviceId,
+            stream: boundary.stream,
+            seq_start: boundary.seq_start,
+            seq_end: boundary.seq_end,
+            batch,
+            queue_depth: queueDepth,
+            queue_bytes: queueBytes,
+          }
+        : { deviceId: watch.deviceId })
     } catch {
-      return false
+      return drop()
+    }
+    if (boundary && enqueuedAt !== null) {
+      emitFactAt(this.observation, enqueuedAt, 'host_enqueue', {
+        ...boundary,
+        batch,
+        queue_depth: queueDepth,
+        queue_bytes: queueBytes,
+      })
     }
     this.#livePendingPackets++
     this.#livePendingBytes += envelope.length
@@ -921,6 +985,16 @@ export class WatchedEvents {
       .finally(() => {
         this.#livePendingPackets--
         this.#livePendingBytes -= envelope.length
+        if (boundary && enqueuedAt !== null) {
+          const dequeuedAt = this.#nowNs()
+          // A missing or reversed clock leaves the residence unavailable; it
+          // is never replaced by a fabricated zero wait.
+          if (dequeuedAt !== null && dequeuedAt >= enqueuedAt) {
+            emitFact(this.observation, 'host_dequeue', {
+              ...boundary, batch, wait_ns: Number(dequeuedAt - enqueuedAt),
+            })
+          }
+        }
       })
     return true
   }

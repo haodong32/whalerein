@@ -6,6 +6,7 @@
 //! cache reader and are served locally.
 use crate::api::{Core, CoreError, CoreResult};
 use crate::conversation::{ConversationMessage, ToolActivities, ToolActivity};
+use crate::observation::bench::{BenchEvent, TokenDomain};
 use crate::session::SessionKey;
 use crate::sync::{validate_batch, validate_message};
 use base64::Engine;
@@ -576,7 +577,23 @@ impl Core {
             HistoryMode::Cache => self.history_page_cache(request, max_messages, max_bytes),
         };
         match &result {
-            Ok(_) => self.history_diagnostic("history_page", "succeeded", "none"),
+            Ok(page) => {
+                let bench = self.diagnostics.bench();
+                bench.emit(BenchEvent::CoreSync {
+                    request: bench.token(
+                        TokenDomain::Request,
+                        &format!(
+                            "{}:{}:history",
+                            request.session.host_id, request.session.session_id
+                        ),
+                    ),
+                    page: 1,
+                    messages: page.messages.len() as u64,
+                    bytes: 0,
+                    verified: page.source == HistorySource::Online && page.complete,
+                });
+                self.history_diagnostic("history_page", "succeeded", "none");
+            }
             Err(error) => self.history_diagnostic("history_page", "failed", error.code()),
         }
         result
@@ -1115,6 +1132,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_continuation_payloads_fail_closed_at_each_branch() {
+        let (_directory, core, _access) = paired().await;
+        let session = key(&core);
+        let base = ContinuationPayload {
+            v: 1,
+            host: session.host_id.clone(),
+            session: session.session_id.clone(),
+            projection: "projection-1".into(),
+            cut: "cut".into(),
+            next: "next".into(),
+            source: "online".into(),
+            generation: 1,
+            install: "install".into(),
+            issued_at_unix_ms: crate::util::now_unix_ms(),
+        };
+        let token = |payload: &ContinuationPayload| HistoryContinuation {
+            token: encode_token(CONTINUATION_DOMAIN, payload),
+        };
+        assert!(core
+            .continuation_from_token(&token(&base), &session, HistoryMode::Source)
+            .is_ok());
+
+        let mut expired = base.clone();
+        expired.issued_at_unix_ms = 0;
+        assert!(core
+            .continuation_from_token(&token(&expired), &session, HistoryMode::Source)
+            .is_err());
+
+        let mut wrong_scope = base.clone();
+        wrong_scope.host = "host-other".into();
+        assert!(core
+            .continuation_from_token(&token(&wrong_scope), &session, HistoryMode::Source)
+            .is_err());
+
+        let mut wrong_version = base.clone();
+        wrong_version.v = 2;
+        assert!(core
+            .continuation_from_token(&token(&wrong_version), &session, HistoryMode::Source)
+            .is_err());
+
+        let mut bad_source = base.clone();
+        bad_source.source = "bogus".into();
+        assert!(core
+            .continuation_from_token(&token(&bad_source), &session, HistoryMode::Source)
+            .is_err());
+
+        let mut mismatched = base.clone();
+        mismatched.source = "cache".into();
+        assert!(core
+            .continuation_from_token(&token(&mismatched), &session, HistoryMode::Source)
+            .is_err());
+
+        for broken in [
+            {
+                let mut value = base.clone();
+                value.projection.clear();
+                value
+            },
+            {
+                let mut value = base.clone();
+                value.cut.clear();
+                value
+            },
+            {
+                let mut value = base.clone();
+                value.next.clear();
+                value
+            },
+        ] {
+            assert!(core
+                .continuation_from_token(&token(&broken), &session, HistoryMode::Source)
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn exact_read_of_a_missing_or_stale_reference_is_an_explicit_failure() {
         let (_directory, core, access) = paired().await;
         access.host.lock().unwrap().history_messages.clear();
@@ -1623,3 +1716,7 @@ mod tests {
         assert_eq!(error.code(), "snapshot_required");
     }
 }
+
+#[cfg(test)]
+#[path = "history/observation_tests.rs"]
+mod observation_contract_tests;

@@ -1,18 +1,25 @@
-"""Render the terminal summary from the validated facts, never recomputing them."""
+"""Render terminal summaries from model-derived rows, never recomputing them."""
 
 from __future__ import annotations
 
-from statistics import median
+import statistics
 
 from . import analysis, model
 
+MAX_ATTEMPT_LINES = 8
+
 
 def render(document):
+    derived = document.get("derived") or {}
+    if not derived:
+        raise ValueError("benchmark report is missing derived rows")
+    run = document["run"]
     lines = [
         f"Benchmark: {document['scenario']['id']} v{document['scenario']['version']}"
-        f" (surface {document['run']['surface']})",
-        f"Run: {document['run']['id']}  scenario seed {document['scenario']['seed']}"
-        f"  profile {document['run']['configuration']['profile']}",
+        f" (surface {run['surface']}, endpoint {run['endpoint']})",
+        f"Run: {run['id']}  seed {document['scenario']['seed']}"
+        f"  profile {run['configuration']['profile']}"
+        f"  observation {run['observation_mode']}",
     ]
     artifacts = document["environment"].get("artifacts", {})
     if artifacts:
@@ -20,154 +27,135 @@ def render(document):
             "Artifacts: "
             + ", ".join(f"{name}={value}" for name, value in sorted(artifacts.items()))
         )
-    outcomes = document["outcomes"]
+    outcomes = derived["outcomes"]
+    populations = derived.get("populations") or {}
     counts = outcomes["counts"]
-    total = outcomes["measured"]
     share = outcomes["success_share"]
     fraction = "n/a" if share is None else f"{share * 100:.1f}%"
     lines.append(
-        f"Measured attempts: {total}  correct by deadline: "
+        f"Measured attempts: {outcomes['measured']}  correct by deadline: "
         f"{counts.get('completed', 0)} ({fraction})"
     )
     failures = [f"{name}={counts[name]}" for name in model.FAILURE_OUTCOMES if counts.get(name)]
     lines.append("Failures: " + (", ".join(failures) if failures else "none"))
+    denominators = populations.get("denominators") or {}
+    if denominators:
+        lines.append(
+            "Populations: planned/started/entered/finished "
+            f"{_count(populations, 'planned')}/{_count(populations, 'started')}/"
+            f"{_count(populations, 'measurement_entered')}/{_count(populations, 'finished')}"
+            f"  on-time correct over planned "
+            f"{_share(denominators.get('on_time_correct_over_planned'))}"
+        )
+    setup = populations.get("setup_failures") or {}
+    if setup:
+        lines.append("Setup failures: " + ", ".join(f"{name}={n}" for name, n in setup.items()))
     warmup = outcomes["warmup"]
     if warmup["attempts"]:
         lines.append(
             f"Warmup (excluded): {warmup['attempts']} attempts, {warmup['completed']} completed"
         )
-    version = document["scenario"]["version"]
-    if version < 6:
+
+    latency = derived.get("latency") or {}
+    lines.append("Latency")
+    lines.extend(_samples(latency.get("samples") or {}, {"first_text_ms": ("first text", "ms"),
+                                                         "final_ms": ("terminal", "ms")}))
+    for arm, entry in (latency.get("arms") or {}).items():
+        lines.append(f"  {arm} arm: {entry['measured']} measured")
         lines.extend(
-            _samples(
-                document["latency"]["samples"],
-                {
-                    "first_text_ms": (
-                        "first text" if document["scenario"]["version"] >= 4 else "first preview",
-                        "ms",
-                    ),
-                    "final_ms": ("final reply", "ms"),
-                    "update_gaps_ms": ("preview gap", "ms"),
-                },
+            "  " + line
+            for line in _samples(
+                entry.get("samples") or {},
+                {"first_text_ms": ("first text", "ms"), "final_ms": ("terminal", "ms")},
             )
         )
-    if "streaming" in document:
-        streaming = document["streaming"]
-        scenario = document["scenario"]
-        if scenario["version"] == 2:
-            lines.append(f"Host event completion floor: {scenario['event_ack_floor_ms']} ms")
-        elif scenario["version"] >= 5:
-            network = scenario["network"]
+
+    streaming = derived.get("streaming") or {}
+    if streaming:
+        labels = {
+            "max_display_delay_ms": ("maximum display delay", "ms"),
+            "longest_pending_stall_ms": ("longest pending stall", "ms"),
+            "peak_backlog_bytes": ("peak backlog", "B"),
+            "pending_bytes_at_cutoff": ("pending at cutoff", "B"),
+            "largest_burst_share": (f"largest {model.BURST_WINDOW_MS} ms output share", "%"),
+            "largest_output_share": ("largest output share", "%"),
+            "final_output_share": ("final output share", "%"),
+        }
+        lines.append("Visible progress")
+        lines.extend(_samples(streaming, labels))
+        lines.append(f"Completed without previews: {streaming.get('zero_preview', 0)}")
+
+    workflow = derived.get("workflow_results") or {}
+    lines.extend(_workflow(workflow))
+
+    attempts = [item for item in derived.get("attempts") or [] if item["phase"] == "measured"]
+    lines.append("Deadline snapshots")
+    if not attempts:
+        lines.append("  no measured attempts")
+    for item in attempts[:MAX_ATTEMPT_LINES]:
+        lines.append(
+            f"  slot {item['slot']} {item['outcome']}: visible={_number(item['visible_bytes'])} B"
+            f" pending={_number(item['pending_bytes'])} B"
+            f" peak={_number(item['peak_backlog_bytes'])} B"
+            f" stall={_number(item['longest_pending_stall_ms'])} ms"
+            f" deadline_visible={item['deadline_visible']}"
+            f" integrity={item['terminal_integrity']}"
+            f" stage={item['last_evidenced_stage']}"
+        )
+    if len(attempts) > MAX_ATTEMPT_LINES:
+        lines.append(f"  ... {len(attempts) - MAX_ATTEMPT_LINES} more measured attempts")
+
+    waterfalls = [
+        item["waterfall"] for item in attempts if item.get("waterfall")
+    ]
+    if waterfalls:
+        complete = sum(bool(item.get("complete")) for item in waterfalls)
+        residuals = [
+            item["residual_ms"] for item in waterfalls
+            if item.get("residual_ms") is not None
+        ]
+        lines.append(
+            f"Waterfall: complete={complete}/{len(waterfalls)}"
+            f" median_residual={_number(statistics.median(residuals)) if residuals else 'n/a'} ms"
+        )
+
+    attribution = derived.get("attribution") or {}
+    coverage = derived.get("coverage") or {}
+    quality = derived.get("quality") or {}
+    lines.append(
+        f"Attribution: {run['observation_mode']} available={attribution.get('available')}"
+        f" intervals={len(attribution.get('intervals') or [])}"
+        f" unresolved={len(attribution.get('unresolved') or [])}"
+        f" union={attribution.get('union_ms')} ms"
+    )
+    if coverage.get("paths"):
+        missing = [
+            name
+            for name, entry in coverage["paths"].items()
+            if not entry.get("complete")
+        ]
+        if not attribution.get("available"):
             lines.append(
-                f"Network: {network['profile']} on {network['link']}, "
-                f"{network['extra_rtt_ms']} ms extra RTT, "
-                f"{network['jitter_ms_per_direction']} ms jitter and "
-                f"{network['loss_percent_per_direction']:g}% loss per direction"
+                "Coverage: unavailable ("
+                f"{attribution.get('reason') or 'mode_' + run['observation_mode']})"
             )
-            probe = document["environment"].get("network_probe")
-            if probe:
-                reference = median(probe["reference_ms"])
-                lines.append(
-                    "Observed extra TCP RTT: "
-                    + ", ".join(
-                        f"{link} {max(0, median(probe[link + '_ms']) - reference):.1f} ms"
-                        for link in ("host", "client")
-                    )
-                )
-            counters = document["environment"].get("network_counters")
-            if counters:
-                lines.append(
-                    f"Netem workload: {counters['packets']} forwarded packets, "
-                    f"{counters['dropped']} dropped"
-                )
         else:
-            requested = scenario["host_broker_extra_rtt_ms"]
-            probe = document["environment"].get("network_probe")
-            observed = (
-                "unavailable" if probe is None else f"{model.observed_extra_rtt(probe):.1f} ms"
-            )
             lines.append(
-                f"Host–broker extra TCP RTT: {requested} ms requested, {observed} observed"
+                f"Coverage: {coverage.get('complete')}"
+                + (f" (incomplete: {', '.join(missing)})" if missing else "")
             )
-        metrics = model.STREAMING_METRICS
-        if scenario["version"] >= 6:
-            metrics = model.PRIMARY_STREAMING_METRICS
-        elif scenario["version"] == 5:
-            metrics = {**metrics, **model.LINK_STREAMING_METRICS}
-        lines.extend(_samples(streaming["samples"], metrics))
-        lines.append(
-            f"Completed without previews: {streaming['zero_preview']}/{counts['completed']}"
-        )
-    if version >= 6:
-        lines.append("Diagnostics")
-        lines.extend(
-            _samples(document["latency"]["samples"], {"first_text_ms": ("first text", "ms")})
-        )
-        if "diagnostics" in document:
-            lines.extend(
-                _samples(
-                    document["diagnostics"],
-                    {"segment_display_delay_ms": ("per-segment display delay", "ms")},
-                )
-            )
-    workflow = document.get("workflow_results", {})
-    if "history_measured" in workflow:
-        lines.append(
-            f"Background history reads: {workflow['history_correct']}/"
-            f"{workflow['history_measured']} correct by deadline"
-        )
-        lines.extend(_samples(workflow, {"history_read_ms": ("history read time", "ms")}))
-        if errors := workflow.get("history_errors"):
-            lines.append(
-                "History errors: " + ", ".join(f"{code}={n}" for code, n in errors.items())
-            )
-    if "attachment_measured" in workflow:
-        lines.append(
-            f"Background attachment reads: {workflow['attachment_correct']}/"
-            f"{workflow['attachment_measured']} verified"
-        )
-        lines.extend(_samples(workflow, {"attachment_read_ms": ("attachment read time", "ms")}))
-        if errors := workflow.get("attachment_errors"):
-            lines.append(
-                "Attachment errors: " + ", ".join(f"{code}={n}" for code, n in errors.items())
-            )
-    if "bulk" in workflow:
-        bulk = workflow["bulk"]
-        lines.append(
-            f"Bulk reads: {bulk['successful_reads']}/{bulk['expected_reads']} successful, "
-            f"{bulk['bytes_verified']}/{bulk['bytes_expected']} bytes verified"
-        )
-        if errors := bulk.get("errors"):
-            lines.append(
-                "Bulk read errors: " + ", ".join(f"{code}={n}" for code, n in errors.items())
-            )
-        gate = bulk.get("gate") or {}
-        detail = f" ({', '.join(gate.get('reasons', []))})" if gate.get("reasons") else ""
-        lines.append(f"Bulk read gate: {gate.get('state', 'unavailable')}{detail}")
-    if "arms" in workflow:
-        for arm in model.ARMS:
-            entry = workflow["arms"][arm]
-            lines.append(f"{arm} arm: {entry['correct']}/{entry['measured']} correct")
-            lines.extend(_samples(entry["samples"], model.PAIR_STREAMING_LABELS))
-    if "paired" in workflow:
-        paired = workflow["paired"]
-        for pair in paired["pairs"]:
-            if pair["reason"]:
-                lines.append(f"paired {pair['pair_id']}: unavailable ({pair['reason']})")
-                continue
-            gap = pair["deltas"]["longest_output_gap_ms"]
-            share = pair["deltas"]["largest_output_share"]
-            lines.append(
-                f"paired {pair['pair_id']}: longest gap {gap:+.1f} ms, "
-                f"largest share {share * 100:+.1f} pp"
-            )
-        gate = paired["gate"]
-        detail = f" ({', '.join(gate['reasons'])})" if gate["reasons"] else ""
-        lines.append(f"Idle/bulk gate: {gate['state']}{detail}")
-    if "catch_up_ms" in workflow:
-        lines.extend(_samples(workflow, {"catch_up_ms": ("catch-up after network restore", "ms")}))
-    for entry in document["latency"].get("analysis", {}).get("reasons", []):
-        lines.append(f"analysis: incomplete ({entry['name']})")
+    trace = derived.get("trace") or {}
+    lines.append(
+        f"Capture: mode={run['observation_mode']} quality={quality.get('state')}"
+        f" trace={trace.get('path') or 'none'} bytes={trace.get('bytes')}"
+    )
+    index = derived.get("trace_index") or {}
+    exemplars = index.get("exemplars") or []
+    if exemplars:
+        lines.append("Trace exemplars: " + ", ".join(
+            f"{item['kind']}:{item['attempt_id']}@{item['metric']}" for item in exemplars
+        ))
+
     status = document["status"]
     detail = f" ({'; '.join(status['reasons'])})" if status.get("reasons") else ""
     lines.append(f"Status: {status['state']}{detail}")
@@ -177,9 +165,25 @@ def render(document):
         if cleanup["result"] == "verified"
         else f"Cleanup: {cleanup['result']} ({cleanup.get('reason')})"
     )
-    if "duration_ms" in document:
-        lines.append(f"Duration: {document['duration_ms'] / 1000:.1f}s")
+    execution = document.get("execution") or {}
+    if execution.get("duration_ms") is not None:
+        lines.append(f"Orchestration duration: {execution['duration_ms'] / 1000:.1f}s")
+    for error in execution.get("errors") or []:
+        lines.append(f"Execution: {error}")
     return "\n".join(lines)
+
+
+def _count(populations, name):
+    entry = populations.get(name) or {}
+    return entry.get("measured", entry.get("total", 0))
+
+
+def _share(value):
+    return "n/a" if value is None else f"{value * 100:.1f}%"
+
+
+def _number(value):
+    return "n/a" if value is None else f"{value:.1f}"
 
 
 def _samples(samples, metrics):
@@ -188,7 +192,7 @@ def _samples(samples, metrics):
         entry = samples.get(metric) or {}
         quantiles = entry.get("quantiles") or {}
         if not entry.get("count"):
-            lines.append(f"{label}: no samples ({entry.get('reason') or 'unavailable'})")
+            lines.append(f"  {label}: no samples ({entry.get('reason') or 'unavailable'})")
             continue
         parts = [f"n={entry['count']}"]
         unavailable = entry.get("unavailable") or {}
@@ -200,81 +204,140 @@ def _samples(samples, metrics):
             else:
                 scale = 100 if unit == "%" else 1
                 parts.append(f"{name}={value * scale:.1f}{unit}")
-        lines.append(f"{label}: " + " ".join(parts))
+        lines.append(f"  {label}: " + " ".join(parts))
+    return lines
+
+
+def _workflow(workflow):
+    lines = []
+    if "history" in workflow:
+        history = workflow["history"]
+        lines.append(
+            f"History reads: {history.get('successful', 0)}/{history.get('expected', 0)} "
+            f"complete, {history.get('bytes_verified', 0)}/{history.get('bytes_expected', 0)} bytes"
+        )
+    if "attachment" in workflow:
+        attachment = workflow["attachment"]
+        lines.append(
+            f"Attachment reads: {attachment.get('successful', 0)}/"
+            f"{attachment.get('expected', 0)} verified"
+        )
+    if "exposure" in workflow:
+        exposure = workflow["exposure"]
+        detail = f" ({exposure.get('reason')})" if exposure.get("reason") else ""
+        lines.append(
+            f"Bulk exposure: {exposure.get('overlapping_reads', 0)}/"
+            f"{exposure.get('scheduled_reads', 0)} overlapping, "
+            f"union {exposure.get('union_ms', 0)} ms{detail}"
+        )
+    if "pair_counts" in workflow:
+        counts = workflow["pair_counts"]
+        lines.append(
+            f"Mixed pairs: {counts.get('pairs', 0)} "
+            f"(idle-first {counts.get('idle_first', 0)}, "
+            f"bulk-first {counts.get('bulk_first', 0)})"
+        )
+    if "deltas" in workflow:
+        pooled = (workflow["deltas"] or {}).get("pooled") or {}
+        for metric, entry in pooled.items():
+            if entry.get("mean") is None:
+                lines.append(f"  bulk-minus-idle {metric}: unavailable")
+            else:
+                lines.append(
+                    f"  bulk-minus-idle {metric}: {entry['mean']:+.3f} "
+                    f"(n={entry.get('count', 0)})"
+                )
+    if "bulk_read_gate" in workflow:
+        gate = workflow["bulk_read_gate"]
+        detail = f" ({', '.join(gate.get('reasons', []))})" if gate.get("reasons") else ""
+        lines.append(f"Bulk read gate: {gate.get('state')}{detail}")
+    if "assessable" in workflow:
+        lines.append(
+            f"Recovery: {workflow.get('terminal_first', 0)}/"
+            f"{workflow.get('assessable', 0)} assessable terminal-first, "
+            f"{workflow.get('verified_timeouts', 0)} verified timeouts, "
+            f"{workflow.get('unassessable', 0)} unassessable"
+        )
+    if "catch_up_ms" in workflow:
+        lines.extend(_samples({"catch_up_ms": workflow["catch_up_ms"]},
+                              {"catch_up_ms": ("catch-up after restore", "ms")}))
     return lines
 
 
 def comparison(result):
-    lines = [f"Comparison: {result['pairs']} matched pair(s), requires {result['required_pairs']}"]
-    for metric, entry in sorted(result["metrics"].items()):
-        interval = entry["interval_ms"]
-        bounds = (
-            "insufficient pairs"
-            if interval[0] is None
-            else f"[{interval[0]:.1f}, {interval[1]:.1f}] ms"
-        )
-        estimate = entry["estimate_ms"]
-        shown = "n/a" if estimate is None else f"{estimate:+.1f} ms"
+    declaration = result.get("declaration") or {}
+    versions = declaration.get("versions") or {}
+    lines = [
+        f"Comparison: {result['pairs']} matched pair(s), requires "
+        f"{result.get('required_pairs')}  vary={result.get('vary')}",
+        "Versions: " + ", ".join(f"{name}={value}" for name, value in versions.items()),
+        f"Observation: {_modes(result)}",
+        f"Budget revision: {declaration.get('budget_revision') or 'none'}",
+    ]
+    conditions = declaration.get("conditions") or {}
+    if conditions.get("mismatches"):
+        lines.append("Condition mismatches: " + ", ".join(conditions["mismatches"]))
+    lines.append(f"Verdict: {result['verdict']}")
+    for metric, entry in sorted((result.get("metrics") or {}).items()):
+        estimate = entry.get("estimate_ms")
+        upper = entry.get("upper_bound_ms")
+        shown = "n/a" if estimate is None else f"{estimate:+.3f} ms"
+        bound = "n/a" if upper is None else f"{upper:+.3f} ms"
         lines.append(
-            f"{metric}: {shown} {bounds} against +/-{entry['tolerance_ms']:.1f} ms"
-            f" -> {entry['verdict']} ({entry['reason']})"
+            f"{metric}: {shown} one-sided upper {bound} against "
+            f"+{entry.get('tolerance_ms')} ms -> {entry.get('verdict')}"
+            f" ({entry.get('reason')})"
         )
-    if "vary" in result:
-        lines.append("Comparison variable: " + result["vary"])
-        for arm, count in result["outcomes"].items():
-            lines.append(f"{arm} correct: {count['correct']}/{count['measured']}")
-    streaming_metrics = {
-        **model.STREAMING_METRICS,
-        **model.PRIMARY_STREAMING_METRICS,
-    }
-    for metric, entry in result.get("streaming", {}).items():
-        label, unit = streaming_metrics[metric]
-        scale = 100 if unit == "%" else 1
-        unit = "pp" if unit == "%" else unit
-        delta = entry["mean_paired_p95_delta"]
-        if delta is None:
-            lines.append(f"{label} p95 change: unavailable ({entry['reason']})")
+    for name in ("business", "mode_overhead", "predecessor"):
+        section = (result.get("verdicts") or {}).get(name)
+        if section is None:
             continue
-        low, high = entry["interval_95"]
+        detail = f" ({', '.join(section.get('reasons') or [])})" if section.get("reasons") else ""
+        lines.append(f"{name.replace('_', ' ').title()}: {section.get('state')}{detail}")
+    budget = result.get("budget")
+    if isinstance(budget, dict) and budget:
         lines.append(
-            f"{label} p95 change: {delta * scale:+.1f} {unit}"
-            f" [{low * scale:+.1f}, {high * scale:+.1f}] {unit} (95% interval)"
+            f"Budget: revision={budget.get('revision')} state={budget.get('state')}"
         )
-    if "bulk" in result:
-        bulk = result["bulk"]
-        lines.append(f"Bulk control: {bulk['state']}")
-        for entry in bulk["runs"]:
-            gate = entry["gate"]
-            if gate is None:
-                lines.append(f"  {entry['run']}: not applicable")
-                continue
-            detail = f" ({', '.join(gate['reasons'])})" if gate["reasons"] else ""
-            lines.append(f"  {entry['run']}: {gate['state']}{detail}")
-    if result["reasons"]:
+        for metric, entry in (budget.get("metrics") or {}).items():
+            lines.append(
+                f"  {metric}: upper {entry.get('upper_bound_observed')} vs "
+                f"{entry.get('upper_bound')} {entry.get('unit')} -> {entry.get('verdict')}"
+                f" ({entry.get('reason')})"
+            )
+    elif isinstance(budget, str) and budget:
+        # The predecessor section reports the budget revision it applied.
+        lines.append(f"Budget: revision={budget}")
+    if result.get("reasons"):
         lines.append("Reasons: " + ", ".join(result["reasons"]))
     return "\n".join(lines)
 
 
+def _modes(result):
+    declaration = result.get("declaration") or {}
+    modes = declaration.get("observation_mode") or {}
+    return "baseline=" + ",".join(map(str, modes.get("baseline") or [])) + " candidate=" + ",".join(
+        map(str, modes.get("candidate") or [])
+    )
+
+
 def method():
     declaration = analysis.DECLARATION
-    lines = [
-        "Comparison protocol (declared before measuring candidates):",
-        "  primary metrics: " + ", ".join(declaration["primary_metrics"]),
-        "  tolerances: " + ", ".join(f"{k}={v}ms" for k, v in declaration["tolerance_ms"].items()),
-        "  sample floor: " + ", ".join(f"{k}={v}" for k, v in declaration["sample_floor"].items()),
-        f"  repeats: {declaration['repeats']}  confidence: {declaration['confidence']}",
-        f"  statistic: {declaration['statistic']}",
-        "  correctness floor: " + str(declaration["correctness_floor"]),
-        "Idle/bulk control (AC-19):",
-        "  gated metrics: " + ", ".join(analysis.BULK_DECLARATION["gated_metrics"]),
-        "  reported metrics: " + ", ".join(analysis.BULK_DECLARATION["reported_metrics"]),
-        "  tolerance: "
-        + analysis.BULK_DECLARATION["decision"]
-        + " ("
-        + analysis.BULK_DECLARATION["aa_noise_statistic"]
-        + " x "
-        + str(analysis.BULK_DECLARATION["aa_noise_multiplier"])
-        + ")",
-        "  bulk correctness: " + analysis.BULK_DECLARATION["correctness"],
-    ]
-    return "\n".join(lines)
+    return "\n".join(
+        [
+            "Comparison protocol (declared before measuring candidates):",
+            "  primary metrics: " + ", ".join(declaration["primary_metrics"]),
+            "  tolerances: "
+            + ", ".join(f"{key}={value}ms" for key, value in declaration["tolerance_ms"].items()),
+            "  sample floor: "
+            + ", ".join(f"{key}={value}" for key, value in declaration["sample_floor"].items()),
+            f"  repeats: {declaration['repeats']}  confidence: {declaration['confidence']}",
+            f"  statistic: {declaration['statistic']}",
+            "  correctness floor: " + str(declaration["correctness_floor"]),
+            "Comparison dimensions: build, network, observation, aa, predecessor.",
+            "  build/network: one-way matched comparisons under shared conditions.",
+            "  observation: same build, only the observation mode varies; budget required.",
+            "  aa: neither build nor conditions vary; establishes measurement noise.",
+            "  predecessor: frozen pre-instrumentation off build vs candidate off build.",
+        ]
+    )

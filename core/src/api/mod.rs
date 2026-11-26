@@ -60,6 +60,7 @@ pub use crate::diagnostics::journal::{
     DiagnosticContext, DiagnosticEvent, DiagnosticKind, DiagnosticLevel, DiagnosticSink,
 };
 pub use crate::diagnostics::MetricSample;
+pub use crate::observation::bench;
 pub use crate::observation::SessionObservation;
 pub use crate::pairing::{PairingDecision, PairingError};
 #[cfg(test)]

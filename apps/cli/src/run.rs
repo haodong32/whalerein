@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use whalerein_core::api::bench::{
+    BenchContext, BenchEvent, CliRequestStage, CommandOutcome, Producer, RequestKind,
+};
 use whalerein_core::api::{
     AttachmentLimits, AttachmentReference, Cancellation, ClientService, CreateSessionInput,
     DiagnosticContext, DownloadRequest, InputKind, ObservationInterests, PairingDecision,
@@ -255,6 +258,9 @@ where
     S: std::future::Future<Output = ()>,
 {
     let config = parsed.config.take();
+    // CLI facts use the same process outlet and sequence stream as Core, with
+    // the CLI producer role. A disabled context stays a no-op.
+    let cli_bench = context.bench_for(Producer::Cli);
     let json = parsed.json;
     let yes = parsed.yes;
     let show_reasoning = parsed.show_reasoning;
@@ -276,6 +282,15 @@ where
         yes,
         show_reasoning,
     };
+    let (request_kind, request_token) = cli_request_identity(&cli_bench, &command);
+    cli_bench.emit(BenchEvent::CliRequest {
+        request: request_token.clone(),
+        attempt: 1,
+        kind: request_kind,
+        stage: CliRequestStage::Invoke,
+        outcome: None,
+        code: None,
+    });
     let config = match config.map_or_else(default_config_path, Ok) {
         Ok(path) => path,
         Err(error) => {
@@ -348,7 +363,17 @@ where
     let mut signal = std::pin::pin!(signal);
     let cancellation = Cancellation::new();
     let result = if matches!(command, Command::Answer { .. }) {
-        dispatch(&core, &cli, &command, key, deadline, &cancellation, output).await
+        dispatch(
+            &core,
+            &cli,
+            &command,
+            key,
+            deadline,
+            &cancellation,
+            output,
+            &cli_bench,
+        )
+        .await
     } else if matches!(command, Command::SessionDownload { .. }) {
         // A download owns a local cancellation token so Core drops its Host
         // transfer, releases reservations and removes staging before the
@@ -362,6 +387,7 @@ where
             deadline,
             &cancellation,
             output,
+            &cli_bench,
         ));
         let interrupted = tokio::select! {
             result = &mut work => Some(result),
@@ -393,6 +419,7 @@ where
             deadline,
             &cancellation,
             output,
+            &cli_bench,
         ));
         tokio::select! {
             result = &mut work => result,
@@ -436,6 +463,14 @@ where
             }
         }
     };
+    cli_bench.emit(BenchEvent::CliRequest {
+        request: request_token,
+        attempt: 1,
+        kind: request_kind,
+        stage: CliRequestStage::Terminal,
+        outcome: Some(cli_request_outcome(&result)),
+        code: result.as_ref().err().map(|error| error.code().to_owned()),
+    });
     let mut outcome = finish_core_result(&core, &command, result);
     if let Some(key) = key {
         let data = outcome.data.get_or_insert_with(|| json!({}));
@@ -572,6 +607,7 @@ fn finish_core_result(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     core: &Core,
     cli: &Execution,
@@ -580,6 +616,7 @@ async fn dispatch(
     deadline: Option<tokio::time::Instant>,
     cancellation: &Cancellation,
     output: &mut (impl std::io::Write + Send),
+    cli_bench: &BenchContext,
 ) -> Result<CliOutcome, CoreError> {
     let result = match command {
         Command::Login
@@ -935,7 +972,7 @@ async fn dispatch(
             // Resolution already ran inside the same budget, so tail gets only
             // what is left of the original deadline.
             let timeout = remaining_budget(deadline)?;
-            tail(core, command, cli, key, *once, timeout, output).await
+            tail(core, command, cli, key, *once, timeout, output, cli_bench).await
         }
         Command::Wait {
             fail_on_timeout, ..
@@ -1861,6 +1898,48 @@ fn render_tail_event(
     }
 }
 
+/// Classify one CLI operation for the typed request fact. Only the request
+/// kind matters here; the opaque token joins the invoke and terminal records
+/// inside this processor lifetime.
+fn cli_request_identity(bench: &BenchContext, command: &Command) -> (RequestKind, String) {
+    let raw = match command {
+        Command::Send {
+            operation_id: Some(id),
+            ..
+        } => format!("send:{id}"),
+        _ => format!("{}:{}", command.name(), command.session_id().unwrap_or("-")),
+    };
+    let kind = match command.name() {
+        "session.history" | "session.download" | "session.show" => RequestKind::History,
+        "session.send"
+        | "session.interrupt"
+        | "session.approval.approve"
+        | "session.approval.reject"
+        | "session.question.answer"
+        | "session.question.cancel"
+        | "session.create"
+        | "session.fork"
+        | "session.queue"
+        | "session.model.set"
+        | "operation.recover" => RequestKind::Command,
+        _ => RequestKind::Query,
+    };
+    (
+        kind,
+        bench.token(whalerein_core::api::bench::TokenDomain::Request, &raw),
+    )
+}
+
+fn cli_request_outcome(result: &Result<CliOutcome, CoreError>) -> CommandOutcome {
+    match result {
+        Ok(_) => CommandOutcome::Ok,
+        Err(CoreError::Timeout) => CommandOutcome::Timeout,
+        Err(error) if error.code() == "expired" => CommandOutcome::Expired,
+        Err(_) => CommandOutcome::Error,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn tail(
     core: &Core,
     command: &Command,
@@ -1869,6 +1948,7 @@ async fn tail(
     once: bool,
     timeout: Option<Duration>,
     output: &mut (impl std::io::Write + Send),
+    bench: &BenchContext,
 ) -> Result<CliOutcome, CoreError> {
     let json_output = cli.json;
     let show_reasoning = cli.show_reasoning;
@@ -1885,8 +1965,11 @@ async fn tail(
             Cancellation::new(),
         )
         .await?;
+    let stamps = crate::bench::WriteStamps::new(Arc::new(bench.clone()));
     let operation = async {
         while let Some(event) = observation.next_event().await {
+            let delivery = event.delivery;
+            let preview_range = event.preview_range;
             let SessionEventPayload::Conversation(update) = event.payload else {
                 continue;
             };
@@ -1900,7 +1983,19 @@ async fn tail(
             }
             let text = render_tail_event(json_output, &mut renderer, key, &update, show_reasoning);
             visible |= is_tail_output(&update, show_reasoning);
-            match crate::stream::write_all(output, text.as_bytes()) {
+            if text.is_empty() {
+                continue;
+            }
+            // The success stamp is taken only after `write_all` and its flush
+            // succeed. A partial or failed write carries no success stamp.
+            let (written, bytes) = crate::stream::write_all_counted(output, text.as_bytes());
+            stamps.stamp(
+                delivery,
+                preview_range.as_ref(),
+                bytes,
+                crate::bench::outcome_for(&written, bytes, text.len()),
+            );
+            match written {
                 Ok(()) => {
                     if once && visible {
                         stopped = true;

@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import mqtt from 'mqtt'
 import { ConfigError, topics, PROTOCOL_VERSION } from '../config.js'
 import { PluginError } from '../errors.js'
+import { emitFact } from '../observation/index.js'
 import { RelayTransport } from './transport.js'
 import { publishPacketBytes } from './packet.js'
 import { RelayObjectClient } from './relay-client.js'
@@ -127,6 +128,7 @@ export class MqttAccess {
     now = Date.now,
     codec = defaultCodec,
     transportProfile = 'default',
+    observation = null,
   }) {
     this.authorizationPublicKey = authorizationPublicKey instanceof Uint8Array && authorizationPublicKey.length === 32
       ? authorizationPublicKey
@@ -141,6 +143,7 @@ export class MqttAccess {
     this.connectFn = connect
     this.logger = logger
     this.now = now
+    this.observation = observation
     this.codec = resolveCodec(codec)
     validateTransportProfiles()
     const resolved = resolveTransportProfile(typeof transportProfile === 'string' ? transportProfile : 'default')
@@ -541,7 +544,14 @@ export class MqttAccess {
     if (packet > this.#transport.effectivePacketLimit(this.#accessReceive?.budget?.packet_bytes)) {
       throw new PluginError('protocol_version_incompatible', 'HostReady exceeds the hop packet budget')
     }
-    await this.#publish(this.topics.result, result)
+    const measurement = { request: '', attempt: 1, kind: 'ready', bytes: result.length }
+    try {
+      await this.#publish(this.topics.result, result)
+      this.#observePublish(measurement, 'accepted')
+    } catch (error) {
+      this.#observePublish(measurement, 'failed')
+      throw error
+    }
   }
 
   #onMessage(topic, payload, properties) {
@@ -664,6 +674,31 @@ export class MqttAccess {
     } finally { clearTimeout(timer) }
   }
 
+  // The local publish boundary owns one typed outcome. It is recorded after the
+  // transport accepted, rejected or skipped the message; no timestamp is
+  // invented for an attempt that never reached the client.
+  #observePublish({ request = '', attempt = 1, kind, bytes, stream = '', seq_start, seq_end, batch = '', queue_depth, queue_bytes }, outcome) {
+    const data = {
+      request: typeof request === 'string' ? request : '',
+      attempt: Number.isSafeInteger(attempt) && attempt > 0 ? attempt : 1,
+      kind,
+      bytes,
+      outcome,
+    }
+    // A live preview carries the interval and queue context of the exact batch
+    // whose local publish just finished. Result and ready publications keep
+    // their existing result-only shape.
+    if (typeof stream === 'string' && stream !== '') {
+      data.stream = stream
+      if (Number.isSafeInteger(seq_start)) data.seq_start = seq_start
+      if (Number.isSafeInteger(seq_end)) data.seq_end = seq_end
+      if (typeof batch === 'string' && batch !== '') data.batch = batch
+      if (Number.isSafeInteger(queue_depth)) data.queue_depth = queue_depth
+      if (Number.isSafeInteger(queue_bytes)) data.queue_bytes = queue_bytes
+    }
+    emitFact(this.observation, 'host_publish', data)
+  }
+
   /**
    * Publish one complete HostResult, inline or as a ready reference.
    *
@@ -679,12 +714,14 @@ export class MqttAccess {
     const expirySeconds = messageExpirySeconds(expiresAt, this.now(), options.upstreamExpirySeconds)
     if (expirySeconds === 0) {
       this.logger?.info('mqtt_reply_skipped', { reason: 'expired' })
+      this.#observePublish({ request: options.requestId ?? '', attempt: 1, kind: 'result', bytes: payload.length }, 'timeout')
       return Promise.resolve({ skipped: true, representation: 'none' })
     }
     const { properties, propertiesBytes } = replyProperties({
       requestId: options.requestId,
       expirySeconds,
     })
+    const measurement = { request: options.requestId ?? '', attempt: 1, kind: 'result', bytes: payload.length }
     return this.#transport.sendComplete(this.topics.result, payload, {
       kind: 'result',
       receiverLimit: this.#accessReceive?.budget?.packet_bytes,
@@ -692,15 +729,28 @@ export class MqttAccess {
       expiresAt,
       properties,
       propertiesBytes,
+    }).then((result) => {
+      this.#observePublish(measurement, result?.skipped === true ? 'timeout' : 'accepted')
+      return result
+    }, (error) => {
+      this.#observePublish(measurement, 'failed')
+      throw error
     })
   }
 
   /** Publish one complete control EventEnvelope, inline or as a ready reference. */
   publishEvent(payload) {
+    const measurement = { request: '', attempt: 1, kind: 'event', bytes: payload.length }
     return this.#transport.sendComplete(this.topics.event, payload, {
       kind: 'event',
       receiverLimit: this.#accessReceive?.budget?.packet_bytes,
       expiresAt: this.now() + this.#transport.objectTtlMs,
+    }).then((result) => {
+      this.#observePublish(measurement, 'accepted')
+      return result
+    }, (error) => {
+      this.#observePublish(measurement, 'failed')
+      throw error
     })
   }
 
@@ -714,9 +764,23 @@ export class MqttAccess {
    * advertising receive limits; the receiving Device's own ChannelHello budget
    * is applied by the caller's per-watch route.
    */
-  publishLive(payload, { deviceId = '' } = {}) {
+  publishLive(payload, {
+    deviceId = '', stream = '', seq_start, seq_end, batch = '', queue_depth, queue_bytes,
+  } = {}) {
     if (typeof deviceId !== 'string' || deviceId === '') return Promise.resolve(false)
-    return this.#transport.sendLive(this.deviceLiveTopic(deviceId), payload, {})
+    // The live outcome is the one Host transport fact for this preview batch.
+    // The caller already tokenized the batch and owns the enqueue readings.
+    const measurement = {
+      request: '', attempt: 1, kind: 'event', bytes: payload.length,
+      stream, seq_start, seq_end, batch, queue_depth, queue_bytes,
+    }
+    return this.#transport.sendLive(this.deviceLiveTopic(deviceId), payload, {}).then((accepted) => {
+      this.#observePublish(measurement, accepted === false ? 'dropped' : 'accepted')
+      return accepted
+    }, (error) => {
+      this.#observePublish(measurement, 'failed')
+      throw error
+    })
   }
 
   /** Wait until the first successful connect+subscribe+Ready cycle. */

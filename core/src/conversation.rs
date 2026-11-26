@@ -768,6 +768,15 @@ pub struct PreviewPrefix {
     pub reasoning_bytes: usize,
 }
 
+/// Actual branch taken while applying one live frame. Boundary observation
+/// records the confirmed disposition instead of guessing from a missing view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveDisposition {
+    Applied,
+    Duplicate,
+    Stale,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewUpdate {
     State(SessionState),
@@ -988,7 +997,18 @@ impl Conversation {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn live(&mut self, frame: &LiveFrame) -> CoreResult<Option<ViewUpdate>> {
+        Ok(self.live_decided(frame)?.0)
+    }
+
+    /// Apply one live frame and report the actual branch taken. Callers that
+    /// own boundary observation need `duplicate`/`stale` separately from an
+    /// applied frame that produced no visible update.
+    pub(crate) fn live_decided(
+        &mut self,
+        frame: &LiveFrame,
+    ) -> CoreResult<(Option<ViewUpdate>, LiveDisposition)> {
         let reference = frame
             .attempt
             .as_ref()
@@ -1022,7 +1042,7 @@ impl Conversation {
             }
         }
         if reference.live_epoch != self.epoch {
-            return Ok(None);
+            return Ok((None, LiveDisposition::Stale));
         }
         self.expire();
         if self
@@ -1030,7 +1050,7 @@ impl Conversation {
             .iter()
             .any(|(id, _)| id == &reference.attempt_id)
         {
-            return Ok(None);
+            return Ok((None, LiveDisposition::Stale));
         }
         if !self.active.contains_key(&reference.attempt_id) && self.active.len() >= ATTEMPTS {
             return Err(CoreError::Unavailable(
@@ -1040,7 +1060,7 @@ impl Conversation {
         let total: usize = self.active.values().map(Attempt::text_len).sum();
         let attempt = self.active.entry(reference.attempt_id.clone()).or_default();
         if frame.last_seq <= attempt.last {
-            return Ok(None);
+            return Ok((None, LiveDisposition::Duplicate));
         }
         let contiguous = frame.first_seq == attempt.last + 1;
         let started = matches!(frame.payload, Some(live_frame::Payload::Started(_)));
@@ -1064,7 +1084,7 @@ impl Conversation {
         }
         attempt.last = frame.last_seq;
         match frame.payload.as_ref().expect("validated payload") {
-            live_frame::Payload::Started(_) => Ok(None),
+            live_frame::Payload::Started(_) => Ok((None, LiveDisposition::Applied)),
             live_frame::Payload::Delta(delta) => {
                 let text = delta.text.as_str();
                 let kind = block_kind.expect("validated delta kind");
@@ -1078,14 +1098,17 @@ impl Conversation {
                 } else {
                     current.push_str(text);
                 }
-                Ok(Some(ViewUpdate::Preview {
-                    attempt: reference.clone().into(),
-                    block_id: frame.block_id.clone(),
-                    kind,
-                    text: text.to_owned(),
-                    replace,
-                    incomplete: !attempt.intact,
-                }))
+                Ok((
+                    Some(ViewUpdate::Preview {
+                        attempt: reference.clone().into(),
+                        block_id: frame.block_id.clone(),
+                        kind,
+                        text: text.to_owned(),
+                        replace,
+                        incomplete: !attempt.intact,
+                    }),
+                    LiveDisposition::Applied,
+                ))
             }
             live_frame::Payload::Reset(reset) => {
                 let text = reset.text.as_str();
@@ -1101,14 +1124,17 @@ impl Conversation {
                     // block; it does not invalidate other blocks.
                     *current = text.to_owned();
                 }
-                Ok(Some(ViewUpdate::Preview {
-                    attempt: reference.clone().into(),
-                    block_id: frame.block_id.clone(),
-                    kind,
-                    text: text.to_owned(),
-                    replace,
-                    incomplete: !attempt.intact,
-                }))
+                Ok((
+                    Some(ViewUpdate::Preview {
+                        attempt: reference.clone().into(),
+                        block_id: frame.block_id.clone(),
+                        kind,
+                        text: text.to_owned(),
+                        replace,
+                        incomplete: !attempt.intact,
+                    }),
+                    LiveDisposition::Applied,
+                ))
             }
             live_frame::Payload::Ended(end) => {
                 let outcome = AttemptOutcome::try_from(end.outcome).unwrap_or_default();
@@ -1116,10 +1142,13 @@ impl Conversation {
                     self.tools.abandon_attempt(&reference.clone().into());
                     self.settle(&reference.attempt_id);
                 }
-                Ok(Some(ViewUpdate::AttemptEnded {
-                    attempt: reference.clone().into(),
-                    outcome,
-                }))
+                Ok((
+                    Some(ViewUpdate::AttemptEnded {
+                        attempt: reference.clone().into(),
+                        outcome,
+                    }),
+                    LiveDisposition::Applied,
+                ))
             }
         }
     }

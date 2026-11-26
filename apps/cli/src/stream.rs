@@ -37,6 +37,44 @@ pub fn write_all(stream: &mut impl Write, bytes: &[u8]) -> Result<(), WriteFailu
     stream.flush().map_err(classify)
 }
 
+struct CountingWriter<'a, W: Write> {
+    inner: &'a mut W,
+    written: u64,
+}
+
+impl<W: Write> Write for CountingWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.written += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Write and flush through [`write_all`] while counting accepted bytes.
+///
+/// The count lets the benchmark distinguish a partial write (some bytes
+/// accepted before the pipe closed or the sink failed) from a failed write
+/// that never reached the sink. A successful result always counts every
+/// requested byte.
+pub fn write_all_counted(stream: &mut impl Write, bytes: &[u8]) -> (Result<(), WriteFailure>, u64) {
+    let requested = bytes.len() as u64;
+    let mut counter = CountingWriter {
+        inner: stream,
+        written: 0,
+    };
+    let result = write_all(&mut counter, bytes);
+    let written = if result.is_ok() {
+        requested
+    } else {
+        counter.written
+    };
+    (result, written)
+}
+
 /// Write one line to stdout.
 pub fn to_stdout(bytes: &[u8]) -> Result<(), WriteFailure> {
     let stdout = io::stdout();

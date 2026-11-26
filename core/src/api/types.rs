@@ -1255,6 +1255,14 @@ pub struct SessionEvent {
     pub session: crate::session::SessionKey,
     pub observation_id: String,
     pub generation: u64,
+    /// Core delivery ordinal for a conversation update that names one
+    /// (`preview`, `message`, `attempt_ended`). Internal metadata only; it is
+    /// never serialized into user-visible output.
+    pub delivery: Option<u64>,
+    /// Tokenized stream/block/sequence range for a delivered preview. Present
+    /// only when a live frame names an increment; internal metadata like
+    /// `delivery`, never serialized into user-visible output.
+    pub preview_range: Option<crate::observation::bench::FrameRange>,
     pub payload: SessionEventPayload,
 }
 

@@ -1,18 +1,26 @@
-"""Run the benchmark in one owned container and publish validated facts.
+"""Run one current-version benchmark case and publish validated facts.
 
 The integration runner owns image building and container lifecycle; this
-runner reuses that lifecycle for a separate benchmark entry point inside the
-same image. It consumes only the versioned `benchmark.json` export, validates
-it, records cleanup, and writes the report atomically.
+runner reuses that lifecycle for the benchmark entry point. The container
+fixture writes raw case facts plus an optional typed-event sidecar into a
+private case directory. This module validates those facts with
+`repo.benchmark.model`, optionally exports one native Perfetto trace, and
+publishes the report atomically. It never derives business verdicts itself.
+
+Case schema 2, suite schema 2 and workload version 8 are the only accepted
+contracts. Retired or future artifacts fail explicitly; there is no fallback
+reader.
 """
 
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
+from uuid import uuid4
 
 from ..diagnostics import sanitize
 from ..errors import RepoError, ToolMissingError, UsageError
@@ -26,9 +34,12 @@ from ..verification import (
     interrupt_on_termination,
     run_lock,
 )
-from . import model
+from . import model, trace
 
 DEFAULT_EXECUTION_TIMEOUT_SECONDS = 900
+DEFAULT_EVENTS_FILE = "events.ndjson"
+DEFAULT_SCHEDULE_FILE = "schedule.json"
+TRACE_FILENAME = "case.pftrace"
 
 EXIT_OK = 0
 EXIT_FAILED_ATTEMPTS = 1
@@ -38,8 +49,8 @@ EXIT_INTERRUPTED = 130
 
 @dataclass(frozen=True)
 class BenchRequest:
-    attempts: int = 30
-    warmup: int = 3
+    attempts: int = model.DEFAULT_ATTEMPTS
+    warmup: int = model.DEFAULT_WARMUPS
     delay_ms: int = 0
     cadence_ms: int = 100
     workflow: str = "watch"
@@ -50,6 +61,9 @@ class BenchRequest:
     seed: int = 0
     concurrency: int = 1
     timeout: int | None = None
+    observation: str = "off"
+    cpu_profile: bool = False
+    p95_scope: str = "pooled"
 
     def validate(self):
         if not 1 <= self.attempts <= 10000:
@@ -82,6 +96,22 @@ class BenchRequest:
             raise UsageError("--observation-window must be between 0 and 60000 milliseconds")
         if self.concurrency != 1:
             raise UsageError("--concurrency must be 1; sequential execution is the only scenario")
+        if self.observation not in model.OBSERVATION_MODES:
+            raise UsageError("--observation must be off, aggregate, or trace")
+        if self.p95_scope not in ("pooled", "per-arm"):
+            raise UsageError("--p95-scope must be pooled or per-arm")
+        if self.workflow == "mixed-load":
+            # Full idle/bulk pairs are required in every phase. Reject the plan
+            # before any build artifact or container exists.
+            if self.attempts % 2:
+                raise UsageError("mixed load requires an even measured --attempts count")
+            if self.warmup % 2:
+                raise UsageError("mixed load requires an even --warmup count")
+            if self.p95_scope == "per-arm" and self.attempts < 40:
+                raise UsageError(
+                    "per-arm P95 requires at least 40 measured attempts "
+                    "(20 eligible per arm)"
+                )
         if self.timeout is not None and self.timeout <= 0:
             raise UsageError("--benchmark-timeout must be a positive number of seconds")
 
@@ -98,6 +128,9 @@ class BenchRequest:
             "deadline_ms": self.deadline_ms,
             "observation_window_ms": self.observation_window_ms,
             "seed": self.seed,
+            "observation_mode": self.observation,
+            "cpu_profile": self.cpu_profile,
+            "p95_scope": self.p95_scope,
         }
 
 
@@ -109,6 +142,63 @@ class BenchResult:
     errors: list = field(default_factory=list)
 
 
+def slot_plan(request):
+    """The seeded, counterbalanced slot plan persisted before fixture startup.
+
+    This mirrors the fixture's pure planner so the plan written by the runner
+    and the plan the fixture persists are identical. It is planning, not
+    business classification: the model validates the plan and derives every
+    outcome from the attempts that actually started.
+    """
+    cycle_ms = 15000.0
+    slots = []
+    ordinal = 0
+    for phase in model.PHASES:
+        count = request.warmup if phase == "warmup" else request.attempts
+        if request.workflow == "mixed-load":
+            first = "idle" if model.seed_parity(request.seed) == 0 else "bulk"
+            other = "bulk" if first == "idle" else "idle"
+            prefix = "warmup" if phase == "warmup" else "pair"
+            for index in range(count // 2):
+                arms = (first, other) if index % 2 == 0 else (other, first)
+                for order, arm in enumerate(arms):
+                    slots.append(
+                        {
+                            "slot": ordinal,
+                            "phase": phase,
+                            "arm": arm,
+                            "pair": f"{prefix}-{index:04d}",
+                            "order": order,
+                            "planned_start_ms": round(cycle_ms * len(slots), 3),
+                        }
+                    )
+                    ordinal += 1
+        else:
+            prefix = "warmup" if phase == "warmup" else "slot"
+            for index in range(count):
+                slots.append(
+                    {
+                        "slot": ordinal,
+                        "phase": phase,
+                        "arm": model.ARM_WATCH,
+                        "pair": f"{prefix}-{index:04d}",
+                        "order": 0,
+                        "planned_start_ms": round(cycle_ms * len(slots), 3),
+                    }
+                )
+                ordinal += 1
+    return {"seed": str(request.seed), "rule": "alternating", "slots": slots}
+
+
+def schedule_document(request):
+    return {
+        "schema_version": model.SCHEMA_VERSION,
+        "kind": "benchmark-schedule",
+        "run_id": None,
+        **slot_plan(request),
+    }
+
+
 def _create_output(directory):
     directory = Path(directory).resolve()
     try:
@@ -116,6 +206,12 @@ def _create_output(directory):
     except FileExistsError as exc:
         raise UsageError("output directory already exists; choose a new directory") from exc
     return directory
+
+
+def _private_case(directory):
+    case = Path(directory) / "case"
+    case.mkdir(mode=0o700)
+    return case
 
 
 def run(root, runner, request, directory, *, prepared=None):
@@ -127,34 +223,92 @@ def run(root, runner, request, directory, *, prepared=None):
 
 
 def run_matrix(root, runner, request, directory):
-    """Run all declared user workloads in fresh containers with one build."""
+    """Run all declared workloads in fresh containers with one build."""
     request.validate()
     directory = _create_output(directory)
     report = directory / "suite.json"
-    cases = [
-        {"workflow": workflow, "network": profile, "link": link, "status": "pending"}
-        for workflow, profile, link in model.DEFAULT_CASES
-    ]
-    document = {
-        "schema_version": 1,
-        "status": "running",
-        "attempts_per_case": request.attempts,
-        "warmup_per_case": request.warmup,
-        "source": None,
-        "cases": cases,
-        "errors": [],
-    }
+    cases = _planned_cases(request)
+    document = _suite_document(request, cases, status="running")
     with run_lock(directory), interrupt_on_termination():
         return _run_matrix(directory, report, document, root, runner, request)
 
 
+def _planned_cases(request):
+    cases = []
+    for index, (workflow, profile, link) in enumerate(model.DEFAULT_CASES):
+        name = f"{workflow}-{profile}-{link}"
+        cases.append(
+            {
+                "index": index,
+                "case": name,
+                "run_id": None,
+                "workflow": workflow,
+                "network": model.network_settings(profile, link),
+                "link": link,
+                "path": None,
+                "status": "planned",
+                "case_schema": model.SCHEMA_VERSION,
+                "slot_plan": f"{name}/{DEFAULT_SCHEDULE_FILE}",
+                "observation_mode": request.observation,
+                "endpoint": model.OBSERVATION_ENDPOINT,
+                "capture_quality": None,
+                "artifacts": None,
+                "exit_code": None,
+            }
+        )
+    return cases
+
+
+def _suite_document(request, cases, *, status):
+    pending = [case["index"] for case in cases if case["status"] in ("planned", "running")]
+    if status == "running":
+        suite_status = {
+            "state": "incomplete",
+            "reasons": ["suite_in_progress"],
+            "pending": pending,
+            "interruption": None,
+        }
+    elif status == "interrupted":
+        suite_status = {
+            "state": "interrupted",
+            "reasons": ["benchmark_suite_interrupted"],
+            "pending": pending,
+            "interruption": {"pending": pending},
+        }
+    elif status == "complete":
+        suite_status = {
+            "state": "complete",
+            "reasons": [],
+            "pending": [],
+            "interruption": None,
+        }
+    else:
+        suite_status = {
+            "state": "incomplete",
+            "reasons": ["suite_incomplete"],
+            "pending": pending,
+            "interruption": None,
+        }
+    document = model.suite_document(
+        [],
+        suite_id="benchmark-suite",
+        started_at=datetime.now(UTC).isoformat(),
+        configuration=request.as_configuration(),
+        status=suite_status,
+    )
+    document["cases"] = cases
+    return document
+
+
 def _write_matrix(report, document):
+    model.validate_suite(document)
     atomic_write(report, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
 
 
 def _run_matrix(directory, report, document, root, runner, request):
     cases = document["cases"]
     exit_code = EXIT_OK
+    active = None
     context = _context(root, directory, "benchmark-matrix")
     _write_matrix(report, document)
     try:
@@ -167,64 +321,120 @@ def _run_matrix(directory, report, document, root, runner, request):
         source = context.sources["public"]
         document["source"] = {"revision": source.revision, "fingerprint": source.fingerprint}
         for index, case in enumerate(cases, 1):
-            workflow, profile, link = case["workflow"], case["network"], case["link"]
-            name = f"{workflow}-{profile}-{link}"
-            case["status"] = "running"
+            name = case["case"]
+            workflow, network = case["workflow"], case["network"]
+            active = case["index"]
             _write_matrix(report, document)
-            runner.out.info(f"Benchmark {index}/{len(cases)}: {workflow}, {profile} on {link}")
-            scenario = replace(request, workflow=workflow, network_profile=profile, link=link)
-            result = run(root, runner, scenario, directory / name, prepared=prepared)
-            outcomes = result.document["outcomes"]
-            workflow_results = result.document.get("workflow_results", {})
-            samples = (result.document.get("streaming") or {}).get("samples", {})
-            case.update(
-                status=result.document["status"]["state"],
-                exit_code=result.exit_code,
-                report=str(result.path.relative_to(directory)) if result.path else None,
-                measured=outcomes["measured"],
-                correct=outcomes["correct_by_deadline"],
-                workflow_results=workflow_results,
-                streaming_p95={
-                    metric: samples.get(metric, {}).get("quantiles", {}).get("p95")
-                    for metric in model.PRIMARY_STREAMING_METRICS
-                },
+            runner.out.info(f"Benchmark {index}/{len(cases)}: {workflow}, {network['profile']}")
+            scenario = replace(
+                request,
+                workflow=workflow,
+                network_profile=network["profile"],
+                link=network["link"],
+                # The recovery workload owns the client link; every declared
+                # case keeps the observation mode selected for the suite.
             )
-            _write_matrix(report, document)
-            status = f"{name}: {case['status']}, Watch {case['correct']}/{case['measured']} correct"
-            if "history_measured" in workflow_results:
-                correct = workflow_results["history_correct"]
-                measured = workflow_results["history_measured"]
-                status += f", history {correct}/{measured} correct"
-            if "bulk" in workflow_results:
-                bulk = workflow_results["bulk"]
-                status += (
-                    f", bulk {bulk['successful_reads']}/{bulk['expected_reads']} reads"
-                    f" / {bulk['bytes_verified']}/{bulk['bytes_expected']} bytes"
-                )
-            runner.out.info(status)
+            result = run(root, runner, scenario, directory / name, prepared=prepared)
+            active = None
+            _index_case(case, result, directory)
             if result.exit_code == EXIT_INTERRUPTED:
+                case["status"] = "interrupted"
+                _write_matrix(report, document)
                 raise KeyboardInterrupt
+            _write_matrix(report, document)
+            runner.out.info(_case_status(case))
             if result.exit_code != EXIT_OK:
                 exit_code = EXIT_FAILED_ATTEMPTS
-        document["status"] = "complete"
+        incomplete = [case["case"] for case in cases if case["status"] != "complete"]
+        document["status"] = {
+            "state": "complete" if not incomplete else "incomplete",
+            "reasons": [] if not incomplete else ["suite_cases_incomplete"],
+            "pending": [],
+            "interruption": None,
+        }
+        if incomplete:
+            exit_code = exit_code or EXIT_FAILED_ATTEMPTS
     except KeyboardInterrupt:
         runner.interrupted = True
         exit_code = EXIT_INTERRUPTED
-        document["errors"].append("Benchmark suite was interrupted")
+        document["status"] = {
+            "state": "interrupted",
+            "reasons": ["benchmark_suite_interrupted"],
+            "pending": [
+                case["index"]
+                for case in cases
+                if case["status"] in ("planned", "interrupted", "incomplete")
+            ],
+            "interruption": {"reason": "signal"},
+        }
+        for case in cases:
+            if case["index"] == active and case["status"] == "planned":
+                case["status"] = "interrupted"
     except (ToolMissingError, VerificationError, SourceError, OSError, ValueError) as exc:
         exit_code = (
             3
             if isinstance(exc, ToolMissingError)
             else getattr(exc, "exit_code", EXIT_FAILED_ATTEMPTS)
         )
-        document["errors"].append(sanitize(exc))
-    if document["status"] == "running":
-        document["status"] = "incomplete"
-        for case in cases:
-            if case["status"] == "running":
-                case["status"] = "incomplete"
+        document["status"] = {
+            "state": "incomplete",
+            "reasons": [sanitize(exc)],
+            "pending": [
+                case["index"]
+                for case in cases
+                if case["status"] in ("planned", "interrupted")
+            ],
+            "interruption": None,
+        }
+    else:
+        unreachable = [case for case in cases if case["status"] not in ("complete", "incomplete")]
+        if unreachable:
+            document["status"] = {
+                "state": "incomplete",
+                "reasons": ["suite_cases_not_executed"],
+                "pending": [case["index"] for case in unreachable],
+                "interruption": None,
+            }
+            exit_code = exit_code or EXIT_FAILED_ATTEMPTS
     _write_matrix(report, document)
-    return BenchResult(document, exit_code, report, document["errors"])
+    return BenchResult(document, exit_code, report, list(document["status"]["reasons"]))
+
+
+def _index_case(case, result, directory):
+    document = result.document
+    derived = document.get("derived", {})
+    quality = derived.get("quality", {})
+    trace_metadata = derived.get("trace", {})
+    outcomes = derived.get("outcomes", {})
+    case.update(
+        run_id=document["run"]["id"],
+        status="complete" if document["status"]["state"] == "complete" else "incomplete",
+        path=f"{case['case']}/benchmark.json",
+        outcomes=outcomes,
+        correct=outcomes.get("correct_by_deadline"),
+        measured=outcomes.get("measured"),
+        exit_code=result.exit_code,
+        observation_mode=document["run"]["observation_mode"],
+        endpoint=document["run"]["endpoint"],
+        capture_quality=quality.get("state"),
+        artifacts=document["environment"].get("artifacts"),
+        trace={
+            "path": trace_metadata.get("path"),
+            "checksum": trace_metadata.get("checksum"),
+            "complete": trace_metadata.get("complete"),
+            "losses": trace_metadata.get("losses"),
+        }
+        if document["run"]["observation_mode"] == "trace"
+        else None,
+    )
+
+
+def _case_status(case):
+    status = f"{case['case']}: {case['status']}, Watch {case['correct']}/{case['measured']} correct"
+    workflow = (case.get("outcomes") or {}).get("workflow")
+    if workflow is None:
+        return status
+    return status
 
 
 def _context(root, directory, purpose="benchmark"):
@@ -243,21 +453,32 @@ def _prepare(context, runner):
 
 
 def _run_in_directory(root, runner, request, directory, prepared):
-    export = directory / "container"
-    export.mkdir()
+    case_dir = _private_case(directory)
+    schedule = slot_plan(request)
+    _write_json(case_dir / DEFAULT_SCHEDULE_FILE, schedule)
     timeout = request.timeout or DEFAULT_EXECUTION_TIMEOUT_SECONDS
     errors = []
-    exit_code = EXIT_FAILED_ATTEMPTS
-    document = None
+    raw = None
     cleanup = {"result": "unverified", "reason": "container_not_launched"}
     interrupted = False
+    container_code = None
     started = monotonic()
     context = _context(root, directory)
+    key = secrets.token_hex(32)
+    env_file = directory / ".container.env"
     try:
         image, workspace = prepared if prepared is not None else _prepare(context, runner)
+        if prepared is None and context.cleanup_errors:
+            raise VerificationError("benchmark-build-cleanup-unverified")
+        source = context.sources.get("public")
+        revision = getattr(source, "revision", None) or "unavailable"
+        run_id = "run-" + uuid4().hex
+        _write_env(env_file, key)
         container = _container(context, runner, workspace, image, "benchmark")
         container.create(
-            _container_options(workspace, export, timeout, request),
+            _container_options(
+                workspace, case_dir, timeout, request, env_file, run_id, revision
+            ),
             [
                 "timeout",
                 "--signal=INT",
@@ -267,17 +488,17 @@ def _run_in_directory(root, runner, request, directory, prepared):
                 "tests/integration/benchmark/main.py",
             ],
         )
+        env_file.unlink(missing_ok=True)
         result = container.execute()
-        exit_code = result.returncode
-        if exit_code == 130:
+        container_code = result.returncode
+        if container_code == 130:
             raise KeyboardInterrupt
-        if exit_code == 124:
+        if container_code == 124:
             errors.append(f"Benchmark execution timed out after {timeout} seconds")
-        elif exit_code not in (0, EXIT_FAILED_ATTEMPTS):
-            errors.append("Benchmark entry point exited " + str(exit_code))
+        elif container_code not in (0, EXIT_FAILED_ATTEMPTS):
+            errors.append("Benchmark entry point exited " + str(container_code))
     except KeyboardInterrupt:
         interrupted = True
-        exit_code = EXIT_INTERRUPTED
         errors.append("Benchmark run was interrupted")
         runner.interrupted = True
     except ToolMissingError:
@@ -291,6 +512,7 @@ def _run_in_directory(root, runner, request, directory, prepared):
     except (OSError, ValueError) as exc:
         errors.append(sanitize(exc))
     finally:
+        env_file.unlink(missing_ok=True)
         context.cleanup()
         if context.cleanups:
             cleanup = (
@@ -298,52 +520,34 @@ def _run_in_directory(root, runner, request, directory, prepared):
                 if context.cleanup_errors
                 else {"result": "verified", "reason": None}
             )
-        document = _load(export / "benchmark.json", errors, interrupted)
-    if document is None:
-        document = _placeholder(request, errors)
-        exit_code = exit_code if interrupted else EXIT_FAILED_ATTEMPTS
-    else:
-        document["status"]["cleanup"] = cleanup
-        if cleanup["result"] != "verified":
-            document["status"]["reasons"] = [
-                *document["status"].get("reasons", []),
-                "cleanup_unverified",
-            ]
-            document["status"]["state"] = "invalid"
-            errors.append("Could not verify owned container cleanup")
-        if errors:
-            document["status"]["reasons"] = [
-                *document["status"].get("reasons", []),
-                *[entry for entry in errors if entry not in document["status"].get("reasons", [])],
-            ]
-        if errors and not interrupted:
-            document["status"]["state"] = "invalid"
-        document["duration_ms"] = round((monotonic() - started) * 1000, 3)
-    path = None
-    try:
-        atomic_write(
-            directory / "benchmark.json",
-            json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        )
-        path = directory / "benchmark.json"
-    except OSError as exc:
-        errors.append(sanitize(exc))
-    if interrupted:
-        exit_code = EXIT_INTERRUPTED
-    elif errors and exit_code == EXIT_OK:
-        exit_code = EXIT_FAILED_ATTEMPTS
-    elif document["outcomes"]["counts"].get("completed") != document["outcomes"].get("measured"):
-        exit_code = EXIT_FAILED_ATTEMPTS
-    if document["status"]["state"] != "complete":
-        exit_code = exit_code or EXIT_FAILED_ATTEMPTS
-    # The command contract is 0/1/130; a native container status is not a
-    # user-facing exit code.
-    if exit_code not in (EXIT_OK, EXIT_FAILED_ATTEMPTS, EXIT_INTERRUPTED):
-        exit_code = EXIT_FAILED_ATTEMPTS
-    return BenchResult(document, exit_code, path, errors)
+        raw = _load(case_dir / "benchmark.json", request, case_dir, errors, interrupted)
+    return _publish(
+        directory,
+        raw,
+        request,
+        errors=errors,
+        interrupted=interrupted,
+        cleanup=cleanup,
+        container_code=container_code,
+        started=started,
+        schedule=schedule,
+    )
 
 
-def _container_options(workspace, export, timeout, request):
+def _write_env(path, key):
+    # Only the ephemeral capture key needs the private file.
+    path.write_text("WHALEREIN_BENCH_CAPTURE_KEY=" + key + "\n")
+    path.chmod(0o600)
+
+
+def _write_json(path, document):
+    atomic_write(path, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+
+
+def _container_options(
+    workspace, case_dir, timeout, request, env_file, run_id, revision
+):
+    # The ephemeral capture key travels in a 0600 env file, never on argv.
     return [
         "--network",
         "none",
@@ -351,6 +555,8 @@ def _container_options(workspace, export, timeout, request):
         "NET_ADMIN",
         "--tmpfs",
         "/tmp:rw,exec,size=1024m,mode=1777",
+        "--env-file",
+        str(env_file),
         "--env",
         "WHALEREIN_PROGRESS=events",
         "--env",
@@ -358,79 +564,309 @@ def _container_options(workspace, export, timeout, request):
         "--env",
         "WHALEREIN_BENCHMARK_CONFIG="
         + json.dumps(request.as_configuration(), separators=(",", ":")),
+        "--env",
+        "WHALEREIN_BENCH_MODE=" + request.observation,
+        "--env",
+        "WHALEREIN_BENCH_OBSERVATION=" + request.observation,
+        "--env",
+        "WHALEREIN_BENCHMARK_OBSERVATION=" + request.observation,
+        "--env",
+        "WHALEREIN_BENCH_RUN_ID=" + run_id,
+        "--env",
+        "WHALEREIN_BENCH_OUTLET=/reports/outlet",
+        "--env",
+        "WHALEREIN_BENCH_SCHEDULE=/reports/" + DEFAULT_SCHEDULE_FILE,
+        "--env",
+        "WHALEREIN_BUILD_REVISION=" + revision,
         "--mount",
         f"type=bind,src={workspace},dst=/workspace,readonly",
         "--mount",
-        f"type=bind,src={export},dst=/reports",
+        f"type=bind,src={case_dir},dst=/reports",
     ]
 
 
-def _load(path, errors, interrupted):
+def _load(path, request, case_dir, errors, interrupted):
     if not path.exists():
         errors.append("Missing benchmark export")
         return None
     try:
-        document = model.read(path)
+        facts = json.loads(path.read_text())
+        model.validate_case(facts)
+        if facts["run"]["observation_mode"] != request.observation:
+            errors.append("Benchmark export observation mode disagrees with the request")
+            return None
+        if interrupted and facts["status"]["state"] == "complete":
+            facts["status"]["state"] = "incomplete"
+            facts["status"]["reasons"] = [
+                *facts["status"]["reasons"],
+                "run_interrupted",
+            ]
+        if request.observation == "trace":
+            _merge_events(facts, case_dir, errors)
+        return facts
+    except (OSError, ValueError) as exc:
+        errors.append("Invalid benchmark export: " + sanitize(exc))
+        return None
     except RepoError as exc:
         errors.append(str(exc))
         return None
-    if interrupted and document["status"]["state"] == "complete":
-        document["status"]["state"] = "incomplete"
-        document["status"]["reasons"] = ["run_interrupted"]
-    return document
 
 
-def _placeholder(request, errors):
+def _merge_events(facts, case_dir, errors):
+    """Merge the fixture's typed-event sidecar before model validation/export."""
+    if facts.get("events") is not None:
+        return
+    declared = (facts.get("trace") or {}).get("events_path")
+    if not declared:
+        return
+    candidates = [
+        case_dir / declared,
+        case_dir / Path(declared).name,
+        case_dir / "outlet" / Path(declared).name,
+    ]
+    path = next((item for item in candidates if item.is_file()), None)
+    if path is None:
+        errors.append("Missing benchmark event sidecar")
+        return
+    events = []
+    try:
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError("event row is not an object")
+            events.append(event)
+    except (OSError, ValueError) as exc:
+        errors.append("Invalid benchmark event sidecar: " + sanitize(exc))
+        return
+    facts["events"] = events
+
+
+def _publish(
+    directory,
+    facts,
+    request,
+    *,
+    errors,
+    interrupted,
+    cleanup,
+    container_code,
+    started,
+    schedule,
+):
+    if facts is None:
+        facts = _placeholder(request, errors, schedule, interrupted)
+    facts = dict(facts)
+    facts["status"] = dict(facts["status"])
+    facts["status"]["cleanup"] = cleanup
+    execution = {
+        "duration_ms": round((monotonic() - started) * 1000, 3),
+        "container_exit_code": container_code,
+        "interrupted": interrupted,
+        "errors": list(errors),
+        "cleanup": cleanup,
+        "trace_export": {"state": "not_requested"},
+    }
+    trace_failed = False
+    had_facts = bool(facts)
+    if request.observation == "trace" and had_facts and facts["status"]["state"] != "invalid":
+        try:
+            metadata = _export_trace(directory, facts)
+        except Exception as exc:  # noqa: BLE001 - export failure must not drop facts
+            trace_failed = True
+            errors.append("Benchmark trace export failed: " + sanitize(exc))
+            execution["trace_export"] = {
+                "state": "failed",
+                "reason": sanitize(exc),
+            }
+        else:
+            facts["trace"] = {
+                **facts["trace"],
+                "path": TRACE_FILENAME,
+                "checksum": metadata["checksum"],
+                "bytes": metadata["bytes"],
+                "complete": True,
+            }
+            execution["trace_export"] = {
+                "state": "complete",
+                "path": TRACE_FILENAME,
+                "checksum": metadata["checksum"],
+                "bytes": metadata["bytes"],
+            }
+    document = model.case_document(facts)
+    document["execution"] = {**execution, "errors": list(errors)}
+    path = None
+    try:
+        _write_json(directory / "benchmark.json", document)
+        path = directory / "benchmark.json"
+    except OSError as exc:
+        errors.append(sanitize(exc))
+    outcomes = document["derived"]["outcomes"]
+    measured = outcomes["measured"]
+    complete = document["status"]["state"] == "complete"
+    if interrupted:
+        exit_code = EXIT_INTERRUPTED
+    elif trace_failed or errors or cleanup["result"] != "verified":
+        exit_code = EXIT_FAILED_ATTEMPTS
+    elif container_code == EXIT_FAILED_ATTEMPTS:
+        exit_code = EXIT_FAILED_ATTEMPTS
+    elif not complete:
+        exit_code = EXIT_FAILED_ATTEMPTS
+    elif measured and outcomes["correct_by_deadline"] != measured:
+        exit_code = EXIT_FAILED_ATTEMPTS
+    else:
+        exit_code = EXIT_OK
+    if exit_code not in (EXIT_OK, EXIT_FAILED_ATTEMPTS, EXIT_INTERRUPTED):
+        exit_code = EXIT_FAILED_ATTEMPTS
+    return BenchResult(document, exit_code, path, errors)
+
+
+def _export_trace(directory, facts):
+    tier = facts["derived"] if "derived" in facts else None
+    if tier is None:
+        # Derivation is pure; use the same facts the report will publish.
+        derived = model.derive(facts)
+    else:  # pragma: no cover - defensive for callers that pass a report
+        derived = tier
+    events = facts.get("events") or []
+    origin = facts.get("environment", {}).get("capture_origin_ns")
+    exemplars = []
+    for exemplar in derived.get("trace_index", {}).get("exemplars", []):
+        trace_range = exemplar.get("trace_range")
+        if not trace_range:
+            continue
+        if "start_ns" in trace_range and "end_ns" in trace_range:
+            start_ns = int(trace_range["start_ns"])
+            end_ns = int(trace_range["end_ns"])
+        else:
+            if origin is None:
+                raise RepoError("trace export requires capture_origin_ns")
+            start_ns = int(origin) + int(round(trace_range["start_ms"] * 1_000_000))
+            end_ns = int(origin) + int(round(trace_range["end_ms"] * 1_000_000))
+        exemplars.append(
+            {
+                "attempt": exemplar["attempt_id"],
+                "metric": exemplar["metric"],
+                "reason": exemplar.get("selection"),
+                "coverage": (exemplar.get("coverage") or {}).get("complete"),
+                "start_ns": start_ns,
+                "end_ns": end_ns,
+            }
+        )
+    if events and origin is None:
+        raise RepoError("trace export requires capture_origin_ns")
+    staging = directory / ".case.pftrace.tmp"
+    try:
+        metadata = trace.export(
+            events,
+            exemplars,
+            staging,
+            origin_ns=int(origin) if origin is not None else None,
+            run_id=facts["run"]["id"],
+        )
+        staging.replace(directory / TRACE_FILENAME)
+    finally:
+        staging.unlink(missing_ok=True)
+    return metadata
+
+
+def _placeholder(request, errors, schedule, interrupted):
     """Facts that make an unsuccessful run explicit without inventing attempts."""
     configuration = request.as_configuration()
     scenario = model.scenario(configuration)
-    final_bytes = len(scenario["response"]["final_text"].encode())
+    state = "incomplete"
+    reasons = [sanitize(error) for error in errors] or ["run_not_executed"]
     return {
         "schema_version": model.SCHEMA_VERSION,
+        "kind": "benchmark-case",
         "scenario": scenario,
         "run": {
-            "id": "unavailable",
+            "id": "benchmark-" + uuid4().hex[:12],
             "started_at": datetime.now(UTC).isoformat(),
             "surface": model.OBSERVATION_SURFACE,
+            "endpoint": model.OBSERVATION_ENDPOINT,
+            "observation_mode": request.observation,
             "configuration": configuration,
+            "fingerprint": {
+                "build": {"revision": "unavailable", "fingerprint": "unavailable"},
+                "fixture": {"name": "unavailable", "fingerprint": "unavailable"},
+                "schemas": {
+                    "case": model.SCHEMA_VERSION,
+                    "event": 1,
+                    "workload": model.SCENARIO_VERSION,
+                },
+                "platform": {"os": "unavailable", "arch": "unavailable", "kernel": "unavailable"},
+                "limits": {"cpus": 0, "memory_bytes": 0},
+                "clock": {
+                    "source": "CLOCK_MONOTONIC",
+                    "unit": "ns",
+                    "verified": False,
+                },
+                "sampling": {"socket_hz": 0, "runtime_hz": 0},
+            },
         },
         "environment": {
             "artifacts": {"benchmark": "unavailable"},
-            "topology": {},
+            "topology": {"kind": "single-machine", "clock": "CLOCK_MONOTONIC"},
             "limits": {},
             "versions": {},
-            "fixture": {},
-        },
-        "attempts": [],
-        "outcomes": {
-            "counts": {name: 0 for name in model.OUTCOMES},
-            "measured": 0,
-            "correct_by_deadline": 0,
-            "success_share": None,
-            "warmup": {"attempts": 0, "completed": 0},
-        },
-        "latency": {
-            "samples": {
-                "first_text_ms": {"count": 0, "reason": "no_samples", "quantiles": {}},
-                "final_ms": {"count": 0, "reason": "no_samples", "quantiles": {}},
-                "update_gaps_ms": {"count": 0, "reason": "no_samples", "quantiles": {}},
+            "fixture": {"name": "unavailable", "fingerprint": "unavailable"},
+            "clock": {
+                "source": "CLOCK_MONOTONIC",
+                "unit": "ns",
+                "boot_id_verified": False,
+                "namespace_verified": False,
+                "producers": [],
             },
-            "tails": [{"name": "p95", "state": "unavailable", "reason": "run_not_executed"}],
         },
-        "streaming": model.streaming_summary(
-            [], final_bytes, burst_window_ms=model.BURST_WINDOW_MS, display_delay=True
-        ),
-        "workflow_results": model.workflow_summary(
-            [],
-            request.workflow,
-            final_bytes=final_bytes,
-            sizes=model.source_sizes(scenario),
-            paired=scenario["version"] >= 7 and request.workflow == "mixed-load",
-            burst_window_ms=model.BURST_WINDOW_MS,
-        ),
+        "schedule": schedule,
+        "attempts": [],
+        "trace": {"complete": request.observation != "trace"},
         "status": {
-            "state": "invalid",
-            "reasons": errors or ["run_not_executed"],
+            "state": state,
+            "reasons": reasons,
             "cleanup": {"result": "unverified", "reason": "run_not_executed"},
         },
     }
+
+
+def replay(directory, *, output=None):
+    """Re-derive a current report from saved facts without any container.
+
+    The published facts must re-derive byte-identically. Nothing in this path
+    contacts Docker, the fixture or the network, and the live report is never
+    modified.
+    """
+    source = Path(directory)
+    if source.is_dir():
+        source = source / "benchmark.json"
+    if not source.exists():
+        raise UsageError("no benchmark.json at " + str(source))
+    report = model.read(source)
+    facts = {key: value for key, value in report.items() if key not in ("derived", "execution")}
+    derived = model.derive(facts)
+    if derived != report["derived"]:
+        raise RepoError("invalid benchmark report: offline replay disagrees with saved facts")
+    document = {
+        **facts,
+        "derived": derived,
+        "execution": {
+            **(report.get("execution") or {}),
+            "replay": True,
+            "duration_ms": 0,
+        },
+    }
+    path = None
+    if output is not None:
+        path = Path(output)
+        if path.suffix != ".json":
+            path = path / "benchmark.json"
+        _write_json(path, document)
+    outcomes = derived["outcomes"]
+    passed = (
+        document["status"]["state"] == "complete"
+        and outcomes["measured"] > 0
+        and outcomes["correct_by_deadline"] == outcomes["measured"]
+    )
+    return BenchResult(document, EXIT_OK if passed else EXIT_FAILED_ATTEMPTS, path, [])

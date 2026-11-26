@@ -13,6 +13,7 @@ import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import { QuestionPager } from './question-pager.js'
 import { AttachmentService } from '../attachments/service.js'
 import { DEFAULT_ENVELOPE_BYTES, DEFAULT_TRANSPORT_PROFILE, transportProfileBudget } from '../contracts/transport.js'
+import { emitFact } from '../observation/index.js'
 
 const COMMAND_STATUS_TO_PROTO = Object.freeze({
   accepted: 'host_accepted',
@@ -175,7 +176,7 @@ export class CommandService {
   constructor({
     store, adapter, events, hostId, logger, now = Date.now, onAccepted = async () => {},
     codec = defaultCodec, security = null, attachmentPolicy = null, attachments = null,
-    transportProfile = DEFAULT_TRANSPORT_PROFILE,
+    transportProfile = DEFAULT_TRANSPORT_PROFILE, observation = null,
   }) {
     this.hostId = hostId
     this.store = store
@@ -184,6 +185,7 @@ export class CommandService {
     this.logger = logger
     this.now = now
     this.onAccepted = onAccepted
+    this.observation = observation
     this.codec = resolveCodec(codec)
     this.waits = new Map()
     this.questionAnswers = new Map()
@@ -914,6 +916,31 @@ export class CommandService {
   // --- control commands ---------------------------------------------------
 
   async #command(request, payload, scope) {
+    // AC-05/AC-01: one start/finish pair per authenticated command attempt.
+    // The outcome is the measured business disposition, not a synthesized one.
+    emitFact(this.observation, 'host_command', {
+      request: request?.request_id ?? '', attempt: 1, stage: 'start',
+    })
+    let outcome = 'error'
+    try {
+      const result = await this.#runCommand(request, payload, scope)
+      outcome = result?.status === 'succeeded'
+        ? 'ok'
+        : result?.errorCode === 'expired'
+          ? 'expired'
+          : result?.errorCode === 'unavailable' ? 'timeout' : 'error'
+      return result
+    } catch (error) {
+      outcome = error?.code === 'expired' ? 'expired' : 'error'
+      throw error
+    } finally {
+      emitFact(this.observation, 'host_command', {
+        request: request?.request_id ?? '', attempt: 1, stage: 'finish', outcome,
+      })
+    }
+  }
+
+  async #runCommand(request, payload, scope) {
     const operation = commandOperation(payload)
     if (!operation) return { status: 'rejected', errorCode: 'invalid_argument' }
     const commandId = request.command_id ?? ''

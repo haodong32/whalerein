@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/auth"
+	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/observation"
 	"github.com/whalerein/whalerein/access/internal/payload"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
@@ -143,6 +145,8 @@ type Dependencies struct {
 	QueryScopes QueryScopes
 	Config      Config
 	Now         func() time.Time
+	Metrics     *diagnostics.Metrics
+	Observation *observation.Sink
 }
 
 // Service implements the scoped ciphertext directory policy.
@@ -153,6 +157,8 @@ type Service struct {
 	queryScopes QueryScopes
 	config      Config
 	now         func() time.Time
+	metrics     *diagnostics.Metrics
+	observation *observation.Sink
 }
 
 // New validates the seams. A disabled directory still returns a service so the
@@ -160,6 +166,9 @@ type Service struct {
 func New(deps Dependencies) (*Service, error) {
 	if deps.Now == nil {
 		deps.Now = func() time.Time { return time.Now().UTC() }
+	}
+	if deps.Metrics == nil {
+		deps.Metrics = diagnostics.NewMetrics()
 	}
 	if deps.Config.Enabled {
 		if deps.Auth == nil || deps.Store == nil || deps.Payloads == nil {
@@ -179,6 +188,8 @@ func New(deps Dependencies) (*Service, error) {
 		queryScopes: deps.QueryScopes,
 		config:      deps.Config,
 		now:         deps.Now,
+		metrics:     deps.Metrics,
+		observation: deps.Observation,
 	}, nil
 }
 
@@ -258,6 +269,12 @@ type FinishRequest struct {
 type UploadTarget struct {
 	Ref    payload.Ref
 	Length int64
+	// ObjectID and RequestID carry the observation join identity authorized by
+	// PrepareUpload. They confer no additional authority.
+	ObjectID  string
+	RequestID string
+	HostID    string
+	DeviceID  string
 }
 
 // FetchResult is one authorized reader plus the metadata required for the
@@ -285,7 +302,29 @@ type DeleteResult struct {
 }
 
 // Reserve validates, authorizes and admits one exact ciphertext object.
-func (s *Service) Reserve(ctx context.Context, req ReserveRequest) (Reservation, error) {
+func (s *Service) Reserve(ctx context.Context, req ReserveRequest) (reservation Reservation, err error) {
+	started := time.Now()
+	defer func() {
+		if err != nil {
+			// A failure before reservation has no object identity; the empty
+			// identity token is a stable sentinel, never a real object id.
+			if s.observation != nil {
+				s.observeRelay(relayScope(req.HostID, req.DeviceID), relayRequestID(req.RequestID, ""), "", observation.RelayReserve, observation.OutcomeError, 0)
+			}
+			if s.metrics != nil {
+				s.metrics.ObserveAccessStage("relay_stage", time.Since(started), string(observation.OutcomeError))
+			}
+			return
+		}
+		requestID := relayRequestID(req.RequestID, reservation.ObjectID)
+		if s.observation != nil {
+			s.observeRelay(relayScope(req.HostID, req.DeviceID), requestID, reservation.ObjectID, observation.RelayReserve, observation.OutcomeOK, int(reservation.MaxBytes))
+		}
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("relay_stage", time.Since(started), string(observation.OutcomeOK))
+			s.metrics.ObserveAccessStageBytes("relay_stage", int64(reservation.MaxBytes))
+		}
+	}()
 	if !s.Enabled() {
 		return Reservation{}, ErrDisabled
 	}
@@ -560,24 +599,36 @@ func (s *Service) PrepareUpload(ctx context.Context, req UploadRequest) (UploadT
 	if req.ContentLength != object.Length {
 		return UploadTarget{}, fmt.Errorf("%w: Content-Length does not match the reservation", ErrConflict)
 	}
-	return UploadTarget{Ref: refFor(object), Length: object.Length}, nil
+	return UploadTarget{Ref: refFor(object), Length: object.Length, ObjectID: object.ObjectID, RequestID: object.RequestID, HostID: object.HostID, DeviceID: object.DeviceID}, nil
 }
 
 // Upload streams the caller's body through the payload service. The caller
 // must already have capped it at the reserved length plus one.
-func (s *Service) Upload(ctx context.Context, target UploadTarget, body io.Reader) error {
+func (s *Service) Upload(ctx context.Context, target UploadTarget, body io.Reader) (err error) {
+	started := time.Now()
+	read := &countingReader{reader: body}
+	requestID := relayRequestID(target.RequestID, target.ObjectID)
+	defer func() {
+		outcome := relayOutcome(err)
+		s.observeRelay(relayScope(target.HostID, target.DeviceID), requestID, target.ObjectID, observation.RelayUpload, outcome, read.count)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("relay_upload", time.Since(started), string(outcome))
+			s.metrics.ObserveAccessStageBytes("relay_upload", int64(read.count))
+		}
+	}()
 	if !s.Enabled() {
 		return ErrDisabled
 	}
 	if body == nil || target.Length <= 0 {
 		return fmt.Errorf("%w: upload target is incomplete", ErrInvalid)
 	}
-	return translate(s.payloads.Write(ctx, target.Ref, body))
+	return translate(s.payloads.Write(ctx, target.Ref, read))
 }
 
 // Finish verifies the declared length and digest and publishes the staged
 // object.
 func (s *Service) Finish(ctx context.Context, req FinishRequest) (Object, error) {
+	started := time.Now()
 	object, err := s.loadObject(ctx, req.ObjectRequest, func(object store.PayloadObject) error {
 		return s.verifyHost(ctx, auth.RelayAuthFinish, req.ObjectRequest, auth.RelayFields{
 			RelayVersion:    req.RelayVersion,
@@ -589,20 +640,53 @@ func (s *Service) Finish(ctx context.Context, req FinishRequest) (Object, error)
 		})
 	}, true)
 	if err != nil {
+		s.observeRelay("", relayRequestID("", req.ObjectID), req.ObjectID, observation.RelayFinish, observation.OutcomeError, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("relay_finish", time.Since(started), string(observation.OutcomeError))
+		}
 		return Object{}, err
 	}
+	requestID := relayRequestID(object.RequestID, object.ObjectID)
 	if err := s.checkResultParent(ctx, object); err != nil {
+		s.observeRelay(relayScope(object.HostID, object.DeviceID), requestID, object.ObjectID, observation.RelayFinish, observation.OutcomeError, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("relay_finish", time.Since(started), string(observation.OutcomeError))
+		}
 		return Object{}, err
 	}
 	if req.CiphertextBytes != uint64(object.Length) {
+		s.observeRelay(relayScope(object.HostID, object.DeviceID), requestID, object.ObjectID, observation.RelayFinish, observation.OutcomeError, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("relay_finish", time.Since(started), string(observation.OutcomeError))
+		}
 		return Object{}, fmt.Errorf("%w: finish length does not match the reservation", ErrConflict)
 	}
 	if !bytes.Equal(req.SHA256, object.Digest) {
+		s.observeRelay(relayScope(object.HostID, object.DeviceID), requestID, object.ObjectID, observation.RelayFinish, observation.OutcomeError, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("relay_finish", time.Since(started), string(observation.OutcomeError))
+		}
 		return Object{}, ErrDigestMismatch
 	}
+	// finish records the declared, authorized length before verification; the
+	// verify stage records the digest-verified logical bytes exactly once.
+	s.observeRelay(relayScope(object.HostID, object.DeviceID), requestID, object.ObjectID, observation.RelayFinish, observation.OutcomeOK, int(object.Length))
+	if s.metrics != nil {
+		s.metrics.ObserveAccessStage("relay_finish", time.Since(started), string(observation.OutcomeOK))
+	}
+	verifyStarted := time.Now()
 	finished, err := s.payloads.Finish(ctx, refFor(object))
 	if err != nil {
+		s.observeRelay(relayScope(object.HostID, object.DeviceID), requestID, object.ObjectID, observation.RelayVerify, observation.OutcomeError, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("relay_verify", time.Since(verifyStarted), string(observation.OutcomeError))
+		}
 		return Object{}, translate(err)
+	}
+	s.observeRelay(relayScope(object.HostID, object.DeviceID), requestID, object.ObjectID, observation.RelayVerify, observation.OutcomeOK, int(finished.Length))
+	if s.metrics != nil {
+		s.metrics.ObserveAccessStage("relay_verify", time.Since(verifyStarted), string(observation.OutcomeOK))
+		s.metrics.ObserveAccessStageBytes("relay_verify", int64(finished.Length))
 	}
 	return objectResult(finished), nil
 }
@@ -610,6 +694,7 @@ func (s *Service) Finish(ctx context.Context, req FinishRequest) (Object, error)
 // Fetch rechecks authority and opens the exact ciphertext. The caller streams
 // and closes the returned reader.
 func (s *Service) Fetch(ctx context.Context, req ObjectRequest) (FetchResult, error) {
+	started := time.Now()
 	object, err := s.loadObject(ctx, req, func(object store.PayloadObject) error {
 		return s.verifyHost(ctx, auth.RelayAuthObject, req, auth.RelayFields{
 			RelayVersion:   req.RelayVersion,
@@ -619,15 +704,33 @@ func (s *Service) Fetch(ctx context.Context, req ObjectRequest) (FetchResult, er
 		})
 	}, true)
 	if err != nil {
+		s.observeRelay("", relayRequestID("", req.ObjectID), req.ObjectID, observation.RelayFetch, observation.OutcomeError, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("relay_fetch", time.Since(started), string(observation.OutcomeError))
+		}
 		return FetchResult{}, err
 	}
+	requestID := relayRequestID(object.RequestID, object.ObjectID)
 	// A query-scoped object is releasable only after its reply was issued.
 	if object.RequestID != "" && object.ConnectionRef != "" && object.IssuedAt == nil {
+		s.observeRelay(relayScope(object.HostID, object.DeviceID), requestID, object.ObjectID, observation.RelayFetch, observation.OutcomeError, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("relay_fetch", time.Since(started), string(observation.OutcomeError))
+		}
 		return FetchResult{}, ErrForbidden
 	}
 	reader, opened, err := s.payloads.Open(ctx, refFor(object))
 	if err != nil {
+		s.observeRelay(relayScope(object.HostID, object.DeviceID), requestID, object.ObjectID, observation.RelayFetch, observation.OutcomeError, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("relay_fetch", time.Since(started), string(observation.OutcomeError))
+		}
 		return FetchResult{}, translate(err)
+	}
+	s.observeRelay(relayScope(object.HostID, object.DeviceID), requestID, object.ObjectID, observation.RelayFetch, observation.OutcomeOK, int(opened.Length))
+	if s.metrics != nil {
+		s.metrics.ObserveAccessStage("relay_fetch", time.Since(started), string(observation.OutcomeOK))
+		s.metrics.ObserveAccessStageBytes("relay_fetch", int64(opened.Length))
 	}
 	return FetchResult{
 		Body:            reader,
@@ -950,4 +1053,58 @@ func translateAuth(err error) error {
 	default:
 		return err
 	}
+}
+
+// observeRelay emits one ciphertext object boundary. The object token is the
+// scoped object identity; the request token is the parent when one exists and
+// the object's own message identity for a pre-admission body.
+func (s *Service) observeRelay(scope, request, object string, stage observation.RelayStage, outcome observation.Outcome, bytes int) {
+	if s.observation == nil {
+		return
+	}
+	event := observation.RelayEvent{
+		Scope: scope, Request: request, ObjectOp: object, Stage: stage, Route: observation.RouteReference, Outcome: outcome,
+	}
+	if bytes > 0 {
+		event.Bytes = uint64(bytes)
+		event.HasBytes = true
+	}
+	s.observation.Relay(event)
+}
+
+func relayRequestID(parent, object string) string {
+	if parent != "" {
+		return parent
+	}
+	return object
+}
+
+// countingReader counts physical bytes the payload service actually consumed
+// from the request body. It never inspects content.
+type countingReader struct {
+	reader io.Reader
+	count  int
+}
+
+func (r *countingReader) Read(buffer []byte) (int, error) {
+	n, err := r.reader.Read(buffer)
+	r.count += n
+	return n, err
+}
+
+func relayOutcome(err error) observation.Outcome {
+	switch {
+	case err == nil:
+		return observation.OutcomeOK
+	case errors.Is(err, ErrExpired):
+		return observation.OutcomeExpired
+	default:
+		return observation.OutcomeError
+	}
+}
+
+// relayScope binds an object's parent request token to the authenticated
+// host/device scope captured at reservation.
+func relayScope(hostID, deviceID string) string {
+	return hostID + "\x00" + deviceID
 }

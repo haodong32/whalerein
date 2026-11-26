@@ -20,6 +20,7 @@ import (
 
 	"github.com/whalerein/whalerein/access/internal/config"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/observation"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"google.golang.org/protobuf/proto"
@@ -68,6 +69,7 @@ type Dependencies struct {
 	Metrics     *diagnostics.Metrics
 	Masker      *diagnostics.Masker
 	Logger      *slog.Logger
+	Observation *observation.Sink
 }
 
 // Service owns the Access MQTT session and routes inbound broker messages.
@@ -83,6 +85,7 @@ type Service struct {
 	metrics     *diagnostics.Metrics
 	masker      *diagnostics.Masker
 	logger      *slog.Logger
+	observation *observation.Sink
 
 	advertisedMu sync.Mutex
 	advertised   map[string]string
@@ -142,6 +145,7 @@ func New(deps Dependencies) (*Service, error) {
 		metrics:     deps.Metrics,
 		masker:      deps.Masker,
 		logger:      deps.Logger,
+		observation: deps.Observation,
 		transient:   make(map[string]chan *whalereinv1.HostResult),
 		advertised:  map[string]string{},
 		now:         func() time.Time { return time.Now().UTC() },
@@ -228,6 +232,7 @@ func (s *Service) handleNotification(notification *Notification) {
 		return
 	}
 	online := notification.Event == "connected"
+	s.observeConnectionNotice(notification, online)
 	switch notification.Kind {
 	case "host":
 		if notification.HostID != "" {
@@ -583,7 +588,9 @@ func (s *Service) handleDeviceReady(hostID, deviceID string, payload []byte) {
 	// offline broker notification for the last known connection clears the
 	// whole route; a sibling's advertisement persists across another sibling's
 	// reconnect.
-	if !s.receivers.Register(route, 0, generation, budget) {
+	registered := s.receivers.Register(route, 0, generation, budget)
+	s.observeClientReadyNotice(deviceID, generation, registered)
+	if !registered {
 		s.logger.Warn("replayed device receive advertisement ignored", "device", s.masker.Device(deviceID), "code", transportCodeBudgetBad)
 	}
 }
@@ -627,6 +634,7 @@ func (s *Service) handleReady(result *whalereinv1.HostResult) {
 		readyAt = time.UnixMilli(ready.GetConnectedAtUnixMs()).UTC()
 	}
 	accepted := s.presence.MarkHostReady(hostID, readyAt)
+	s.observeReadyNotice(hostID, accepted)
 	s.logger.Info("host ready", "host", s.masker.Host(hostID))
 	s.rememberHostKey(hostID, ready.GetAuthorizationPublicKey())
 	if accepted {
@@ -796,13 +804,21 @@ func (s *Service) PublishMessage(ctx context.Context, message Message) error {
 	if message.Topic == "" {
 		return ErrInvalidTopic
 	}
+	client, directed := s.clientReplyConnection(message)
 	session, ok := s.currentSession()
 	if !ok || session == nil {
+		if directed {
+			s.observeClientTransport(client, len(message.Payload), ErrUnavailable)
+		}
 		return ErrUnavailable
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
 	defer cancel()
-	if err := session.Publish(publishCtx, message); err != nil {
+	err := session.Publish(publishCtx, message)
+	if directed {
+		s.observeClientTransport(client, len(message.Payload), err)
+	}
+	if err != nil {
 		return fmt.Errorf("publish message: %w", err)
 	}
 	return nil
@@ -874,13 +890,21 @@ func (s *Service) PublishDeviceEvent(ctx context.Context, hostID, deviceID strin
 	if event.GetDeviceId() != "" && event.GetDeviceId() != deviceID {
 		return transportReject(transportCodeTopic, ErrInvalidTopic)
 	}
+	client, tracked := s.clientForwardConnection(deviceID)
 	session, ok := s.currentSession()
 	if !ok || session == nil {
+		if tracked {
+			s.observeClientTransport(client, len(payload), ErrUnavailable)
+		}
 		return ErrUnavailable
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
 	defer cancel()
-	if err := session.Publish(publishCtx, Message{Topic: DeviceEventTopic(hostID, deviceID), Payload: payload, QoS: 1}); err != nil {
+	err := session.Publish(publishCtx, Message{Topic: DeviceEventTopic(hostID, deviceID), Payload: payload, QoS: 1})
+	if tracked {
+		s.observeClientTransport(client, len(payload), err)
+	}
+	if err != nil {
 		return fmt.Errorf("publish device event: %w", err)
 	}
 	return nil
@@ -913,16 +937,27 @@ func (s *Service) PublishDeviceNotice(ctx context.Context, hostID, deviceID stri
 	if err != nil {
 		return fmt.Errorf("marshal device notice: %w", err)
 	}
+	client, tracked := s.clientForwardConnection(deviceID)
 	if uint64(len(payload)) > s.transport.EnvelopeBytes {
+		if tracked {
+			s.observeClientTransport(client, len(payload), ErrMessageBudget)
+		}
 		return transportReject(transportCodeEnvelope, ErrMessageBudget)
 	}
 	session, ok := s.currentSession()
 	if !ok || session == nil {
+		if tracked {
+			s.observeClientTransport(client, len(payload), ErrUnavailable)
+		}
 		return ErrUnavailable
 	}
 	publishCtx, cancel := context.WithTimeout(ctx, s.publishTimeout())
 	defer cancel()
-	if err := session.Publish(publishCtx, Message{Topic: DeviceNoticeTopic(hostID, deviceID), Payload: payload, QoS: 1}); err != nil {
+	err = session.Publish(publishCtx, Message{Topic: DeviceNoticeTopic(hostID, deviceID), Payload: payload, QoS: 1})
+	if tracked {
+		s.observeClientTransport(client, len(payload), err)
+	}
+	if err != nil {
 		return fmt.Errorf("publish device notice: %w", err)
 	}
 	return nil
@@ -1093,4 +1128,183 @@ func (s *Service) RenewDeviceSession(ctx context.Context, permission store.Devic
 		fmt.Sprintf("deadline_ms %d", permission.ExpiresAt.UnixMilli()),
 	})
 	return err
+}
+
+// observeConnectionNotice emits one broker connection-generation fact. The
+// broker connection reference is opaque-tokenized by the sink; the generation
+// is the broker-issued connection instance.
+func (s *Service) observeConnectionNotice(notification *Notification, online bool) {
+	if notification.ConnID == 0 {
+		return
+	}
+	role := observation.RoleClient
+	switch notification.Kind {
+	case "host":
+		if notification.HostID == "" {
+			return
+		}
+		role = observation.RoleHost
+	case "device", "session":
+		if notification.DeviceID == "" {
+			return
+		}
+	default:
+		return
+	}
+	stage := observation.NoticeDisconnect
+	if online {
+		stage = observation.NoticeSubscribe
+	}
+	epoch := notification.Epoch
+	if epoch == "" {
+		epoch = s.presence.BrokerEpoch()
+	}
+	if s.observation != nil {
+		s.observation.Notice(observation.NoticeEvent{
+			Connection: ConnectionRef{Epoch: epoch, ID: notification.ConnID}.String(),
+			Generation: notification.ConnID,
+			Role:       role,
+			Stage:      stage,
+			Outcome:    observation.OutcomeOK,
+		})
+	}
+	if s.metrics != nil {
+		stageName := "notice_subscribe"
+		if !online {
+			stageName = "notice_disconnect"
+		}
+		s.metrics.ObserveAccessStageDisposition(stageName, string(observation.OutcomeOK))
+	}
+}
+
+// observeReadyNotice records HostReady as subscription readiness for the
+// current Host connection generation. A superseded readiness proof is marked
+// replaced instead of confirming the replacement connection.
+func (s *Service) observeReadyNotice(hostID string, accepted bool) {
+	connID, _, _, known := s.presence.HostConnection(hostID)
+	if !known || connID == 0 {
+		return
+	}
+	outcome := observation.OutcomeOK
+	if !accepted {
+		outcome = observation.OutcomeReplaced
+	}
+	if s.observation != nil {
+		s.observation.Notice(observation.NoticeEvent{
+			Connection: ConnectionRef{Epoch: s.presence.BrokerEpoch(), ID: connID}.String(),
+			Generation: connID,
+			Role:       observation.RoleHost,
+			Stage:      observation.NoticeReady,
+			Outcome:    outcome,
+		})
+	}
+	if s.metrics != nil {
+		s.metrics.ObserveAccessStageDisposition("notice_ready", string(outcome))
+	}
+}
+
+// observeClientReadyNotice records a Device receive advertisement as client
+// subscription readiness. A replayed generation is replaced, not a new ready.
+func (s *Service) observeClientReadyNotice(deviceID string, generation uint64, registered bool) {
+	if generation == 0 {
+		return
+	}
+	connID, known := s.presence.DeviceConnection(deviceID)
+	if !known || connID == 0 {
+		return
+	}
+	outcome := observation.OutcomeOK
+	if !registered {
+		outcome = observation.OutcomeReplaced
+	}
+	if s.observation != nil {
+		s.observation.Notice(observation.NoticeEvent{
+			Connection: ConnectionRef{Epoch: s.presence.BrokerEpoch(), ID: connID}.String(),
+			Generation: generation,
+			Role:       observation.RoleClient,
+			Stage:      observation.NoticeReady,
+			Outcome:    outcome,
+		})
+	}
+	if s.metrics != nil {
+		s.metrics.ObserveAccessStageDisposition("notice_ready", string(outcome))
+	}
+}
+
+// clientForwardConnection resolves the single live client connection a message
+// published on a device topic can reach. Zero live connections give Access no
+// receiver to attest, and sibling connections make the per-receiver generation
+// ambiguous; both cases stay unobserved instead of naming a connection the
+// broker cannot prove. A disabled outlet returns before touching presence, so
+// off and aggregate mode pay one nil check on the publish path.
+func (s *Service) clientForwardConnection(deviceID string) (ConnectionRef, bool) {
+	if s.observation == nil || s.presence == nil || deviceID == "" {
+		return ConnectionRef{}, false
+	}
+	connections := s.presence.DeviceConnections(deviceID)
+	if len(connections) != 1 {
+		return ConnectionRef{}, false
+	}
+	ref := connections[0].Ref
+	if !ref.Valid() {
+		return ConnectionRef{}, false
+	}
+	return ref, true
+}
+
+// clientReplyConnection resolves the exact admitted client connection named by
+// a directed query reply. Only the query lane writes the reply topic and its
+// reserved target property, so this generation is exact rather than inferred
+// from presence. A disabled outlet returns before parsing the topic.
+func (s *Service) clientReplyConnection(message Message) (ConnectionRef, bool) {
+	if s.observation == nil {
+		return ConnectionRef{}, false
+	}
+	parsed, err := ParseTopic(message.Topic)
+	if err != nil || parsed.Kind != KindDeviceReply {
+		return ConnectionRef{}, false
+	}
+	ref, ok := ParseConnectionRef(message.Properties.Get(PropertyTarget))
+	if !ok {
+		return ConnectionRef{}, false
+	}
+	return ref, true
+}
+
+// observeClientTransport records one Access republish leg toward a client
+// connection. It runs at most once per publish attempt; a higher-layer retry is
+// a separate attempt, so one call never double-counts a message.
+//
+// The contract gives access_transport no stream, sequence or watch identity,
+// so this stamp attests MQTT transit for the connection generation only. It
+// must not be read as a per-stream interval; the report marks that join
+// ambiguity explicitly.
+func (s *Service) observeClientTransport(ref ConnectionRef, bytes int, err error) {
+	if s.observation == nil || ref.ID == 0 || bytes < 0 {
+		return
+	}
+	s.observation.Transport(observation.TransportEvent{
+		Connection: ref.String(),
+		Generation: ref.ID,
+		Role:       observation.RoleClient,
+		Direction:  observation.DirectionBrokerToClient,
+		Bytes:      uint64(bytes),
+		Outcome:    transportOutcome(err),
+	})
+}
+
+// transportOutcome maps a publish attempt to the bounded transport vocabulary.
+// A queue or budget refusal means Access never handed the message to the
+// broker; any other error means the attempt failed after admission.
+func transportOutcome(err error) observation.TransportOutcome {
+	switch {
+	case err == nil:
+		return observation.TransportOutcomeOK
+	case errors.Is(err, ErrQueueFull), errors.Is(err, ErrQueueBytes),
+		errors.Is(err, ErrQueueClosed), errors.Is(err, ErrMessageBudget),
+		errors.Is(err, ErrInvalidTopic), errors.Is(err, ErrPeerTransportUnsupported):
+		return observation.TransportOutcomeDropped
+	default:
+		return observation.TransportOutcomeFailed
+	}
 }

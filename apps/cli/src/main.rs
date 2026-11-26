@@ -6,6 +6,7 @@
 //! Plain (non-JSON) invocations keep clap's own help and error text.
 
 mod account;
+mod bench;
 mod cli;
 mod diagnostics;
 mod output;
@@ -56,7 +57,10 @@ async fn async_main() -> ExitCode {
     };
     let json = parsed.json;
     let (diagnostics, completion) = diagnostics::CliDiagnosticSink::start(parsed.verbose, json);
-    let context = DiagnosticContext::new(diagnostics.clone());
+    // One process outlet is shared by Core facts and CLI write stamps. `off`
+    // and `aggregate` compose a disabled context and create no writer.
+    let bench = bench::BenchSetup::from_env();
+    let context = DiagnosticContext::new(diagnostics.clone()).with_bench(bench.core_context());
     let trace_id = context.trace_id().to_owned();
     let started = Instant::now();
     let outcome = run::run(parsed, &diagnostics, context).await;
@@ -72,6 +76,9 @@ async fn async_main() -> ExitCode {
         })
     });
     diagnostics.finish(completion);
+    // Flush and fsync the observation outlet with a bounded shutdown. A
+    // stalled writer cannot change the CLI exit code.
+    bench.finish();
     ExitCode::from(exit)
 }
 
