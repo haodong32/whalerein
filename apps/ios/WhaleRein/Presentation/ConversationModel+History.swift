@@ -180,6 +180,7 @@ extension ConversationModel {
             // insertions to their nearest successor already in the window.
             var successorID: String?
             for message in page.messages.reversed() {
+                reconcileUserEcho(message)
                 if currentIDs.contains(message.messageId) {
                     if page.source == .online, !liveMessageIds.contains(message.messageId),
                        let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
@@ -187,7 +188,6 @@ extension ConversationModel {
                     }
                     successorID = message.messageId
                 } else {
-                    reconcileUserEcho(message)
                     if let successorID, let index = messages.firstIndex(where: { $0.messageId == successorID }) {
                         state.messages.insert(message, at: index)
                     } else {
@@ -256,11 +256,7 @@ extension ConversationModel {
                   generation == history.traversal,
                   reference.hostId == hostId,
                   reference.sessionId == sessionId else { return }
-            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-                state.messages[index] = message
-            } else {
-                state.messages.append(message)
-            }
+            insertCommittedMessage(message)
             liveMessageIds.insert(message.messageId)
             settleAuthoritativeContent(message)
             history.errorKey = nil
@@ -273,7 +269,7 @@ extension ConversationModel {
     private func applyHistoryPage(_ page: ConversationHistoryPage) {
         var existing = Set(messages.map(\.messageId))
         let prepended = page.messages.filter { existing.insert($0.messageId).inserted }
-        for message in prepended {
+        for message in page.messages {
             reconcileUserEcho(message)
         }
         if !prepended.isEmpty {

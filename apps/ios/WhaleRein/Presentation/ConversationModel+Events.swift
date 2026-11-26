@@ -107,12 +107,7 @@ extension ConversationModel {
         case .message(let message):
             liveMessageIds.insert(message.messageId)
             settleAuthoritativeContent(message)
-            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-                state.messages[index] = message
-                return
-            }
-            let insertion = reconcileUserEcho(message) ?? state.messages.endIndex
-            state.messages.insert(message, at: insertion)
+            guard insertCommittedMessage(message) else { return }
             if message.role == .assistant {
                 previewText = nil
                 previewAttemptId = nil
@@ -123,12 +118,7 @@ extension ConversationModel {
         case .replace(let message):
             liveMessageIds.insert(message.messageId)
             settleAuthoritativeContent(message)
-            if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
-                state.messages[index] = message
-            } else {
-                let insertion = reconcileUserEcho(message) ?? state.messages.endIndex
-                state.messages.insert(message, at: insertion)
-            }
+            insertCommittedMessage(message)
             if message.role == .assistant {
                 previewText = nil
                 previewAttemptId = nil

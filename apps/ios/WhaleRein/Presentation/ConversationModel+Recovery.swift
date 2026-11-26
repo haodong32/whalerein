@@ -151,16 +151,18 @@ extension ConversationModel {
         return nil
     }
 
-    /// Deduplicates committed messages by stable identity, including a recovered
-    /// reply that also arrived through the live watch.
-    func insertCommittedMessage(_ message: ConversationMessage) {
+    /// Updates committed content and reconciles any local row for the same send.
+    @discardableResult
+    func insertCommittedMessage(_ message: ConversationMessage) -> Bool {
+        let wasPresent = messages.contains { $0.messageId == message.messageId }
+        let insertion = reconcileUserEcho(message)
         if let index = messages.firstIndex(where: { $0.messageId == message.messageId }) {
             if messages[index] != message {
                 state.messages[index] = message
             }
-            return
+        } else {
+            state.messages.insert(message, at: insertion ?? state.messages.endIndex)
         }
-        let insertion = reconcileUserEcho(message) ?? state.messages.endIndex
-        state.messages.insert(message, at: insertion)
+        return !wasPresent
     }
 }
