@@ -174,7 +174,7 @@ class TraceOutlet {
 
   #emitAt(ts, event, data, producer) {
     if (this.#closed) { this.#dropped++; return false }
-    const at = typeof ts === 'bigint' ? Number(ts) : Number(ts)
+    const at = Number(ts)
     if (!Number.isInteger(at) || at < 0) { this.#rejected++; return false }
     let record
     try {

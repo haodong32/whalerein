@@ -1954,19 +1954,6 @@ fn every_remaining_event_name_is_stable() {
 }
 
 #[test]
-fn forbidden_field_detection_is_shared_with_serde_errors() {
-    assert_eq!(
-        forbidden_from_error("data contains `text`"),
-        Some("text".into())
-    );
-    assert_eq!(
-        forbidden_from_error("data contains `cursor`"),
-        Some("cursor".into())
-    );
-    assert_eq!(forbidden_from_error("data contains nothing"), None);
-}
-
-#[test]
 fn frame_identity_is_deterministic_and_scoped() {
     let mut envelope = whalerein_proto::EventEnvelope {
         host_id: "host".into(),

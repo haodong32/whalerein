@@ -3,6 +3,7 @@ package observation
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 )
 
@@ -285,4 +286,23 @@ func newLifetime() (string, error) {
 		return "", fmt.Errorf("observation: generate lifetime: %w", err)
 	}
 	return "lt-" + hex.EncodeToString(material[:]), nil
+}
+
+// Scope binds a client-supplied request id to the authenticated host/device
+// pair so equal ids on two devices stay distinct.
+func Scope(hostID, deviceID string) string {
+	return hostID + "\x00" + deviceID
+}
+
+// OutcomeForError maps one operation error to the observation vocabulary.
+// expiredErr is the package-specific terminal expiry sentinel.
+func OutcomeForError(err, expiredErr error) Outcome {
+	switch {
+	case err == nil:
+		return OutcomeOK
+	case errors.Is(err, expiredErr):
+		return OutcomeExpired
+	default:
+		return OutcomeError
+	}
 }

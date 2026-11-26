@@ -1099,18 +1099,11 @@ func (r *countingReader) Read(buffer []byte) (int, error) {
 }
 
 func relayOutcome(err error) observation.Outcome {
-	switch {
-	case err == nil:
-		return observation.OutcomeOK
-	case errors.Is(err, ErrExpired):
-		return observation.OutcomeExpired
-	default:
-		return observation.OutcomeError
-	}
+	return observation.OutcomeForError(err, ErrExpired)
 }
 
 // relayScope binds an object's parent request token to the authenticated
 // host/device scope captured at reservation.
 func relayScope(hostID, deviceID string) string {
-	return hostID + "\x00" + deviceID
+	return observation.Scope(hostID, deviceID)
 }

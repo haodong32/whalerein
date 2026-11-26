@@ -437,6 +437,9 @@ impl BenchContext {
     }
 
     pub fn token(&self, domain: TokenDomain, raw: &str) -> String {
+        if !self.enabled() {
+            return String::new();
+        }
         self.inner.tokenizer.token(domain, raw)
     }
 
@@ -667,15 +670,8 @@ pub fn validate_record(value: &Value) -> Result<BenchRecord, BenchViolation> {
     let mut wire = Map::new();
     wire.insert("event".to_owned(), Value::String(event_name.to_owned()));
     wire.insert("data".to_owned(), Value::Object(data.clone()));
-    let event: BenchEvent = serde_json::from_value(Value::Object(wire)).map_err(|error| {
-        let detail = error.to_string();
-        if detail.contains("unknown field") {
-            if let Some(field) = forbidden_from_error(&detail) {
-                return BenchViolation::ForbiddenField(field);
-            }
-        }
-        BenchViolation::InvalidData(detail)
-    })?;
+    let event: BenchEvent = serde_json::from_value(Value::Object(wire))
+        .map_err(|error| BenchViolation::InvalidData(error.to_string()))?;
     if event.name() != event_name {
         return Err(BenchViolation::InvalidData(
             "event name and data shape disagree".into(),
@@ -692,9 +688,6 @@ pub fn validate_record(value: &Value) -> Result<BenchRecord, BenchViolation> {
         .ok_or(BenchViolation::InvalidData("typed event data".into()))?;
     for key in data.keys() {
         if !typed_data.contains_key(key) {
-            if FORBIDDEN_FIELDS.contains(&key.as_str()) {
-                return Err(BenchViolation::ForbiddenField(key.clone()));
-            }
             return Err(BenchViolation::InvalidData(format!(
                 "unknown field `{key}`"
             )));
@@ -713,14 +706,6 @@ pub fn validate_record(value: &Value) -> Result<BenchRecord, BenchViolation> {
     Ok(record)
 }
 
-fn forbidden_from_error(detail: &str) -> Option<String> {
-    for field in FORBIDDEN_FIELDS {
-        if detail.contains(&format!("`{field}`")) {
-            return Some((*field).to_owned());
-        }
-    }
-    None
-}
 
 /// Check the baked contract against the checked-in manifest. The adapter tests
 /// use it so a schema change cannot silently leave Rust behind.

@@ -1444,14 +1444,7 @@ func (s *Service) observeCommand(scope, request string, attempt uint64, stage ob
 }
 
 func commandAdmissionOutcome(err error) observation.Outcome {
-	switch {
-	case err == nil:
-		return observation.OutcomeOK
-	case errors.Is(err, ErrExpired):
-		return observation.OutcomeExpired
-	default:
-		return observation.OutcomeError
-	}
+	return observation.OutcomeForError(err, ErrExpired)
 }
 
 func commandTerminalOutcome(status whalereinv1.OnlineStatus) observation.Outcome {
@@ -1470,5 +1463,5 @@ func commandTerminalOutcome(status whalereinv1.OnlineStatus) observation.Outcome
 // commandScope binds a durable request token to the authenticated host/device
 // pair. A same-id command from another device never joins this operation.
 func commandScope(hostID, deviceID string) string {
-	return hostID + "\x00" + deviceID
+	return observation.Scope(hostID, deviceID)
 }

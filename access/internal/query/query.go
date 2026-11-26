@@ -362,14 +362,7 @@ func (s *Service) observeQuery(scope, request string, route observation.Route, a
 }
 
 func admitOutcome(err error) observation.Outcome {
-	switch {
-	case err == nil:
-		return observation.OutcomeOK
-	case errors.Is(err, ErrExpired):
-		return observation.OutcomeExpired
-	default:
-		return observation.OutcomeError
-	}
+	return observation.OutcomeForError(err, ErrExpired)
 }
 
 func queryRoute(request *whalereinv1.HostRequest) observation.Route {
@@ -711,5 +704,5 @@ func remainingExpiry(deadline, now time.Time, upstream *uint32) *uint32 {
 // operationScope binds a request token to the authenticated host/device pair
 // so the same client-generated request id on two devices stays distinct.
 func operationScope(hostID, deviceID string) string {
-	return hostID + "\x00" + deviceID
+	return observation.Scope(hostID, deviceID)
 }
