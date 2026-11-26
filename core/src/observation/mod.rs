@@ -1785,7 +1785,7 @@ async fn handle_envelope(
         });
     }
     // Resolve and verify a referenced control event before opening it.
-    let envelope = match core.resolve_event_envelope(envelope).await {
+    let envelope = match core.resolve_event_envelope(envelope, class).await {
         Ok(envelope) => envelope,
         Err(error) => {
             emit_receipt(
