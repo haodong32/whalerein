@@ -521,8 +521,7 @@ def execute(run, fixture):
             scenario = fixture.scenario
             history = attachment = None
             if CONTROLS.get("history"):
-                reader = pair_device(scenario, "history-reader", keyring)
-                history = workflow.prepare_history(scenario, reader, CONTROLS["history"])
+                history = prepare_history_reads(scenario, keyring, CONTROLS["history"])
             if CONTROLS.get("attachment"):
                 attachment_reader = pair_device(scenario, "attachment-reader", keyring)
                 attachment = workflow.prepare_attachment(
@@ -543,6 +542,20 @@ def pair_device(scenario, name, keyring):
     invite = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
     device.call("host", "connect", "--invite-stdin", "--yes", input_text=invite["pairingUri"])
     return device
+
+
+def prepare_history_reads(scenario, keyring, specification):
+    """Pair one independent client and session per scheduled history reader.
+
+    The readers run concurrently by design. Reusing one device/session made
+    their page cursors legitimate conflicts rather than a load signal.
+    """
+    return [
+        workflow.prepare_history(
+            scenario, pair_device(scenario, f"history-reader-{index}", keyring), specification
+        )
+        for index, _ in enumerate(specification.get("start_ms") or [])
+    ]
 
 
 def record_slot(run, fixture, slot, keyring, history, attachment):
@@ -587,7 +600,7 @@ def record_slot(run, fixture, slot, keyring, history, attachment):
         attempted["planned_start_ns"] = planned_start
         if CONTROLS.get("outage"):
             measured = measure_recovery(run, fixture, observer, planned_start, stream)
-        elif history is not None and arm == "bulk":
+        elif history and arm == "bulk":
             measured = measure_reads(
                 run, observer, fixture.scenario, planned_start, session, stream,
                 history, attachment,
@@ -691,12 +704,14 @@ def measure_reads(run, observer, scenario, planned_start, session, stream, histo
                 "cli", f"{op}-{uuid.uuid4().hex[:16]}"
             )
 
+        if len(history) != len(history_offsets):
+            raise RuntimeError("history reader plan does not match its schedule")
         history_futures = [
             executor.submit(
-                history.read, planned_start + offset * 1_000_000, DEADLINE_MS,
+                reader.read, planned_start + offset * 1_000_000, DEADLINE_MS,
                 environment=read_environment("history"), on_spawn=spawn,
             )
-            for offset in history_offsets
+            for reader, offset in zip(history, history_offsets, strict=True)
         ]
         attachment_futures = [
             executor.submit(
@@ -1490,9 +1505,11 @@ def _private(path):
 
 def stable_reason(error):
     name = type(error).__name__
-    text = str(error).strip()
-    if text and len(text) <= 120 and all(character.isprintable() for character in text):
-        return f"{name}:{text}"
+    text = " ".join(str(error).split())
+    if text:
+        text = text[:120]
+        if all(character.isprintable() for character in text):
+            return f"{name}:{text}"
     return name
 
 
