@@ -845,3 +845,14 @@ def test_history_reader_timeout_keeps_verified_bytes_separate():
     # Physical bytes already transferred remain visible for the report.
     assert result["physical_bytes"] == 60
     assert result["pages"] == 2
+
+
+def test_clock_deduplicates_repeated_membership_for_one_lifetime(patched_clock):
+    admission = clock.ClockAdmission(
+        fixture_boot_id="boot-a", fixture_namespace="ns-a", clock=lambda: 1000
+    )
+    first = admission.register("cli", pid=21)
+    second = admission.register("cli", pid=21)
+    assert first == second
+    assert len(admission.result()["producers"]) == 1
+    assert admission.result()["producers"][0]["verified"] is True

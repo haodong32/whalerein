@@ -142,6 +142,15 @@ class ClockAdmission:
         }
         if reason:
             entry["reason"] = reason
+        for existing in self.producers:
+            if existing["producer"] == producer and existing["lifetime"] == lifetime:
+                # A long-lived capture re-checks the same producer process many
+                # times. Keep one membership row; a later failure still poisons
+                # the verification for that lifetime.
+                existing["verified"] = existing["verified"] and entry["verified"]
+                if reason:
+                    existing["reason"] = reason
+                return existing
         self.producers.append(entry)
         return entry
 
