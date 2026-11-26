@@ -823,7 +823,19 @@ impl Core {
     pub(crate) async fn resolve_event_envelope(
         &self,
         envelope: &whalerein_proto::EventEnvelope,
+        class: crate::access::DeliveryClass,
     ) -> CoreResult<whalerein_proto::EventEnvelope> {
+        // Standalone live frames carry their ciphertext inline. Cloud delivery
+        // still resolves the active regional authorization.
+        if matches!(class, crate::access::DeliveryClass::Live)
+            && self
+                .instance
+                .as_ref()
+                .is_some_and(|instance| instance.cloud.is_none())
+        {
+            crate::access::transport::validate_live_event_representation(envelope)?;
+            return Ok(envelope.clone());
+        }
         let access = self.access_client().await?;
         // A referenced control event must fit the local control-envelope
         // budget; refuse a larger declaration before any fetch.

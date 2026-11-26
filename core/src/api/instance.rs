@@ -511,6 +511,41 @@ mod tests {
         path
     }
 
+    #[tokio::test]
+    async fn standalone_live_envelope_resolution_requires_only_valid_inline_ciphertext() {
+        use crate::access::{transport::RELAY_EPOCH_V5, DeliveryClass};
+        let root = tempfile::tempdir().unwrap();
+        let selected = file(
+            root.path(),
+            "standalone.toml",
+            ClientService::Standalone,
+            "state",
+        );
+        let core = Core::open(&selected, Arc::new(MemorySecretStore::new())).unwrap();
+        let mut envelope = whalerein_proto::EventEnvelope {
+            relay_version: RELAY_EPOCH_V5,
+            nonce: vec![1],
+            ciphertext: vec![2],
+            ..Default::default()
+        };
+        assert_eq!(
+            core.resolve_event_envelope(&envelope, DeliveryClass::Live)
+                .await
+                .unwrap(),
+            envelope
+        );
+        assert!(core
+            .resolve_event_envelope(&envelope, DeliveryClass::Control)
+            .await
+            .is_err());
+        envelope.ciphertext.clear();
+        envelope.payload_reference = Some(Default::default());
+        assert!(core
+            .resolve_event_envelope(&envelope, DeliveryClass::Live)
+            .await
+            .is_err());
+    }
+
     #[test]
     fn cli_single_instance_toml_fixture_still_opens_and_validates() {
         let root = tempfile::tempdir().unwrap();

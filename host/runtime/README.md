@@ -84,7 +84,7 @@ version check every five seconds reconciles authoritative history, run,
 projection, approval and question markers, including a lost final notification;
 it never renews a lease or repeats content. An observation is owned by the
 authenticated Broker connection instance and ends on that exact connection
-close, channel replacement or Host restart. Live text coalescing is bounded to
+close, channel replacement or Host restart. The Host publishes the first live delta after an idle window immediately. Coalescing subsequent deltas is bounded to
 20 ms and the receiving device's authenticated packet budget, not a fixed 8 KiB
 cap. An oversized delta is split on UTF-8 boundaries into complete ordered
 previews before sealing. Previews travel directly from the Host to the device

@@ -21,6 +21,7 @@ function sameIdentity(previous, frame) {
 
 export class LiveBuffer {
   #pending = null
+  #lastDeltaAt = -Infinity
   #frames = 0
   #timer = null
   #maxBytes
@@ -68,12 +69,19 @@ export class LiveBuffer {
       this.publish(update)
       return
     }
+    const now = performance.now()
+    const idle = now - this.#lastDeltaAt >= this.delayMs
+    this.#lastDeltaAt = now
     const previous = this.#pending?.live
-    if (previous && !sameIdentity(previous, frame)) this.flush()
+    if (previous && (idle || !sameIdentity(previous, frame))) this.flush()
     if (previous && bytes(previous.delta.text) + bytes(frame.delta.text) > this.#maxBytes) this.flush()
     if (!this.#pending) {
       this.#pending = { ...update, live: { ...frame, delta: { ...frame.delta } } }
       this.#frames = 1
+      if (idle) {
+        this.flush()
+        return
+      }
       this.#timer = setTimeout(() => this.flush(), this.delayMs)
       this.#timer.unref?.()
     } else {

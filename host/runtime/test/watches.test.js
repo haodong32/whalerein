@@ -1034,9 +1034,12 @@ test('a cleared channel cannot replay a parked preview into the next observation
   t.after(() => ctx.events.stop())
   await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
   ctx.source.sinks.get('s')(live(1))
+  ctx.source.sinks.get('s')(live(2))
   ctx.events.onChannelsCleared([{ deviceId: 'd', channelId: ctx.channel.channelId }])
   await settle()
-  assert.equal(ctx.access.published.length, 0, 'the cleared channel has no pending preview')
+  assert.equal(ctx.access.published.length, 1, 'only the leading preview was published')
+  assert.equal(deliveredUpdates(ctx)[0].live.last_seq, 1)
+  ctx.access.published.length = 0
   assert.equal(ctx.store.countOutbox(), 0, 'live previews are never durable replays')
   const next = establishChannel({ hostId: 'h', deviceId: 'd', security: ctx.security, store: ctx.store })
   ctx.channel = next
