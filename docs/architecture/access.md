@@ -101,6 +101,18 @@ per-host and per-node limits, and only a committed object is readable.
 Migrations remove the former fixed `local` workspace table and the duplicate
 `devices.auth_hash`; no account/tenant model is pre-installed in Standalone mode.
 
+### Connection pools
+
+Access opens two PostgreSQL pools from the same DSN. The data pool serves
+history, relay, payload and ordinary request work and has a floor of 16
+connections; a larger `pool_max_conns` in the DSN is respected. A separate
+four-connection control pool serves pairing and authentication, so a saturated
+data pool cannot make a new Host pairing wait behind history pages or an
+attachment transfer. The control pool is deliberately small: it isolates the
+control plane instead of letting it grow with data concurrency. This is why the
+mixed-load case can run four history readers and one attachment reader while a
+Host still completes `host connect` within its deadline.
+
 An external enrollment is a stable Host id plus a generation. Removing a
 generation disables it and revokes its grants; a fresh approval may re-enable
 the same id only with a strictly higher revision, the same workspace and the

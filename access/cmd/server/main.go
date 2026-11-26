@@ -335,7 +335,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 
 	authDeps := auth.Dependencies{
-		Store:     db,
+		Store:     db.Control(),
 		Admission: admissionService,
 		Enforcer:  lineManager,
 		Observer:  lineManager,
@@ -357,7 +357,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		},
 	}
 	if cfg.Mode == "external" {
-		authDeps.Sessions = db
+		authDeps.Sessions = db.Control()
 	}
 	authService, err := auth.New(authDeps)
 	if err != nil {
@@ -460,7 +460,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 
 	pairingService, err := pairing.New(pairing.Dependencies{
-		Store:     db,
+		Store:     db.Control(),
 		Policy:    lineManager,
 		Transport: service,
 		Presence:  service,
