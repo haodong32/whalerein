@@ -939,7 +939,11 @@ export class WatchedEvents {
     const drop = () => {
       if (boundary) {
         emitFact(this.observation, 'host_publish', {
-          ...boundary, batch, request: '', attempt: 1, kind: 'event',
+          stream: boundary.stream,
+          seq_start: boundary.seq_start,
+          seq_end: boundary.seq_end,
+          bytes: boundary.bytes,
+          batch, request: '', attempt: 1, kind: 'event',
           outcome: 'dropped', queue_depth: queueDepth, queue_bytes: queueBytes,
         })
       }

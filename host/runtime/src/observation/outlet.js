@@ -78,16 +78,18 @@ export function createBenchOutlet({
   key = null,
   lifetime = '',
   role = 'host',
-  clock = createMonotonicClock(),
+  clock = null,
   capacity = DEFAULT_CAPACITY,
   byteCap = DEFAULT_BYTE_CAP,
   shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
   appendFile = fsAppendFile,
   openFile = fsOpen,
-  manifest = loadManifest(),
+  manifest = null,
 } = {}) {
   if (!OUTLET_MODES.includes(mode)) throw new TypeError(`unsupported observation mode ${String(mode)}`)
   if (mode !== 'trace') return createNullOutlet(mode)
+  clock ??= createMonotonicClock()
+  manifest ??= loadManifest()
   if (typeof path !== 'string' || path === '') throw new TypeError('trace observation requires a capture path')
   if (typeof runId !== 'string' || runId === '') throw new TypeError('trace observation requires a run id')
   if (typeof lifetime !== 'string' || lifetime === '') throw new TypeError('trace observation requires a lifetime')

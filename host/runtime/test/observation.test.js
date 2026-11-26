@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   CLOCK_EPOCH, CLOCK_SOURCE, ObservationClockError, createMonotonicClock,
-  manifestClockProof, verifyNodeMonotonicClock,
+  verifyNodeMonotonicClock,
 } from '../src/observation/clock.js'
 import {
   ObservationError, assertRecord, loadManifest, loadVectors, validateRecord,
@@ -136,8 +136,6 @@ test('latency/AC-05.wrong-clock-or-origin rejects unverified clocks and foreign 
   assert.throws(() => rejected.nowNs(), ObservationClockError)
   assert.throws(() => createMonotonicClock({ platform: 'linux', hrtime: () => 1 }).nowNs(), ObservationClockError)
   assert.throws(() => createMonotonicClock({ platform: 'linux', hrtime: () => -1n }).nowNs(), ObservationClockError)
-  assert.deepEqual(manifestClockProof(loadManifest()), { ok: true, reason: null })
-  assert.equal(manifestClockProof({ clock: { source: 'CLOCK_REALTIME' } }).reason, 'manifest_clock_mismatch')
 })
 
 test('token derivation is stable, domain-separated and never reveals the raw identity', () => {
@@ -433,4 +431,16 @@ test('a live host_publish accepts the preview interval and queue context', async
   assert.equal(record.data.outcome, 'accepted')
   assert.equal(record.data.queue_depth, 2)
   assert.ok(!readFileSync(path, 'utf8').includes('raw-stream'))
+})
+
+test('off mode does not read the observation contract', () => {
+  const previous = process.env.WHALEREIN_BENCH_CONTRACT_PATH
+  process.env.WHALEREIN_BENCH_CONTRACT_PATH = '/nonexistent/observation.json'
+  try {
+    const outlet = createBenchOutlet({ mode: 'off' })
+    assert.equal(outlet.enabled, false)
+  } finally {
+    if (previous === undefined) delete process.env.WHALEREIN_BENCH_CONTRACT_PATH
+    else process.env.WHALEREIN_BENCH_CONTRACT_PATH = previous
+  }
 })

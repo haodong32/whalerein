@@ -7,8 +7,6 @@
 // shared timeline. Instrumentation never manufactures a timestamp for an
 // absent boundary; the caller is expected to treat a rejected clock as
 // "capture unavailable".
-import { strict as assert } from 'node:assert'
-
 export const CLOCK_SOURCE = 'process.hrtime.bigint'
 export const CLOCK_EPOCH = 'linux-monotonic'
 
@@ -69,15 +67,4 @@ export function createMonotonicClock({ platform = process.platform, hrtime = def
       return value
     },
   }
-}
-
-/**
- * Parse a manifest `clock` block and confirm it names the epoch this runtime
- * can produce. A contract that asks for any other clock is rejected.
- */
-export function manifestClockProof(manifest) {
-  assert(manifest && typeof manifest === 'object', 'observation manifest missing')
-  const clock = manifest.clock ?? {}
-  const ok = clock.source === 'CLOCK_MONOTONIC' && clock.unit === 'ns' && clock.epoch === 'kernel-boot'
-  return { ok, reason: ok ? null : 'manifest_clock_mismatch' }
 }

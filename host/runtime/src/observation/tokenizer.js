@@ -24,7 +24,7 @@ const DOMAIN_SET = new Set(TOKEN_DOMAINS)
 // A short token keeps records small while remaining collision-resistant at the
 // bounded cardinality of one capture. The wire form is 16 bytes as 32 hex
 // characters, shared by Rust, Go and Node producers.
-export const TOKEN_BYTES = 16
+const TOKEN_BYTES = 16
 export const TOKEN_VERSION = 'whalerein/latency-token/v1'
 
 function keyBytes(key) {
@@ -83,12 +83,8 @@ export const TOKEN_FIELDS = Object.freeze({
   stream: 'stream',
   attempt: 'attempt',
   block: 'block',
-  frame: 'frame',
   request: 'request',
-  watch: 'watch',
   connection: 'connection',
-  object_op: 'object',
-  scope: 'request',
 })
 
 /**

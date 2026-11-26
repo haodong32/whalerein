@@ -275,3 +275,21 @@ test('latency/AC-02.expired exposes command start and finish with the measured o
   assert.equal(expired.errorCode, 'expired')
   assert.equal(eventsOf(observation.facts, 'host_command').length, before)
 })
+
+test('a failed local live publish emits a contract-shaped dropped fact', async (t) => {
+  const observation = captureOutlet()
+  const ctx = watchFixture(t, observation, {
+    connected: true,
+    async publishEvent() {},
+    publishLive() { throw new Error('local publish failed') },
+  })
+  await ctx.events.watch('d', ctx.channel.channelId, 's', undefined, CONV)
+  ctx.source.sinks.get('s')(live(1, 'abc'))
+  await settle()
+  const dropped = eventsOf(observation.facts, 'host_publish', fact => fact.data.outcome === 'dropped')
+  assert.equal(dropped.length, 1)
+  assert.equal(dropped[0].data.stream, 'raw-attempt')
+  assert.equal(dropped[0].data.seq_start, 1)
+  assert.equal(dropped[0].data.queue_depth, 1)
+  assert.equal(Object.hasOwn(dropped[0].data, 'block'), false)
+})

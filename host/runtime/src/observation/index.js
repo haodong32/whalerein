@@ -1,6 +1,6 @@
 export {
   CLOCK_EPOCH, CLOCK_SOURCE, ObservationClockError, createMonotonicClock,
-  manifestClockProof, verifyNodeMonotonicClock,
+  verifyNodeMonotonicClock,
 } from './clock.js'
 export {
   OBSERVATION_MANIFEST_PATH, OBSERVATION_VECTORS_PATH, ObservationError, assertRecord,
@@ -10,7 +10,7 @@ export {
   DEFAULT_BYTE_CAP, DEFAULT_CAPACITY, DEFAULT_SHUTDOWN_TIMEOUT_MS, OUTLET_MODES,
   OUTLET_ROLES, createBenchOutlet, createBenchOutletFromEnv, createNullOutlet,
 } from './outlet.js'
-export { TOKEN_BYTES, TOKEN_DOMAINS, TOKEN_FIELDS, createTokenizer, tokenizeData } from './tokenizer.js'
+export { TOKEN_DOMAINS, TOKEN_FIELDS, createTokenizer, tokenizeData } from './tokenizer.js'
 
 /**
  * Emit a fact without letting an observation failure escape into the product
