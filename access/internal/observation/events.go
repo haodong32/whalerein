@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"strings"
 )
 
 // Route is the admitted body representation for a query or object operation.
@@ -286,15 +285,4 @@ func newLifetime() (string, error) {
 		return "", fmt.Errorf("observation: generate lifetime: %w", err)
 	}
 	return "lt-" + hex.EncodeToString(material[:]), nil
-}
-
-// normalizeProducer keeps a caller-supplied producer role inside the
-// contract vocabulary.
-func normalizeProducer(producer string) string {
-	switch strings.TrimSpace(producer) {
-	case "access":
-		return "access"
-	default:
-		return "access"
-	}
 }

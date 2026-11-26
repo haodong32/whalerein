@@ -205,7 +205,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	masker := diagnostics.NewMasker()
 	// One bounded outlet per Access process, shared by every module below. Off
 	// and aggregate mode return a nil sink and create no writer.
-	sink, err := latencyobs.Open(latencyobs.Config{Producer: "access"})
+	sink, err := latencyobs.Open(latencyobs.Config{})
 	if err != nil {
 		return fmt.Errorf("latency observation outlet: %w", err)
 	}

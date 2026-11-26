@@ -1059,7 +1059,13 @@ func translateAuth(err error) error {
 // scoped object identity; the request token is the parent when one exists and
 // the object's own message identity for a pre-admission body.
 func (s *Service) observeRelay(scope, request, object string, stage observation.RelayStage, outcome observation.Outcome, bytes int) {
-	if s.observation == nil {
+	emitObjectFact(s.observation, scope, request, object, stage, outcome, bytes)
+}
+
+// emitObjectFact is shared by the HTTP relay service and the broker stager.
+// Both carry reference-route object boundaries; only the sink owner differs.
+func emitObjectFact(sink *observation.Sink, scope, request, object string, stage observation.RelayStage, outcome observation.Outcome, bytes int) {
+	if sink == nil {
 		return
 	}
 	event := observation.RelayEvent{
@@ -1069,7 +1075,7 @@ func (s *Service) observeRelay(scope, request, object string, stage observation.
 		event.Bytes = uint64(bytes)
 		event.HasBytes = true
 	}
-	s.observation.Relay(event)
+	sink.Relay(event)
 }
 
 func relayRequestID(parent, object string) string {

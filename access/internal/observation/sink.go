@@ -45,6 +45,8 @@ const (
 	EnvBytesAlt    = "WHALEREIN_BENCH_BYTE_CAP"
 )
 
+const producerRole = "access"
+
 // Config describes one process outlet. Empty fields fall back to the fixture
 // environment so the production composition root can call Open(Config{})
 // while tests set fields directly. Output is an embed/test seam; production
@@ -54,7 +56,6 @@ type Config struct {
 	Outlet       string
 	RunID        string
 	CaptureKey   string
-	Producer     string
 	Lifetime     string
 	Capacity     int
 	MaxBytes     int64
@@ -183,7 +184,7 @@ func Open(config Config) (*Sink, error) {
 		token:        tokenizer,
 		clock:        config.Clock,
 		runID:        config.RunID,
-		producer:     normalizeProducer(config.Producer),
+		producer:     producerRole,
 		lifetime:     config.Lifetime,
 		capacity:     config.Capacity,
 		maxBytes:     config.MaxBytes,

@@ -341,16 +341,5 @@ func int64Pointer(value uint64) *int64 {
 // has no HTTP object route. The route is always reference: an inline message
 // never creates a relay object and therefore has no Access object interval.
 func (s *Stager) observeStaged(scope, request, object string, stage observation.RelayStage, outcome observation.Outcome, bytes int) {
-	if s.config.Observation == nil {
-		return
-	}
-	event := observation.RelayEvent{
-		Scope: scope, Request: request, ObjectOp: object, Stage: stage,
-		Route: observation.RouteReference, Outcome: outcome,
-	}
-	if bytes > 0 {
-		event.Bytes = uint64(bytes)
-		event.HasBytes = true
-	}
-	s.config.Observation.Relay(event)
+	emitObjectFact(s.config.Observation, scope, request, object, stage, outcome, bytes)
 }

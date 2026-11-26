@@ -165,7 +165,7 @@ func NewWithPool(pool *pgxpool.Pool) *Store {
 // Control returns a view backed by the reserved control pool. A store built
 // by NewWithPool has no separate control pool and returns itself.
 func (s *Store) Control() *Store {
-	if s == nil || s.control == nil || s.control == s.db {
+	if s == nil || s.control == nil {
 		return s
 	}
 	return &Store{db: s.control}
@@ -179,7 +179,7 @@ func (s *Store) Close() {
 	if s.db != nil {
 		s.db.Close()
 	}
-	if s.control != nil && s.control != s.db {
+	if s.control != nil {
 		s.control.Close()
 	}
 }

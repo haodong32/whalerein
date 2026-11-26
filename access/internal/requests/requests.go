@@ -258,7 +258,7 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (result store.R
 		bodyBytes = len(input.Request.GetBody())
 	}
 	defer func() {
-		if s.observation == nil || requestID == "" {
+		if requestID == "" {
 			return
 		}
 		outcome := commandAdmissionOutcome(err)
@@ -925,10 +925,6 @@ func (s *Service) SweepClientLeases(ctx context.Context) {
 	if len(expired) > 0 && s.metrics != nil {
 		s.metrics.RequestClaimStale()
 	}
-	expiredIDs := make(map[string]bool, len(expired))
-	for _, row := range expired {
-		expiredIDs[row.RequestID] = true
-	}
 	candidates := expired
 	if len(expired) < clientSweepBatch {
 		pending, err := s.store.PendingCancelRequests(ctx, clientSweepBatch)
@@ -946,11 +942,11 @@ func (s *Service) SweepClientLeases(ctx context.Context) {
 			}
 		}
 	}
-	for _, row := range candidates {
+	for index, row := range candidates {
 		if ctx.Err() != nil {
 			return
 		}
-		if expiredIDs[row.RequestID] {
+		if index < len(expired) {
 			// Only a lease that this sweep moved to expired is a new terminal
 			// disposition. A replayed pending cancellation keeps its earlier
 			// terminal fact and must not inflate the count every pass.

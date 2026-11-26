@@ -165,9 +165,6 @@ func (m *Manifest) Validate(record map[string]any) error {
 		}
 	}
 	for key, value := range data {
-		if contains(m.ForbiddenFields, key) {
-			return fmt.Errorf("observation: forbidden field %q", key)
-		}
 		fieldType, known := spec.Fields[key]
 		if !known {
 			return fmt.Errorf("observation: %s has unknown field %q", event, key)
