@@ -57,6 +57,7 @@ final class FixtureSessionService: SessionService {
     private var didStream = false
     private var didSimulateApprovalChange = false
     private var didReturnUncertain = false
+    var didFailOlderFixturePage = false
     private var runningSessions: Set<String> = []
     var messagesBySession: [String: [ConversationMessage]] = [:]
     /// Deterministic history projection and attachment transfer fixture.
@@ -332,7 +333,8 @@ final class FixtureSessionService: SessionService {
             maxMessages: ConversationHistoryLimit.messages, maxBytes: ConversationHistoryLimit.bytes
         )
         emit(.historySnapshot(page, replacing: !sameWatch))
-        let approvals = options.delaysViewportTransitions ? [] : [approval(for: hostId, sessionId: sessionId)]
+        let approvals = options.delaysViewportTransitions || options.shortHistoryWithRetry
+            ? [] : [approval(for: hostId, sessionId: sessionId)]
         emit(.approvals(approvals))
         if options.questionsOnOpen {
             emitQuestionsForTesting(hostId: hostId, sessionId: sessionId)
@@ -514,7 +516,31 @@ final class FixtureSessionService: SessionService {
                 sessionId: sessionId
             )
         }
+        if options.replyWithoutUserEcho {
+            scheduleReplyWithoutEcho(hostId: hostId, sessionId: sessionId)
+        }
         return receipt
+    }
+
+    private func scheduleReplyWithoutEcho(hostId: String, sessionId: String) {
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.clock.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self.emit(.preview(attemptId: "fixture-reply", text: "Streaming fixture reply", replace: true, incomplete: true),
+                      hostId: hostId, sessionId: sessionId)
+            await self.clock.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            let reply = ConversationMessage(
+                messageId: "fixture-reply", role: .assistant,
+                blocks: [ConversationBlock(blockId: "fixture-reply-text", kind: .text, text: "Completed fixture reply")],
+                createdAtUnixMs: 2
+            )
+            self.emit(.message(reply), hostId: hostId, sessionId: sessionId)
+            self.emit(.attemptEnded(attemptId: "fixture-reply", outcome: .completed),
+                      hostId: hostId, sessionId: sessionId)
+        }
+        settlementTasks.append(task)
     }
 
     // MARK: - Pending queue

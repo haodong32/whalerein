@@ -23,11 +23,12 @@ extension ConversationModel {
         guard let lease = draftLease else { return }
         draftSaveTask?.cancel()
         let text = draft
+        let editID = draftEditID
         draftSaveTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled, let self else { return }
             do {
-                try await self.drafts.setAndFlush(lease, text: text)
+                try await self.drafts.setAndFlush(lease, text: text, editID: editID)
                 guard !Task.isCancelled else { return }
                 self.draftPersistenceErrorKey = nil
             } catch {
@@ -44,7 +45,7 @@ extension ConversationModel {
         _ = await pending?.value
         guard let lease = draftLease else { return }
         do {
-            try await drafts.setAndFlush(lease, text: draft)
+            try await drafts.setAndFlush(lease, text: draft, editID: draftEditID)
             draftPersistenceErrorKey = nil
         } catch {
             // The typed text stays in memory; only its restart durability is
@@ -74,9 +75,9 @@ extension ConversationModel {
         committedPresentationIDs[messageID] ?? messageID
     }
 
-    func appendPendingSend(_ command: PendingCommand, text: String) {
+    func appendPendingSend(_ command: PendingCommand, text: String, queuedBehindRun: Bool) {
         let messageID = "local-\(command.id)"
-        optimisticMessages[messageID] = OptimisticMessage()
+        optimisticMessages[messageID] = OptimisticMessage(queuedBehindRun: queuedBehindRun)
         state.messages.append(
             ConversationMessage(
                 messageId: messageID,
@@ -92,29 +93,30 @@ extension ConversationModel {
     }
 
     func settlePendingSend(_ command: PendingCommand, receipt: CommandReceipt) {
-        let localID = "local-\(command.id)"
-        guard optimisticMessages[localID] != nil else { return }
+        settlePendingSend(localID: "local-\(command.id)", receipt: receipt)
+    }
+
+    func settlePendingSend(localID: String, receipt: CommandReceipt) {
+        guard var pending = optimisticMessages[localID] else { return }
         guard receipt.status != .rejected, receipt.status != .cancelled else {
-            removePendingSend(command)
+            removePendingSend(localID: localID)
             return
         }
-        if let committedID = receipt.messageId {
-            if messages.contains(where: { $0.messageId == committedID }) {
-                removePendingSend(command)
-            } else {
-                optimisticMessages[localID] = OptimisticMessage(
-                    committedMessageId: committedID
-                )
-            }
-        } else if receipt.status != .uncertain {
-            // The existing receipt row reports acceptance independently of
-            // committed content when the Source provides no message identity.
-            removePendingSend(command)
+        pending.commandId = receipt.commandId
+        pending.committedMessageId = receipt.messageId ?? pending.committedMessageId
+        pending.deliveryId = receipt.deliveryId ?? pending.deliveryId
+        if messages.contains(where: { $0.role == .user && pending.matches($0) }) {
+            removePendingSend(localID: localID)
+        } else {
+            optimisticMessages[localID] = pending
         }
     }
 
     func removePendingSend(_ command: PendingCommand) {
-        let localID = "local-\(command.id)"
+        removePendingSend(localID: "local-\(command.id)")
+    }
+
+    func removePendingSend(localID: String) {
         optimisticMessages.removeValue(forKey: localID)
         state.messages.removeAll { $0.messageId == localID }
         scroll.markLayoutChange()
@@ -122,49 +124,55 @@ extension ConversationModel {
 
     /// A committed echo inherits the pending presentation identity only when
     /// a receipt explicitly associated it with this send.
-    func reconcileUserEcho(_ message: ConversationMessage) {
+    @discardableResult
+    func reconcileUserEcho(_ message: ConversationMessage) -> Int? {
         guard message.role == .user, let index = messages.firstIndex(where: {
-            optimisticMessages[$0.messageId]?.committedMessageId == message.messageId
-        }) else { return }
+            optimisticMessages[$0.messageId]?.matches(message) == true
+        }) else { return nil }
         let local = state.messages.remove(at: index)
-        optimisticMessages.removeValue(forKey: local.messageId)
+        let pending = optimisticMessages.removeValue(forKey: local.messageId)
         committedPresentationIDs[message.messageId] = local.messageId
+        return pending?.preservesPosition == true ? index : nil
     }
 
-    func draftMatchesSubmission(_ submittedText: String) -> Bool {
-        draft.trimmingCharacters(in: .whitespacesAndNewlines) == submittedText
-    }
-
-    /// Settles the one uncertain command with a terminal receipt.
-    func settleUncertainCommand(with receipt: CommandReceipt) {
+    /// Settles the original uncertain command and, on success, its draft.
+    @discardableResult
+    func settleUncertainCommand(with receipt: CommandReceipt) -> Task<Void, Never>? {
         guard case .uncertain(let command, let inFlight) = state.lifecycle,
-              inFlight.commandId == receipt.commandId else { return }
+              inFlight.commandId == receipt.commandId else { return nil }
+        if receipt.status == .uncertain {
+            state.lastReceipt = receipt
+            settlePendingSend(command, receipt: receipt)
+            return nil
+        }
         state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
         settlePendingSend(command, receipt: receipt)
+        let submission = inFlightDraftSubmission
+        inFlightDraftSubmission = nil
+        guard let submission, receipt.status == .confirmed || receipt.status == .accepted else { return nil }
+        if !isClosed, draftEditID == submission.editID {
+            // The composer settles with the confirmation. Keep the ticket
+            // until storage acknowledges it or the reader types a new edit.
+            draftSaveTask?.cancel()
+            draftSaveTask = nil
+            draft = ""
+            draftEditID = submission.editID
+        }
+        return Task { await settleSubmittedDraft(submission) }
     }
 
     func applyCommandStatus(_ receipt: CommandReceipt) {
-        if case .uncertain(let command, let inFlight) = state.lifecycle,
-           inFlight.commandId == receipt.commandId {
-            if receipt.status == .uncertain {
-                state.lastReceipt = receipt
-                settlePendingSend(command, receipt: receipt)
-            } else {
-                state = ConversationReduce.reduce(state, .commandSettled(command, receipt))
-                settlePendingSend(command, receipt: receipt)
-                if receipt.status == .confirmed || receipt.status == .accepted {
-                    let submitted = inFlightSendText
-                    if let submitted, draftMatchesSubmission(submitted) {
-                        clearDraftAfterSubmission(matching: submitted)
-                    }
-                }
-                inFlightSendText = nil
-            }
+        if case .uncertain(_, let inFlight) = state.lifecycle, inFlight.commandId == receipt.commandId {
+            settleUncertainCommand(with: receipt)
             return
         }
         if let pendingStop, pendingStop.commandId == receipt.commandId {
             let submissionEpoch = pendingStopSubmissionEpoch ?? authoritativeRunEpoch
             applyStopReceipt(receipt, submissionEpoch: submissionEpoch)
+            return
+        }
+        if let localID = optimisticMessages.first(where: { $0.value.commandId == receipt.commandId })?.key {
+            settlePendingSend(localID: localID, receipt: receipt)
             return
         }
         // The method response may still be in flight; remember the early
@@ -222,35 +230,27 @@ extension ConversationModel {
         return earlyCommandStatuses.removeValue(forKey: commandId)
     }
 
-    func clearDraftAfterSubmission(matching submittedText: String) {
-        draft = ""
-        guard let lease = draftLease else { return }
-        Task { [weak self] in
-            do {
-                try await self?.drafts.setAndFlush(lease, text: submittedText)
-                try await self?.drafts.clearIfCurrent(lease, matching: submittedText)
-                self?.draftPersistenceErrorKey = nil
-            } catch {
-                self?.draftPersistenceErrorKey = .errorDraftUnavailable
-            }
+    func settleSubmittedDraft(_ submission: DraftService.Submission?) async {
+        guard let submission else { return }
+        if isClosed {
+            await closeDraftFlushTask?.value
+        } else if draftEditID != submission.editID {
+            await persistDraftNow()
         }
+        // The coordinator reports a storage failure to the current owner.
+        try? await drafts.clearSubmitted(submission)
     }
 
-    func clearDraftNow() async {
-        let submittedDraft = draft
-        draft = ""
-        let pending = draftSaveTask
-        pending?.cancel()
-        draftSaveTask = nil
-        _ = await pending?.value
-        guard let lease = draftLease else { return }
-        do {
-            try await drafts.setAndFlush(lease, text: submittedDraft)
-            try await drafts.clearIfCurrent(lease, matching: submittedDraft)
-            draftPersistenceErrorKey = nil
-        } catch {
-            draftPersistenceErrorKey = .errorDraftUnavailable
+    func applySubmittedDraftClear(editID: UUID, persisted: Bool) {
+        guard !isClosed else { return }
+        if draftLease == nil, persisted {
+            clearedDraftBeforeRestore = editID
         }
+        guard draftEditID == editID else { return }
+        draftSaveTask?.cancel()
+        draftSaveTask = nil
+        draft = ""
+        draftPersistenceErrorKey = persisted ? nil : .errorDraftUnavailable
     }
 
     func updateCapabilities(running: Bool) {

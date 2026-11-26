@@ -25,7 +25,8 @@ extension AppShellModel {
                 guard let self, self.isCurrentActivation(generation) else { return }
                 Task { await self.refreshVisibleOperationResults() }
             },
-            drafts: drafts
+            drafts: drafts,
+            outgoingStore: outgoingStore
         )
         // Staged attachments belong to the active instance's data directory,
         // never to a process-wide root keyed only by Host and session.
@@ -137,6 +138,7 @@ extension AppShellModel {
     func handleCloudSignedOut() {
         conversation?.close()
         conversation = nil
+        outgoingStore = ConversationOutgoingStore()
         isPaired = false
         preferences.update {
             $0.paired = false

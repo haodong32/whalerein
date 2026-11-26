@@ -1575,3 +1575,67 @@ test('real passive pages pin a cut and the same projection resolves an exact com
     await adapter.close()
   }
 })
+
+test('native send receipt identifies its projected user echo', async () => {
+  const session = makeLiveSession({ sessionId: 's1', events: [] })
+  const ctx = makeCtx({ live: new Map([['s1', session]]) })
+  ctx.sessionController.prompt = async ({requestId, content}) => {
+    session.events.push({
+      type: 'user/message', seq: 1, time: 1,
+      data: { id: requestId, role: 'user', content, source: { kind: 'user', rpcId: requestId } },
+    })
+    return { accepted: true }
+  }
+  const adapter = new RealDshAdapter({ ctx, config: { hostId: 'host-1' } })
+  await adapter.open()
+  try {
+    const receipt = await adapter.execute(
+      's1', { send_message: { text: 'Fixture prompt' } }, { operationId: 'fixture-request' },
+    )
+    const page = await adapter.readHistory('s1', { page: {}, max_messages: 10 })
+    const messages = page.batch.changes.map(change => change.message)
+    assert.equal(messages.length, 1)
+    assert.equal(messages[0].role, 'USER')
+    assert.equal(
+      receipt.command_accepted.delivery_id, messages[0].delivery_id,
+      'The receipt and committed history must identify the same delivery',
+    )
+  } finally {
+    await adapter.close()
+  }
+})
+
+test('native user history identifies deliveries proven by the legacy message ID', async (t) => {
+  for (const shape of ['flat', 'nested']) {
+    await t.test(shape, async () => {
+      const session = makeLiveSession({ sessionId: 's1', events: [] })
+      const ctx = makeCtx({ live: new Map([['s1', session]]) })
+      const operationId = 'a'.repeat(64)
+      ctx.sessionController.prompt = async ({requestId, content}) => {
+        const message = { id: requestId, role: 'user', content, source: { kind: 'user' } }
+        session.events.push(
+          { type: 'user/message', seq: 1, time: 1, data: shape === 'flat' ? message : { message } },
+          {
+            type: 'assistant/message', seq: 2, time: 2,
+            data: { message: { content: [{ type: 'text', text: 'Fixture reply' }], source: { kind: 'model' } } },
+          },
+          { type: 'turn/end', seq: 3, time: 3, data: { running: false, reason: { kind: 'completed' } } },
+        )
+        return { accepted: true }
+      }
+      const adapter = new RealDshAdapter({ ctx, config: { hostId: 'host-1' } })
+      await adapter.open()
+      try {
+        const receipt = await adapter.execute('s1', { send_message: { text: 'Fixture prompt' } }, { operationId })
+        const reply = await adapter.readMessageReply('s1', receipt.command_accepted.message_id)
+        assert.equal(reply.state, 'MESSAGE_REPLY_COMMITTED')
+        const page = await adapter.readHistory('s1', { page: {}, max_messages: 10 })
+        const echo = page.batch.changes.find(change => change.message.role === 'USER')?.message
+        assert.ok(echo)
+        assert.equal(echo.delivery_id, receipt.command_accepted.delivery_id)
+      } finally {
+        await adapter.close()
+      }
+    })
+  }
+})

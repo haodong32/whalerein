@@ -89,6 +89,10 @@ the measured row. Send receipts, question changes,
 history prepends and keyboard changes share this viewport policy.
 Command status has its own identity. A committed message settles a pending
 presentation row only when the command has an authoritative association.
+An accepted send keeps its local row while that association is absent.
+A Source delivery ID can associate the receipt with a committed user row
+whose canonical message ID differs. The association works with either
+arrival order and is scoped to the selected session.
 
 ## App shell
 

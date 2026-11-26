@@ -208,7 +208,13 @@ final class ConversationModel {
     var isClosed = false
     var liveMessageIds: Set<String> = []
 
-    var draft: String = ""
+    var draft: String = "" {
+        didSet {
+            if oldValue != draft { draftEditID = UUID() }
+        }
+    }
+    var draftEditID = UUID()
+    var clearedDraftBeforeRestore: UUID?
     var delivery: DeliveryChoice = .queue
     /// Storage outcome for the composer draft. The in-memory text always stays
     /// usable; these values tell the user whether it is likely to survive a
@@ -241,7 +247,18 @@ final class ConversationModel {
     }
 
     struct OptimisticMessage {
+        var commandId: String?
         var committedMessageId: String?
+        var deliveryId: String?
+        var preservesPosition = false
+        var queuedBehindRun = false
+
+        func matches(_ message: ConversationMessage) -> Bool {
+            if let deliveryId, !deliveryId.isEmpty, let committedDelivery = message.deliveryId {
+                return deliveryId == committedDelivery
+            }
+            return committedMessageId == message.messageId
+        }
     }
 
     let service: any SessionService
@@ -260,8 +277,11 @@ final class ConversationModel {
     var consumeTask: Task<Void, Never>?
     var consumeGeneration = 0
     let drafts: DraftService
+    let outgoingStore: ConversationOutgoingStore?
+    var outgoingScope: SessionContext { SessionContext(hostId: hostId, sessionId: sessionId) }
     var draftLease: DraftService.Lease?
     var draftSaveTask: Task<Void, Never>?
+    var closeDraftFlushTask: Task<Void, Never>?
     var approvalExpiryTask: Task<Void, Never>?
     var scrollRequestCounter = 0
     var optimisticMessages: [String: OptimisticMessage] = [:]
@@ -269,7 +289,7 @@ final class ConversationModel {
     /// Text submitted with the currently uncertain send. A later confirmation
     /// may only consume the draft that was actually submitted, never a newer
     /// draft the user typed while the response was in flight.
-    var inFlightSendText: String?
+    var inFlightDraftSubmission: DraftService.Submission?
     /// Monotonic epoch for authoritative running/preview state. A Stop receipt
     /// captured before this epoch advanced must not overwrite a newer run.
     var authoritativeRunEpoch = 0
@@ -299,7 +319,8 @@ final class ConversationModel {
         onFatalError: ((AppErrorCode) -> Void)? = nil,
         onReconnected: (() -> Void)? = nil,
         now: @escaping () -> Date = Date.init,
-        drafts: DraftService? = nil
+        drafts: DraftService? = nil,
+        outgoingStore: ConversationOutgoingStore? = nil
     ) {
         self.hostId = hostId
         self.sessionId = sessionId
@@ -322,6 +343,7 @@ final class ConversationModel {
         self.onReconnected = onReconnected
         self.now = now
         self.drafts = drafts ?? DraftService(service: service)
+        self.outgoingStore = outgoingStore
         self.attachments = AttachmentTransferModel(
             service: service as? any AttachmentTransferService
         )

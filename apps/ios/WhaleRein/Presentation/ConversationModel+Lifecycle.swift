@@ -18,6 +18,10 @@ extension ConversationModel {
         questionErrorKey = nil
         questionAnswerState = .idle
         questionCancelReceipt = nil
+        for row in outgoingStore?.attach(self) ?? [] {
+            optimisticMessages[row.message.messageId] = row.submission
+            state.messages.append(row.message)
+        }
         ensureSubscription()
         async let restoredDraft: Void = restoreConversationDraft()
         async let updatedCapabilities: Void = refreshConversationCapabilities(opening: true)
@@ -43,13 +47,19 @@ extension ConversationModel {
 
     private func restoreConversationDraft() async {
         do {
-            let claim = try await drafts.claim(hostId: hostId, sessionId: sessionId)
+            let claim = try await drafts.claim(hostId: hostId, sessionId: sessionId) { [weak self] editID, persisted in
+                self?.applySubmittedDraftClear(editID: editID, persisted: persisted)
+            }
             if isClosed {
-                try await drafts.release(claim.lease, text: claim.text)
+                try await drafts.release(claim.lease, text: claim.text, editID: claim.editID)
                 return
             }
             draftLease = claim.lease
-            if draft.isEmpty { draft = claim.text }
+            if draft.isEmpty, clearedDraftBeforeRestore != claim.editID {
+                draft = claim.text
+                draftEditID = claim.editID
+            }
+            clearedDraftBeforeRestore = nil
             draftLoadErrorKey = nil
         } catch {
             draftLoadErrorKey = .errorDraftUnavailable
@@ -110,7 +120,13 @@ extension ConversationModel {
     }
 
     func close() {
+        guard !isClosed else { return }
         isClosed = true
+        outgoingStore?.detach(self, rows: messages.compactMap { message in
+            optimisticMessages[message.messageId].map {
+                ConversationOutgoingStore.Row(message: message, submission: $0)
+            }
+        })
         history.traversal &+= 1
         attachments.cancelAll()
         consumeTask?.cancel()
@@ -120,19 +136,21 @@ extension ConversationModel {
         draftSaveTask?.cancel()
         draftSaveTask = nil
         let text = draft
+        let editID = draftEditID
         let hostId = hostId
         let sessionId = sessionId
         let service = service
+        let drafts = drafts
         let lease = draftLease
         closeDraftFlushDidComplete = false
         closeDraftFlushErrorKey = nil
         // The coordinator owns ordering and generation fencing. Releasing this
         // lease is a final save only while this conversation still owns the
         // session.
-        Task { [weak self] in
+        closeDraftFlushTask = Task { [weak self] in
             do {
                 if let lease {
-                    try await self?.drafts.release(lease, text: text)
+                    try await drafts.release(lease, text: text, editID: editID)
                 } else {
                     try await service.saveDraft(hostId: hostId, sessionId: sessionId, text: text)
                 }

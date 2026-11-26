@@ -506,6 +506,7 @@ pub struct MessageView {
     pub role: String,
     pub blocks: Vec<BlockView>,
     pub created_at_unix_ms: i64,
+    pub delivery_id: Option<String>,
 }
 
 impl From<&ConversationMessage> for MessageView {
@@ -526,6 +527,7 @@ pub(crate) fn message_view(message: &ConversationMessage) -> MessageView {
             .map(|block| block_view(&block.block_id, block.content.as_ref()))
             .collect(),
         created_at_unix_ms: message.authored_at_unix_ms,
+        delivery_id: message.delivery_id.clone(),
     }
 }
 
@@ -1600,6 +1602,7 @@ mod tests {
                 content,
             }],
             authored_at_unix_ms: 7,
+            delivery_id: None,
         }
     }
 
@@ -1899,6 +1902,7 @@ mod tests {
             convert_update(&update, &mut seen),
             vec![ConversationEvent::Message {
                 message: MessageView {
+                    delivery_id: None,
                     message_id: "m-1".into(),
                     role: "user".into(),
                     blocks: vec![BlockView {

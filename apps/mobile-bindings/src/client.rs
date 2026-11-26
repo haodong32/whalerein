@@ -2748,6 +2748,7 @@ mod tests {
             origin: None,
             preview_prefix: None,
             message: MessageView {
+                delivery_id: None,
                 message_id: id.into(),
                 role: "assistant".into(),
                 blocks: vec![BlockView {

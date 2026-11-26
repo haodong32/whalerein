@@ -2495,6 +2495,7 @@ mod typed_output_tests {
             role: MessageRole::Assistant,
             blocks: vec![],
             authored_at_unix_ms: 1,
+            delivery_id: None,
         }
     }
     fn text_preview(text: &str, replace: bool) -> ViewUpdate {
@@ -2538,6 +2539,7 @@ mod typed_output_tests {
                 },
             ],
             authored_at_unix_ms: 1,
+            delivery_id: None,
         }
     }
 
@@ -2663,6 +2665,7 @@ mod typed_output_tests {
                     })),
                 }],
                 authored_at_unix_ms: 1,
+                delivery_id: None,
             },
             origin: None,
             preview_prefix: None,
@@ -3872,6 +3875,7 @@ mod history_output_tests {
             role: MessageRole::Assistant,
             blocks,
             authored_at_unix_ms: 1,
+            delivery_id: None,
         }
     }
 
