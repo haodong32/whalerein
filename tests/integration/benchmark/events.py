@@ -47,10 +47,6 @@ def value_matches(kind, value):
     return False
 
 
-def allowed_fields(manifest, event):
-    spec = manifest["events"][event]
-    return set(spec["required"]) | set(spec.get("optional", []))
-
 
 def sanitize(record, manifest, *, run_id=None):
     """Validate and allowlist one record.

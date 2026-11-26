@@ -15,7 +15,6 @@ logic can be unit-tested on any host.
 
 from __future__ import annotations
 
-import os
 import re
 import resource
 import shutil
@@ -148,22 +147,6 @@ def parse_cgroup_limits(cpu_max=None, memory_max=None):
     return limits
 
 
-def proc_cpu_ms(pid):
-    """CPU milliseconds consumed by one process (user + system)."""
-    try:
-        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError:
-        return None
-    fields = text.rsplit(")", 1)[-1].split()
-    if len(fields) < 15:
-        return None
-    ticks = int(fields[13]) + int(fields[14])
-    try:
-        clock = os.sysconf("SC_CLK_TCK")
-    except (ValueError, OSError):
-        clock = 100
-    return round(ticks / clock * 1000, 3)
 
 
 def proc_peak_rss(pid="self"):
@@ -275,12 +258,6 @@ def _float(value):
         return None
 
 
-def _read(path, default=None):
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            return handle.read()
-    except OSError:
-        return default
 
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,6 @@ MONOTONIC_CLOCK_ID = 3
 # Perfetto requires every TrackEvent packet to name the sequence that owns its
 # incremental state, even when the event carries direct names and track ids.
 TRACE_SEQUENCE_ID = 1
-CAPTURE_TRACK_NAME = "capture"
 EXEMPLAR_TRACK_PREFIX = "exemplar/"
 MAX_TRACE_BYTES = 64 * 1024 * 1024
 FLOW_DOMAINS = (

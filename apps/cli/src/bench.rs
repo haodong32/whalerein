@@ -54,7 +54,6 @@ pub(crate) struct FileOutlet {
     sender: SyncSender<OutletMessage>,
     state: Arc<OutletState>,
     byte_cap: u64,
-    path: PathBuf,
     writer: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -84,7 +83,6 @@ impl FileOutlet {
             sender,
             state,
             byte_cap,
-            path: path.to_path_buf(),
             writer: Mutex::new(Some(writer)),
         }))
     }
@@ -97,16 +95,8 @@ impl FileOutlet {
         self.state.written_bytes.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn failed(&self) -> bool {
-        self.state.failed.load(Ordering::SeqCst)
-    }
-
     pub(crate) fn byte_cap(&self) -> u64 {
         self.byte_cap
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
     }
 
     /// Flush and fsync the file with a bounded wait. A stalled writer never
@@ -313,10 +303,6 @@ impl BenchSetup {
 
     pub(crate) fn cli_context(&self) -> Arc<BenchContext> {
         self.cli.clone()
-    }
-
-    pub(crate) fn write_stamps(&self) -> WriteStamps {
-        WriteStamps::new(self.cli.clone())
     }
 
     pub(crate) fn outlet(&self) -> Option<&Arc<FileOutlet>> {

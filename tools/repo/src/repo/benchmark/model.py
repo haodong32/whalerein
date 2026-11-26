@@ -33,7 +33,6 @@ SCENARIO_VERSION = 8
 SCENARIO_ID = "streaming-reply"
 OBSERVATION_SURFACE = "cli-stdout"
 OBSERVATION_ENDPOINT = "cli_stdout"
-MAX_HOST_BROKER_EXTRA_RTT_MS = 1000
 NETWORK_PROBE_COUNT = 5
 BURST_WINDOW_MS = 50
 DEFAULT_ATTEMPTS = 30
@@ -95,7 +94,6 @@ CLEANUP_RESULTS = ("verified", "unverified")
 OBSERVATION_MODES = ("off", "aggregate", "trace")
 EARLY_STOPS = ("none", "deadline", "terminal_window", "error", "interrupted")
 OUTPUT_KINDS = ("preview", "replace", "reset", "terminal", "duplicate", "wrong", "hidden")
-INTEGRITY_VERDICTS = ("pass", "fail", "unverified", "missing")
 READ_OUTCOMES = ("completed", "timeout", "incorrect_content", "product_error")
 READ_ROUTES = ("inline", "reference")
 RECOVERY_MILESTONES = (
@@ -131,19 +129,6 @@ PAIR_STREAMING_METRICS = (
     "largest_output_share",
     "final_output_share",
 )
-PAIR_STREAMING_LABELS = {
-    "max_display_delay_ms": ("maximum display delay", "ms"),
-    "longest_pending_stall_ms": ("longest pending stall", "ms"),
-    "largest_output_share": ("largest output share", "%"),
-    "final_output_share": ("final output share", "%"),
-}
-LINK_STREAMING_METRICS = {
-    "largest_burst_share": (f"largest {BURST_WINDOW_MS} ms output share", "%"),
-}
-PRIMARY_STREAMING_METRICS = {
-    "max_display_delay_ms": ("maximum display delay", "ms"),
-    **LINK_STREAMING_METRICS,
-}
 
 # Metric catalog: each public metric declares its unit, boundaries, sample
 # unit, population, denominator, observation mode, missingness and weighting.
@@ -362,9 +347,6 @@ EDGE_PAIRS = (
     ("delivery_to_write_ms", "core_delivery", "cli_write", ("delivery",)),
 )
 PREVIEW_EDGES = tuple(name for name, *_ in EDGE_PAIRS) + ("write_to_observe_ms",)
-EDGE_PATH_FIELDS = {
-    "preview": PREVIEW_EDGES,
-}
 
 
 def invalid(message):
@@ -2729,40 +2711,6 @@ def _pair_receipt_delivery(events):
     return intervals, unresolved
 
 
-def _pair_dequeue_delivery(events):
-    """Each delivered preview names the dequeue of its frame; frames that
-    produce no delivery are not increments and do not create a missing edge."""
-    dequeues = [event for event in events if event["event"] == "core_dequeue"]
-    deliveries = [event for event in events if event["event"] == "core_delivery"]
-    intervals = []
-    unresolved = []
-    for delivery in deliveries:
-        frame = delivery["data"].get("frame")
-        if not frame:
-            continue
-        matches = [
-            event for event in dequeues
-            if event["data"].get("frame") == frame and event["ts"] <= delivery["ts"]
-        ]
-        if not matches:
-            unresolved.append({
-                "name": "dequeue_to_delivery_ms",
-                "key": [frame],
-                "reason": "missing_boundary",
-            })
-            continue
-        dequeue = max(matches, key=lambda event: event["ts"])
-        intervals.append({
-            "name": "dequeue_to_delivery_ms",
-            "start_ns": dequeue["ts"],
-            "end_ns": delivery["ts"],
-            "duration_ms": round((delivery["ts"] - dequeue["ts"]) / 1_000_000, 6),
-            "owners": [dequeue["producer"], delivery["producer"]],
-            "key": [frame],
-        })
-    return intervals, unresolved
-
-
 def _write_observe_edge(events, index):
     writes = [event for event in events if event["event"] == "cli_write"]
     observes = [event for event in events if event["event"] == "fixture_observe"]
@@ -3052,8 +3000,10 @@ def _coverage(facts, events=()):
             required_edges = PREVIEW_EDGES
             edge_covered = 0
             edge_missing = Counter()
-            for attempt in path_attempts:
-                waterfall = _waterfall(events, attempt["id"])
+            waterfalls = [
+                _waterfall(events, attempt["id"]) for attempt in path_attempts
+            ]
+            for waterfall in waterfalls:
                 observed = {edge["name"] for edge in waterfall["edges"]}
                 lacking = [name for name in required_edges if name not in observed]
                 lacking.extend(
@@ -3067,8 +3017,8 @@ def _coverage(facts, events=()):
                 edge_covered += 1
             edge_complete = denominator > 0 and edge_covered == denominator
             inapplicable = sum(
-                1 for attempt in path_attempts
-                for item in _waterfall(events, attempt["id"])["unresolved"]
+                1 for waterfall in waterfalls
+                for item in waterfall["unresolved"]
                 if item["reason"] in ("inapplicable", "dropped")
             )
             path_entry["edges"] = {

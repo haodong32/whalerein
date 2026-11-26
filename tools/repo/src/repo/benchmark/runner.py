@@ -37,7 +37,6 @@ from ..verification import (
 from . import model, trace
 
 DEFAULT_EXECUTION_TIMEOUT_SECONDS = 900
-DEFAULT_EVENTS_FILE = "events.ndjson"
 DEFAULT_SCHEDULE_FILE = "schedule.json"
 TRACE_FILENAME = "case.pftrace"
 
@@ -189,14 +188,6 @@ def slot_plan(request):
                 ordinal += 1
     return {"seed": str(request.seed), "rule": "alternating", "slots": slots}
 
-
-def schedule_document(request):
-    return {
-        "schema_version": model.SCHEMA_VERSION,
-        "kind": "benchmark-schedule",
-        "run_id": None,
-        **slot_plan(request),
-    }
 
 
 def _create_output(directory):

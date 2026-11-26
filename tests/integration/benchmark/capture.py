@@ -27,9 +27,6 @@ CONTRACT_ENV = "WHALEREIN_BENCH_CONTRACT_PATH"
 MODES = ("off", "aggregate", "trace")
 
 
-def report_root():
-    return os.environ.get("WHALEREIN_BENCH_REPORTS", "/reports")
-
 
 class Capture:
     """One run's capture identity and outlet layout."""
