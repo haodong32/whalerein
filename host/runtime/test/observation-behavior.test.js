@@ -92,14 +92,11 @@ test('latency/AC-01.coalesce coalesces adjacent previews into one typed fact', a
   buffer.push(live(2, 'cd'))
   buffer.push(live(3, 'ef'))
   await settle(20)
-  assert.equal(facts.length, 1)
-  assert.equal(facts[0].frames, 3)
-  assert.equal(facts[0].bytes, 6)
-  assert.equal(facts[0].seq_start, 1)
-  assert.equal(facts[0].seq_end, 3)
-  assert.equal(facts[0].stream, 'raw-attempt')
-  assert.equal(published.length, 1)
-  assert.equal(published[0].live.delta.text, 'abcdef')
+  assert.deepEqual(facts.map(fact => [fact.frames, fact.bytes, fact.seq_start, fact.seq_end]), [
+    [1, 2, 1, 1], [2, 4, 2, 3],
+  ])
+  assert.ok(facts.every(fact => fact.stream === 'raw-attempt'))
+  assert.deepEqual(published.map(update => update.live.delta.text), ['ab', 'cdef'])
 })
 
 test('latency/AC-01.dequeue records live queue enqueue/dequeue with depth, bytes and wait', async (t) => {
