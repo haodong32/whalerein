@@ -21,18 +21,19 @@ export function hasDshServices(ctx) {
  * @param {object} [options.store]
  * @param {object} [options.logger]
  * @param {() => number} [options.now]
+ * @param {object} [options.observation] shared process outlet (bench trace mode).
  * @param {object} [options.adapter] explicit adapter instance (tests/harness).
  */
-export function createAdapter({ mode = 'auto', ctx, config, store, logger, now, adapter } = {}) {
+export function createAdapter({ mode = 'auto', ctx, config, store, logger, now, observation = null, adapter } = {}) {
   if (adapter) return adapter
   if (mode === 'fake') {
-    return new FakeDshAdapter({ store, logger, now, hostId: config?.hostId ?? '' })
+    return new FakeDshAdapter({ store, logger, now, observation, hostId: config?.hostId ?? '' })
   }
   if (mode === 'real') {
-    return new RealDshAdapter({ ctx, config, store, logger, now })
+    return new RealDshAdapter({ ctx, config, store, logger, now, observation })
   }
-  if (hasDshServices(ctx)) return new RealDshAdapter({ ctx, config, store, logger, now })
-  return new FakeDshAdapter({ store, logger, now, hostId: config?.hostId ?? '' })
+  if (hasDshServices(ctx)) return new RealDshAdapter({ ctx, config, store, logger, now, observation })
+  return new FakeDshAdapter({ store, logger, now, observation, hostId: config?.hostId ?? '' })
 }
 
 export { DshAdapter, normalizeEvent, normalizeSummary, normalizeApproval, EVENT_KINDS, CONTROL_EVENT_KINDS } from './base.js'

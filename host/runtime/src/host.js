@@ -94,8 +94,9 @@ export class HostRuntime {
    * @param {object} [options.logger]
    * @param {() => number} [options.now]
    * @param {import('./protocol.js').ProtoCodec} [options.codec]
+   * @param {object} [options.observation] shared process outlet (trace mode).
    */
-  constructor({ config, adapter, credentials, store, access, logger, now = Date.now, codec = defaultCodec }) {
+  constructor({ config, adapter, credentials, store, access, logger, now = Date.now, codec = defaultCodec, observation = null }) {
     this.#config = config
     this.credentials = credentials
     this.injectedAdapter = adapter ?? null
@@ -103,6 +104,7 @@ export class HostRuntime {
     this.injectedAccess = access ?? null
     this.injectedLogger = logger ?? null
     this.now = now
+    this.observation = observation
     this.#codec = resolveCodec(codec)
   }
 
@@ -202,6 +204,7 @@ export class HostRuntime {
         now: this.now,
         codec: this.#codec,
         transportProfile: this.#config.transportProfile ?? 'default',
+        observation: this.observation,
       })
       this.#events = new WatchedEvents({
         hostId: this.#config.hostId,
@@ -213,6 +216,7 @@ export class HostRuntime {
         logger: this.#logger,
         now: this.now,
         codec: this.#codec,
+        observation: this.observation,
       })
       this.#commands = new CommandService({
         hostId: this.#config.hostId,
@@ -225,6 +229,7 @@ export class HostRuntime {
         security: this.#security,
         attachmentPolicy: this.#config.attachmentPolicy ?? null,
         transportProfile: this.#config.transportProfile ?? 'default',
+        observation: this.observation,
         onAccepted: (request) => this.#reply(request, { status: 'host_accepted' }),
       })
       // Crash recovery happens before any request is accepted.

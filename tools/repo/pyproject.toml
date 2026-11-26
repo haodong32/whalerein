@@ -5,7 +5,11 @@ description = "WhaleRein monorepo manager"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-only" }
-dependencies = ["rich>=13.9,<15"]
+dependencies = [
+  "rich>=13.9,<15",
+  # Pinned Perfetto trace builder used by the offline benchmark exporter.
+  "perfetto==0.14.0",
+]
 
 [project.scripts]
 repo = "repo.cli:main"

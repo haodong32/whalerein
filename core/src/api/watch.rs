@@ -7,6 +7,7 @@ use super::*;
 #[cfg(any(test, feature = "test-support", feature = "protocol-testing"))]
 use crate::api::{Cancellation, ObservationInterests, SessionEventPayload};
 use crate::conversation::{Conversation, ViewUpdate};
+use crate::observation::bench::{BenchEvent, TokenDomain};
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -163,6 +164,17 @@ impl Core {
         S: UpdateSink + ?Sized,
     {
         let sync = self.sync_service()?;
+        let bench = self.diagnostics.bench().clone();
+        let capturing = bench.enabled();
+        let sync_request = if capturing {
+            bench.token(
+                TokenDomain::Request,
+                &format!("{}:{}:history", key.host_id, key.session_id),
+            )
+        } else {
+            String::new()
+        };
+        let mut page_index = 0u64;
         let wire_key = whalerein_proto::SessionKey::from(key);
         self.runtime
             .set_sync_state(&key.host_id, crate::sync::SyncState::Syncing);
@@ -297,6 +309,16 @@ impl Core {
             cut = page.cut_cursor.clone();
             after = batch.to_cursor.clone();
             let installed = sync.apply_page(key, &page)?;
+            if capturing {
+                page_index += 1;
+                bench.emit(BenchEvent::CoreSync {
+                    request: sync_request.clone(),
+                    page: page_index,
+                    messages: batch.changes.len() as u64,
+                    bytes: history_page_bytes(batch),
+                    verified: installed,
+                });
+            }
             if snapshot {
                 // A snapshot replaces the whole committed view only on its
                 // final page. Emitting from earlier pages would either replay
@@ -436,4 +458,22 @@ impl Core {
             }
         }
     }
+}
+
+/// Content-free byte size of one verified history batch. Only block text and
+/// reasoning lengths are read; no content enters the fact.
+fn history_page_bytes(batch: &whalerein_proto::HistoryBatch) -> u64 {
+    batch
+        .changes
+        .iter()
+        .filter_map(|change| change.message.as_ref())
+        .flat_map(|message| message.blocks.iter())
+        .map(|block| match &block.content {
+            Some(whalerein_proto::content_block::Content::Text(text)) => text.text.len() as u64,
+            Some(whalerein_proto::content_block::Content::Reasoning(reasoning)) => {
+                reasoning.text.len() as u64
+            }
+            _ => 0,
+        })
+        .sum()
 }

@@ -141,8 +141,8 @@ export class RealDshAdapter extends DshAdapter {
    * @param {object} [options.store]
    * @param {object} [options.logger]
    */
-  constructor({ ctx, config = {}, now = Date.now, store = null, logger = null } = {}) {
-    super({ now, store, logger })
+  constructor({ ctx, config = {}, now = Date.now, store = null, logger = null, observation = null } = {}) {
+    super({ now, store, logger, observation })
     this.ctx = ctx
     this.config = config
     this.deliveryModes = ['START_IF_IDLE', 'ENQUEUE_AFTER_RUN', 'STEER']
@@ -239,13 +239,16 @@ export class RealDshAdapter extends DshAdapter {
     if (on) {
       const eventDisposer = on('session/event', (session, event) => this.#onSessionEvent(session, event), { global: true })
       const streamDisposer = on('agent/assistant-stream', (notification) => {
+        // Stamp the native callback before any normalization or Agent-epoch
+        // rewriting. The same instant is the only valid dsh_callback origin.
+        const boundaryAt = this.observationNow()
         const event = assistantStreamEvent(notification, this.now)
         if (event) {
           // DSH attempt IDs are only unique within one Agent lifecycle.
           const agent = notification.agent
           if (!this.#streamEpochs.has(agent)) this.#streamEpochs.set(agent, randomId())
           event.data.stream_id = `${this.#streamEpochs.get(agent)}:${event.data.stream_id}`
-          this.#notifyEvent(event)
+          this.#notifyEvent(event, boundaryAt)
         }
       }, { global: true })
       if (typeof streamDisposer === 'function') this.#disposers.push(streamDisposer)
@@ -1285,6 +1288,7 @@ export class RealDshAdapter extends DshAdapter {
   #onSessionEvent(session, event) {
     const sessionId = String(session?.id ?? session?.sessionId ?? '')
     if (sessionId === '') return
+    const boundaryAt = this.observationNow()
     let normalized
     try {
       normalized = this.#normalizeEvent(sessionId, event)
@@ -1292,11 +1296,11 @@ export class RealDshAdapter extends DshAdapter {
       return
     }
     if (!normalized) return
-    this.#notifyEvent(normalized)
+    this.#notifyEvent(normalized, boundaryAt)
   }
 
-  #notifyEvent(normalized) {
-    this.observeNative(normalized)
+  #notifyEvent(normalized, boundaryAt = null) {
+    this.observeNative(normalized, boundaryAt)
     for (const subscriber of this.#eventSubscribers) {
       try {
         subscriber(normalized)

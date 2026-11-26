@@ -423,3 +423,29 @@ func TestAdmissionGrantReadsUseTheDatabaseSeam(t *testing.T) {
 		t.Fatalf("list error = %v", err)
 	}
 }
+
+func TestControlUsesReservedPoolAndCloseReleasesBoth(t *testing.T) {
+	data := &fakeDB{t: t}
+	control := &fakeDB{t: t}
+	store := &Store{db: data, control: control}
+	view := store.Control()
+	if view == store || view.db != control {
+		t.Fatalf("Control did not switch to the reserved pool: %#v", view)
+	}
+	store.Close()
+	if data.closed != 1 || control.closed != 1 {
+		t.Fatalf("close counts data=%d control=%d", data.closed, control.closed)
+	}
+	if got := (&Store{db: data}).Control(); got == nil || got.db != data {
+		t.Fatal("a pool without a control reserve must return itself")
+	}
+}
+
+func TestDataPoolFloorRaisesOnlySmallConfigs(t *testing.T) {
+	if got := dataPoolSize(4); got != dataPoolFloor {
+		t.Fatalf("dataPoolSize(4) = %d", got)
+	}
+	if got := dataPoolSize(64); got != 64 {
+		t.Fatalf("dataPoolSize(64) = %d", got)
+	}
+}

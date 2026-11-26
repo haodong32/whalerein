@@ -21,12 +21,33 @@ function sameIdentity(previous, frame) {
 
 export class LiveBuffer {
   #pending = null
+  #frames = 0
   #timer = null
   #maxBytes
-  constructor(publish, delayMs = 20, maxBytes = MAX_PREVIEW_BYTES) {
+  #observe
+  constructor(publish, delayMs = 20, maxBytes = MAX_PREVIEW_BYTES, observe = null) {
     this.publish = publish
     this.delayMs = delayMs
     this.#maxBytes = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : MAX_PREVIEW_BYTES
+    // Optional observer for the coalescing boundary. It receives raw identities;
+    // the process outlet is the only component that tokenizes them.
+    this.#observe = typeof observe === 'function' ? observe : null
+  }
+
+  #notify(frame, frames, bytes) {
+    if (!this.#observe) return
+    try {
+      this.#observe({
+        stream: frame.attempt?.attempt_id,
+        block: frame.block_id,
+        seq_start: frame.first_seq,
+        seq_end: frame.last_seq,
+        frames,
+        bytes,
+      })
+    } catch {
+      // Observation never changes preview delivery.
+    }
   }
 
   get maxBytes() { return this.#maxBytes }
@@ -52,11 +73,13 @@ export class LiveBuffer {
     if (previous && bytes(previous.delta.text) + bytes(frame.delta.text) > this.#maxBytes) this.flush()
     if (!this.#pending) {
       this.#pending = { ...update, live: { ...frame, delta: { ...frame.delta } } }
+      this.#frames = 1
       this.#timer = setTimeout(() => this.flush(), this.delayMs)
       this.#timer.unref?.()
     } else {
       this.#pending.live.delta.text += frame.delta.text
       this.#pending.live.last_seq = frame.last_seq
+      this.#frames += 1
     }
     if (bytes(this.#pending.live.delta.text) >= this.#maxBytes) this.flush()
   }
@@ -65,7 +88,15 @@ export class LiveBuffer {
     clearTimeout(this.#timer)
     this.#timer = null
     const update = this.#pending
+    const frames = this.#frames
     this.#pending = null
-    if (update) this.publish(update)
+    this.#frames = 0
+    if (!update) return
+    // One fact per published batch, stamped when the batch is settled. A
+    // singleton batch is reported too: its interval is the join key the
+    // adapter handoff and the Host transport facts share, and omitting it
+    // would leave the common uncoalesced preview without a batch boundary.
+    this.#notify(update.live, frames, bytes(update.live.delta.text))
+    this.publish(update)
   }
 }

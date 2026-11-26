@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/broker"
+	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/observation"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"google.golang.org/protobuf/proto"
@@ -88,6 +90,7 @@ type waiter struct {
 	Conn            broker.ConnectionRef
 	Grant           store.AdmissionGrant
 	Deadline        time.Time
+	Route           observation.Route
 }
 
 // Service owns the transient query waiters.
@@ -97,6 +100,8 @@ type Service struct {
 	hosts       Hosts
 	publisher   Publisher
 	config      Config
+	metrics     *diagnostics.Metrics
+	observation *observation.Sink
 
 	mu      sync.Mutex
 	waiters map[waiterKey]*waiter
@@ -109,6 +114,8 @@ type Dependencies struct {
 	Hosts       Hosts
 	Publisher   Publisher
 	Config      Config
+	Metrics     *diagnostics.Metrics
+	Observation *observation.Sink
 }
 
 // New builds the transient query service.
@@ -129,19 +136,41 @@ func New(deps Dependencies) (*Service, error) {
 	if config.Now == nil {
 		config.Now = func() time.Time { return time.Now().UTC() }
 	}
+	if deps.Metrics == nil {
+		deps.Metrics = diagnostics.NewMetrics()
+	}
 	return &Service{
 		store:       deps.Store,
 		connections: deps.Connections,
 		hosts:       deps.Hosts,
 		publisher:   deps.Publisher,
 		config:      config,
+		metrics:     deps.Metrics,
+		observation: deps.Observation,
 		waiters:     map[waiterKey]*waiter{},
 	}, nil
 }
 
 // Admit validates one inbound query envelope and forwards it to the Host. The
 // waiter is registered before publication so a fast result cannot race it.
-func (s *Service) Admit(ctx context.Context, message broker.Message) error {
+func (s *Service) Admit(ctx context.Context, message broker.Message) (err error) {
+	started := time.Now()
+	requestID := ""
+	requestScope := ""
+	route := observation.RouteInline
+	admitted := false
+	defer func() {
+		if admitted {
+			return
+		}
+		outcome := admitOutcome(err)
+		if requestID != "" {
+			s.observeQuery(requestScope, requestID, route, 1, observation.QueryAdmit, outcome, 0)
+		}
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("query_admit", time.Since(started), string(outcome))
+		}
+	}()
 	if message.QoS != 1 {
 		return ErrInvalidTopic
 	}
@@ -153,6 +182,9 @@ func (s *Service) Admit(ctx context.Context, message broker.Message) error {
 	if err := proto.Unmarshal(message.Payload, &request); err != nil {
 		return ErrInvalidTopic
 	}
+	requestID = request.GetRequestId()
+	requestScope = operationScope(parsed.HostID, parsed.DeviceID)
+	route = queryRoute(&request)
 	if request.GetProtocolVersion() != 1 || request.GetRelayVersion() != broker.RelayEpoch {
 		return ErrProtocol
 	}
@@ -222,7 +254,7 @@ func (s *Service) Admit(ctx context.Context, message broker.Message) error {
 	scope := &waiter{
 		waiterKey:       waiterKey{parsed.HostID, parsed.DeviceID, request.GetRequestId()},
 		DeviceSessionID: deviceSession, ChannelID: request.GetChannelId(),
-		Conn: ref, Grant: grant, Deadline: deadline,
+		Conn: ref, Grant: grant, Deadline: deadline, Route: route,
 	}
 	if s.hosts != nil {
 		if online, known := s.hosts.HostPresence(scope.HostID); !online {
@@ -233,10 +265,25 @@ func (s *Service) Admit(ctx context.Context, message broker.Message) error {
 				result.Status = whalereinv1.OnlineStatus_failed
 				result.ErrorCode = whalereinv1.ErrorCode_unavailable
 			}
+			s.recordQueryAdmission(scope, started)
+			admitted = true
 			return s.publishReply(ctx, scope, result, message.Properties.MessageExpiry)
 		}
 	}
-	return s.registerAndForward(ctx, scope, &request, message.Properties.MessageExpiry)
+	needsForward, err := s.register(scope)
+	if err != nil {
+		return err
+	}
+	s.recordQueryAdmission(scope, started)
+	admitted = true
+	if !needsForward {
+		return nil
+	}
+	if err := s.forward(ctx, scope, &request, message.Properties.MessageExpiry); err != nil {
+		s.removeWaiter(scope)
+		return err
+	}
+	return nil
 }
 
 // validBody enforces the per-kind body representation: a handshake is always a
@@ -262,38 +309,78 @@ func validBody(request *whalereinv1.HostRequest) error {
 	return nil
 }
 
-func (s *Service) registerAndForward(ctx context.Context, scope *waiter, request *whalereinv1.HostRequest, upstream *uint32) error {
+// register installs one waiter before forwarding so a fast result cannot race
+// admission. It reports whether this admission owns the forward; a repeated
+// publication of the same request on the same connection is idempotent and
+// must not ask the Host twice.
+func (s *Service) register(scope *waiter) (bool, error) {
 	key := scope.waiterKey
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if existing, ok := s.waiters[key]; ok {
-		s.mu.Unlock()
-		// A repeated publication of the same request on the same connection is
-		// idempotent: the waiter already exists and the Host was already
-		// asked. A second connection must not attach to that waiter.
 		if existing.Conn == scope.Conn {
-			return nil
+			return false, nil
 		}
-		return ErrDuplicate
+		return false, ErrDuplicate
 	}
 	if len(s.waiters) >= s.config.MaxWaiters || s.connectionWaitersLocked(scope.Conn) >= s.config.MaxWaitersPerConnection {
-		s.mu.Unlock()
-		return ErrCapacity
+		return false, ErrCapacity
 	}
 	s.waiters[key] = scope
-	s.mu.Unlock()
-
-	err := s.forward(ctx, scope, request, upstream)
-	if err != nil {
-		s.mu.Lock()
-		if s.waiters[key] == scope {
-			delete(s.waiters, key)
-		}
-		s.mu.Unlock()
-	}
-	return err
+	return true, nil
 }
 
-func (s *Service) forward(ctx context.Context, scope *waiter, request *whalereinv1.HostRequest, upstream *uint32) error {
+func (s *Service) removeWaiter(scope *waiter) {
+	s.mu.Lock()
+	if s.waiters[scope.waiterKey] == scope {
+		delete(s.waiters, scope.waiterKey)
+	}
+	s.mu.Unlock()
+}
+
+// recordQueryAdmission emits the admission boundary once, after the waiter is
+// registered and before forwarding begins.
+func (s *Service) recordQueryAdmission(scope *waiter, started time.Time) {
+	s.observeQuery(operationScope(scope.HostID, scope.DeviceID), scope.RequestID, scope.Route, 1, observation.QueryAdmit, observation.OutcomeOK, 0)
+	if s.metrics != nil {
+		s.metrics.ObserveAccessStage("query_admit", time.Since(started), string(observation.OutcomeOK))
+	}
+}
+
+func (s *Service) observeQuery(scope, request string, route observation.Route, attempt uint64, stage observation.QueryStage, outcome observation.Outcome, bytes int) {
+	if s.observation == nil {
+		return
+	}
+	event := observation.QueryEvent{
+		Scope: scope, Request: request, Attempt: attempt, Route: route, Stage: stage, Outcome: outcome,
+	}
+	if bytes > 0 {
+		event.Bytes = uint64(bytes)
+		event.HasBytes = true
+	}
+	s.observation.Query(event)
+}
+
+func admitOutcome(err error) observation.Outcome {
+	return observation.OutcomeForError(err, ErrExpired)
+}
+
+func queryRoute(request *whalereinv1.HostRequest) observation.Route {
+	if request.GetBodyReference() != nil {
+		return observation.RouteReference
+	}
+	return observation.RouteInline
+}
+
+func (s *Service) forward(ctx context.Context, scope *waiter, request *whalereinv1.HostRequest, upstream *uint32) (err error) {
+	started := time.Now()
+	defer func() {
+		outcome := admitOutcome(err)
+		s.observeQuery(operationScope(scope.HostID, scope.DeviceID), scope.RequestID, scope.Route, 1, observation.QueryForward, outcome, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("query_forward", time.Since(started), string(outcome))
+		}
+	}()
 	request.ConnectionRef = scope.Conn.String()
 	request.GrantGeneration = scope.Grant.GrantGeneration
 	request.EnrollmentGeneration = scope.Grant.EnrollmentGeneration
@@ -313,7 +400,7 @@ func (s *Service) forward(ctx context.Context, scope *waiter, request *whalerein
 	if expiry == nil {
 		return ErrExpired
 	}
-	return s.publisher.PublishMessage(ctx, broker.Message{
+	err = s.publisher.PublishMessage(ctx, broker.Message{
 		Topic:   broker.RequestTopic(scope.HostID),
 		Payload: payload,
 		QoS:     1,
@@ -323,6 +410,10 @@ func (s *Service) forward(ctx context.Context, scope *waiter, request *whalerein
 			MessageExpiry:   expiry,
 		},
 	})
+	if err == nil && s.metrics != nil {
+		s.metrics.ObserveAccessStageBytes("query_forward", int64(len(payload)))
+	}
+	return err
 }
 
 func (s *Service) connectionWaitersLocked(ref broker.ConnectionRef) int {
@@ -352,6 +443,13 @@ func (s *Service) Complete(ctx context.Context, hostID string, message broker.Me
 	}
 	now := s.config.Now()
 	if !now.Before(scope.Deadline) {
+		// A Host result that arrives after the caller deadline is late. It is
+		// recorded as such and can never turn the observed timeout into a
+		// successful reply; the waiter settlement is still consumed.
+		s.observeQuery(operationScope(scope.HostID, scope.DeviceID), scope.RequestID, scope.Route, 1, observation.QueryExpire, observation.OutcomeLate, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStageDisposition("query_expire", string(observation.OutcomeLate))
+		}
 		return true
 	}
 	grant, err := s.store.AdmissionGrantFor(ctx, scope.HostID, scope.DeviceID)
@@ -394,7 +492,16 @@ func (s *Service) takeResultWaiter(hostID string, result *whalereinv1.HostResult
 }
 
 // publishReply sends a terminal result only to the admitted connection.
-func (s *Service) publishReply(ctx context.Context, scope *waiter, reply *whalereinv1.HostResult, upstream *uint32) error {
+func (s *Service) publishReply(ctx context.Context, scope *waiter, reply *whalereinv1.HostResult, upstream *uint32) (err error) {
+	started := time.Now()
+	observedBytes := 0
+	defer func() {
+		outcome := admitOutcome(err)
+		s.observeQuery(operationScope(scope.HostID, scope.DeviceID), scope.RequestID, scope.Route, 1, observation.QueryReply, outcome, observedBytes)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("query_reply", time.Since(started), string(outcome))
+		}
+	}()
 	reply.HostId = scope.HostID
 	reply.DeviceId = scope.DeviceID
 	reply.RequestId = scope.RequestID
@@ -412,9 +519,16 @@ func (s *Service) publishReply(ctx context.Context, scope *waiter, reply *whaler
 		CorrelationData: []byte(scope.RequestID),
 		MessageExpiry:   expiry,
 	}.WithUserProperty(broker.PropertyTarget, scope.Conn.String())
-	return s.publisher.PublishMessage(ctx, broker.Message{
+	err = s.publisher.PublishMessage(ctx, broker.Message{
 		Topic: broker.DeviceReplyTopic(scope.HostID, scope.DeviceID), Payload: payload, QoS: 1, Properties: properties,
 	})
+	if err == nil {
+		observedBytes = len(payload)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStageBytes("query_reply", int64(len(payload)))
+		}
+	}
+	return err
 }
 
 func sameGrant(left, right store.AdmissionGrant) bool {
@@ -555,8 +669,12 @@ func (s *Service) Sweep() int {
 	for key, waiter := range s.waiters {
 		if !now.Before(waiter.Deadline) {
 			delete(s.waiters, key)
+			s.observeQuery(operationScope(waiter.HostID, waiter.DeviceID), waiter.RequestID, waiter.Route, 1, observation.QueryExpire, observation.OutcomeExpired, 0)
 			removed++
 		}
+	}
+	if removed > 0 && s.metrics != nil {
+		s.metrics.ObserveAccessStageDisposition("query_expire", string(observation.OutcomeExpired))
 	}
 	return removed
 }
@@ -581,4 +699,10 @@ func remainingExpiry(deadline, now time.Time, upstream *uint32) *uint32 {
 	}
 	value := uint32(seconds)
 	return &value
+}
+
+// operationScope binds a request token to the authenticated host/device pair
+// so the same client-generated request id on two devices stays distinct.
+func operationScope(hostID, deviceID string) string {
+	return observation.Scope(hostID, deviceID)
 }

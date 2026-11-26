@@ -1,0 +1,863 @@
+{
+  "schema": 1,
+  "name": "whalerein/latency-observation",
+  "capture_schema": 2,
+  "workload_version": 8,
+  "clock": {
+    "source": "CLOCK_MONOTONIC",
+    "unit": "ns",
+    "epoch": "kernel-boot",
+    "topology": "single-linux-kernel-time-namespace"
+  },
+  "producers": [
+    "fixture",
+    "dsh",
+    "host",
+    "core",
+    "cli",
+    "access"
+  ],
+  "header": {
+    "required": [
+      "v",
+      "run",
+      "producer",
+      "lifetime",
+      "seq",
+      "ts",
+      "event",
+      "data"
+    ],
+    "v": 1
+  },
+  "events": {
+    "fixture_clock_check": {
+      "producers": [
+        "fixture"
+      ],
+      "required": [
+        "producer",
+        "reading_ns",
+        "before_ns",
+        "after_ns",
+        "clock_source",
+        "ok"
+      ],
+      "optional": [
+        "reason"
+      ],
+      "fields": {
+        "producer": "producer",
+        "reading_ns": "u64",
+        "before_ns": "u64",
+        "after_ns": "u64",
+        "clock_source": "str",
+        "ok": "bool",
+        "reason": "str"
+      }
+    },
+    "fixture_slot": {
+      "producers": [
+        "fixture"
+      ],
+      "required": [
+        "slot",
+        "phase",
+        "arm",
+        "state"
+      ],
+      "optional": [
+        "pair"
+      ],
+      "fields": {
+        "slot": "u64",
+        "phase": "enum:warmup,measured",
+        "arm": "enum:idle,bulk,watch",
+        "state": "enum:planned,started,measurement_entered,finished,setup_failed,interrupted,not_started",
+        "pair": "str"
+      }
+    },
+    "fixture_socket_sample": {
+      "producers": [
+        "fixture"
+      ],
+      "required": [
+        "role",
+        "generation",
+        "state"
+      ],
+      "optional": [
+        "rtt_us",
+        "retransmits",
+        "queue_bytes",
+        "gap_ms"
+      ],
+      "fields": {
+        "role": "enum:host,client",
+        "generation": "u64",
+        "state": "enum:sampled,idle,unsupported,replaced,dropped",
+        "rtt_us": "u64",
+        "retransmits": "u64",
+        "queue_bytes": "u64",
+        "gap_ms": "u64"
+      }
+    },
+    "fixture_observe": {
+      "producers": [
+        "fixture"
+      ],
+      "required": [
+        "attempt",
+        "ordinal",
+        "kind",
+        "bytes",
+        "prefix_bytes",
+        "correct"
+      ],
+      "optional": [
+        "block",
+        "record"
+      ],
+      "fields": {
+        "attempt": "str",
+        "ordinal": "u64",
+        "record": "u64",
+        "kind": "enum:preview,replace,reset,terminal,duplicate,hidden,integrity",
+        "bytes": "u64",
+        "prefix_bytes": "u64",
+        "correct": "bool",
+        "block": "str"
+      }
+    },
+    "fixture_emit": {
+      "producers": [
+        "fixture"
+      ],
+      "required": [
+        "stream",
+        "attempt",
+        "block",
+        "seq_start",
+        "seq_end",
+        "bytes"
+      ],
+      "optional": [
+        "batch"
+      ],
+      "fields": {
+        "stream": "str",
+        "attempt": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64",
+        "bytes": "u64",
+        "batch": "str"
+      }
+    },
+    "fixture_recovery": {
+      "producers": [
+        "fixture"
+      ],
+      "required": [
+        "attempt",
+        "milestone",
+        "state"
+      ],
+      "optional": [
+        "generation"
+      ],
+      "fields": {
+        "attempt": "str",
+        "milestone": "enum:blackout_start,link_restored,subscribed,channel_ready,watch_ready,first_update,first_visible,caught_up,timeout",
+        "state": "enum:observed,missed,inapplicable",
+        "generation": "u64"
+      }
+    },
+    "dsh_callback": {
+      "producers": [
+        "dsh"
+      ],
+      "required": [
+        "stream",
+        "attempt",
+        "block",
+        "seq_start",
+        "seq_end",
+        "bytes",
+        "native"
+      ],
+      "optional": [
+        "batch",
+        "disposition"
+      ],
+      "fields": {
+        "stream": "str",
+        "attempt": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64",
+        "bytes": "u64",
+        "native": "enum:assistant-preview,assistant-message,history",
+        "batch": "str",
+        "disposition": "enum:published,split,suppressed"
+      }
+    },
+    "dsh_handoff": {
+      "producers": [
+        "dsh"
+      ],
+      "required": [
+        "stream",
+        "attempt",
+        "block",
+        "seq_start",
+        "seq_end",
+        "bytes"
+      ],
+      "optional": [
+        "batch",
+        "disposition"
+      ],
+      "fields": {
+        "stream": "str",
+        "attempt": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64",
+        "bytes": "u64",
+        "batch": "str",
+        "disposition": "enum:published,split,suppressed"
+      }
+    },
+    "host_enqueue": {
+      "producers": [
+        "host"
+      ],
+      "required": [
+        "stream",
+        "block",
+        "seq_start",
+        "seq_end",
+        "bytes",
+        "queue_depth",
+        "queue_bytes"
+      ],
+      "optional": [
+        "batch"
+      ],
+      "fields": {
+        "stream": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64",
+        "bytes": "u64",
+        "queue_depth": "u64",
+        "queue_bytes": "u64",
+        "batch": "str"
+      }
+    },
+    "host_coalesce": {
+      "producers": [
+        "host"
+      ],
+      "required": [
+        "stream",
+        "block",
+        "seq_start",
+        "seq_end",
+        "frames",
+        "bytes"
+      ],
+      "optional": [
+        "batch"
+      ],
+      "fields": {
+        "stream": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64",
+        "frames": "u64",
+        "bytes": "u64",
+        "batch": "str"
+      }
+    },
+    "host_dequeue": {
+      "producers": [
+        "host"
+      ],
+      "required": [
+        "stream",
+        "block",
+        "seq_start",
+        "seq_end",
+        "bytes",
+        "wait_ns"
+      ],
+      "optional": [
+        "batch"
+      ],
+      "fields": {
+        "stream": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64",
+        "bytes": "u64",
+        "wait_ns": "u64",
+        "batch": "str"
+      }
+    },
+    "host_publish": {
+      "producers": [
+        "host"
+      ],
+      "required": [
+        "request",
+        "attempt",
+        "kind",
+        "bytes",
+        "outcome"
+      ],
+      "optional": [
+        "stream",
+        "seq_start",
+        "seq_end",
+        "batch",
+        "queue_depth",
+        "queue_bytes"
+      ],
+      "fields": {
+        "request": "str",
+        "attempt": "u64",
+        "kind": "enum:result,event,ready",
+        "bytes": "u64",
+        "outcome": "enum:accepted,failed,timeout,dropped",
+        "stream": "str",
+        "seq_start": "u64",
+        "seq_end": "u64",
+        "batch": "str",
+        "queue_depth": "u64",
+        "queue_bytes": "u64"
+      }
+    },
+    "host_command": {
+      "producers": [
+        "host"
+      ],
+      "required": [
+        "request",
+        "attempt",
+        "stage"
+      ],
+      "optional": [
+        "outcome"
+      ],
+      "fields": {
+        "request": "str",
+        "attempt": "u64",
+        "stage": "enum:start,finish",
+        "outcome": "enum:ok,error,expired,timeout"
+      }
+    },
+    "host_subscribe": {
+      "producers": [
+        "host"
+      ],
+      "required": [
+        "connection",
+        "generation",
+        "outcome"
+      ],
+      "optional": [],
+      "fields": {
+        "connection": "str",
+        "generation": "u64",
+        "outcome": "enum:subscribed,replaced,failed"
+      }
+    },
+    "core_receipt": {
+      "producers": [
+        "core"
+      ],
+      "required": [
+        "frame",
+        "kind",
+        "bytes",
+        "decode"
+      ],
+      "optional": [
+        "scope",
+        "stream",
+        "reason",
+        "batch",
+        "block",
+        "seq_start",
+        "seq_end"
+      ],
+      "fields": {
+        "frame": "str",
+        "kind": "enum:event,result,history,command",
+        "bytes": "u64",
+        "decode": "enum:ok,rejected",
+        "scope": "str",
+        "stream": "str",
+        "reason": "str",
+        "batch": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64"
+      }
+    },
+    "core_enqueue": {
+      "producers": [
+        "core"
+      ],
+      "required": [
+        "frame",
+        "queue_depth",
+        "queue_bytes",
+        "accepted"
+      ],
+      "optional": [
+        "reason",
+        "stream",
+        "block",
+        "seq_start",
+        "seq_end",
+        "batch"
+      ],
+      "fields": {
+        "frame": "str",
+        "queue_depth": "u64",
+        "queue_bytes": "u64",
+        "accepted": "bool",
+        "reason": "str",
+        "stream": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64",
+        "batch": "str"
+      }
+    },
+    "core_dequeue": {
+      "producers": [
+        "core"
+      ],
+      "required": [
+        "frame",
+        "wait_ns",
+        "disposition"
+      ],
+      "optional": [
+        "reason",
+        "stream",
+        "block",
+        "seq_start",
+        "seq_end",
+        "batch"
+      ],
+      "fields": {
+        "frame": "str",
+        "wait_ns": "u64",
+        "disposition": "enum:applied,duplicate,stale,waiting_gap,rejected",
+        "reason": "str",
+        "stream": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64",
+        "batch": "str"
+      }
+    },
+    "core_delivery": {
+      "producers": [
+        "core"
+      ],
+      "required": [
+        "frame",
+        "delivery",
+        "kind",
+        "bytes"
+      ],
+      "optional": [
+        "stream",
+        "block",
+        "seq_start",
+        "seq_end",
+        "batch"
+      ],
+      "fields": {
+        "frame": "str",
+        "delivery": "u64",
+        "kind": "enum:preview,message,attempt_ended",
+        "bytes": "u64",
+        "stream": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64",
+        "batch": "str"
+      }
+    },
+    "core_join": {
+      "producers": [
+        "core"
+      ],
+      "required": [
+        "watch",
+        "connection",
+        "generation",
+        "milestone"
+      ],
+      "optional": [],
+      "fields": {
+        "watch": "str",
+        "connection": "str",
+        "generation": "u64",
+        "milestone": "enum:subscribed,channel_ready,watch_ready,first_update,first_visible_prefix,caught_up,closed"
+      }
+    },
+    "core_sync": {
+      "producers": [
+        "core"
+      ],
+      "required": [
+        "request",
+        "page",
+        "messages",
+        "bytes",
+        "verified"
+      ],
+      "optional": [],
+      "fields": {
+        "request": "str",
+        "page": "u64",
+        "messages": "u64",
+        "bytes": "u64",
+        "verified": "bool"
+      }
+    },
+    "core_command": {
+      "producers": [
+        "core"
+      ],
+      "required": [
+        "request",
+        "attempt",
+        "stage"
+      ],
+      "optional": [
+        "outcome",
+        "reason"
+      ],
+      "fields": {
+        "request": "str",
+        "attempt": "u64",
+        "stage": "enum:admit,receipt,recover,terminal",
+        "outcome": "enum:ok,expired,late,error",
+        "reason": "str"
+      }
+    },
+    "cli_write": {
+      "producers": [
+        "core",
+        "cli"
+      ],
+      "required": [
+        "delivery",
+        "ordinal",
+        "bytes",
+        "outcome",
+        "flush"
+      ],
+      "optional": [
+        "stream",
+        "block",
+        "seq_start",
+        "seq_end"
+      ],
+      "fields": {
+        "delivery": "u64",
+        "ordinal": "u64",
+        "bytes": "u64",
+        "outcome": "enum:success,partial,failed,reversed",
+        "flush": "bool",
+        "stream": "str",
+        "block": "str",
+        "seq_start": "u64",
+        "seq_end": "u64"
+      }
+    },
+    "cli_request": {
+      "producers": [
+        "cli"
+      ],
+      "required": [
+        "request",
+        "attempt",
+        "kind",
+        "stage"
+      ],
+      "optional": [
+        "outcome",
+        "code"
+      ],
+      "fields": {
+        "request": "str",
+        "attempt": "u64",
+        "kind": "enum:query,command,history",
+        "stage": "enum:invoke,terminal",
+        "outcome": "enum:ok,error,timeout,expired",
+        "code": "str"
+      }
+    },
+    "access_query": {
+      "producers": [
+        "access"
+      ],
+      "required": [
+        "request",
+        "attempt",
+        "route",
+        "stage"
+      ],
+      "optional": [
+        "outcome",
+        "bytes",
+        "scope"
+      ],
+      "fields": {
+        "request": "str",
+        "attempt": "u64",
+        "route": "enum:inline,reference",
+        "stage": "enum:admit,forward,reply,expire",
+        "outcome": "enum:ok,error,expired,late,timeout",
+        "bytes": "u64",
+        "scope": "str"
+      }
+    },
+    "access_command": {
+      "producers": [
+        "access"
+      ],
+      "required": [
+        "request",
+        "attempt",
+        "stage",
+        "durable"
+      ],
+      "optional": [
+        "outcome",
+        "bytes",
+        "scope"
+      ],
+      "fields": {
+        "request": "str",
+        "attempt": "u64",
+        "stage": "enum:admit,receipt,recover,terminal",
+        "durable": "bool",
+        "outcome": "enum:ok,error,expired,late,timeout",
+        "bytes": "u64",
+        "scope": "str"
+      }
+    },
+    "access_relay": {
+      "producers": [
+        "access"
+      ],
+      "required": [
+        "request",
+        "object_op",
+        "stage",
+        "route"
+      ],
+      "optional": [
+        "bytes",
+        "outcome",
+        "scope"
+      ],
+      "fields": {
+        "request": "str",
+        "object_op": "str",
+        "stage": "enum:stage,upload,finish,fetch,verify",
+        "route": "enum:inline,reference",
+        "bytes": "u64",
+        "outcome": "enum:ok,error,expired",
+        "scope": "str"
+      }
+    },
+    "access_notice": {
+      "producers": [
+        "access"
+      ],
+      "required": [
+        "connection",
+        "generation",
+        "role",
+        "stage"
+      ],
+      "optional": [
+        "outcome"
+      ],
+      "fields": {
+        "connection": "str",
+        "generation": "u64",
+        "role": "enum:host,client",
+        "stage": "enum:subscribe,ready,disconnect",
+        "outcome": "enum:ok,failed,replaced"
+      }
+    },
+    "access_transport": {
+      "producers": [
+        "access"
+      ],
+      "required": [
+        "connection",
+        "generation",
+        "role",
+        "direction",
+        "bytes",
+        "outcome"
+      ],
+      "optional": [],
+      "fields": {
+        "connection": "str",
+        "generation": "u64",
+        "role": "enum:host,client",
+        "direction": "enum:host_to_broker,broker_to_client",
+        "bytes": "u64",
+        "outcome": "enum:ok,failed,dropped"
+      }
+    }
+  },
+  "coverage_paths": {
+    "preview": [
+      "fixture_emit",
+      "dsh_callback",
+      "dsh_handoff",
+      "host_enqueue",
+      "host_dequeue",
+      "host_publish",
+      "core_receipt",
+      "core_enqueue",
+      "core_dequeue",
+      "core_delivery",
+      "cli_write",
+      "fixture_observe"
+    ],
+    "query": [
+      "cli_request",
+      "access_query",
+      "host_command",
+      "core_command",
+      "cli_request"
+    ],
+    "command": [
+      "cli_request",
+      "access_command",
+      "host_command",
+      "core_command",
+      "cli_request"
+    ],
+    "recovery": [
+      "fixture_recovery",
+      "core_join",
+      "fixture_observe"
+    ],
+    "bulk": [
+      "cli_request",
+      "access_query",
+      "core_sync",
+      "cli_request"
+    ],
+    "object": [
+      "cli_request",
+      "access_relay",
+      "core_command",
+      "cli_request"
+    ],
+    "transport": [
+      "host_publish",
+      "access_transport",
+      "core_receipt"
+    ]
+  },
+  "edge_paths": {
+    "preview": [
+      [
+        "fixture_emit",
+        "dsh_callback",
+        "stream,block,seq_start,seq_end"
+      ],
+      [
+        "dsh_callback",
+        "dsh_handoff",
+        "stream,block,seq_start,seq_end"
+      ],
+      [
+        "dsh_handoff",
+        "host_enqueue",
+        "stream,block,seq_start,seq_end"
+      ],
+      [
+        "host_enqueue",
+        "host_dequeue",
+        "stream,block,seq_start,seq_end"
+      ],
+      [
+        "host_dequeue",
+        "host_publish",
+        "stream,seq_start,seq_end"
+      ],
+      [
+        "host_publish",
+        "core_receipt",
+        "stream,seq_start,seq_end"
+      ],
+      [
+        "core_receipt",
+        "core_dequeue",
+        "frame"
+      ],
+      [
+        "core_dequeue",
+        "core_delivery",
+        "frame"
+      ],
+      [
+        "core_delivery",
+        "cli_write",
+        "delivery"
+      ],
+      [
+        "cli_write",
+        "fixture_observe",
+        "ordinal,record"
+      ]
+    ]
+  },
+  "rejoin_fields": [
+    "stream",
+    "scope",
+    "request",
+    "object_op",
+    "watch",
+    "connection",
+    "frame",
+    "delivery",
+    "ordinal",
+    "batch"
+  ],
+  "forbidden_fields": [
+    "text",
+    "payload",
+    "body",
+    "ciphertext",
+    "token",
+    "secret",
+    "key",
+    "cursor",
+    "host_id",
+    "session_id",
+    "device_id",
+    "approval",
+    "path"
+  ]
+}

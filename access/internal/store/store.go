@@ -63,8 +63,13 @@ type database interface {
 }
 
 // Store is a PostgreSQL-backed state store. It is safe for concurrent use.
+//
+// The control pool is deliberately separate from the data pool. Pairing and
+// other control-plane writes must remain serviceable when history pages or
+// attachment transfers have saturated every data connection.
 type Store struct {
-	db database
+	db      database
+	control database
 }
 
 // newStore binds a storage seam. Tests use it to install a scripted database.
@@ -99,20 +104,50 @@ func (s *Store) poolQueryRow(ctx context.Context, sql string, args ...any) pgx.R
 	return s.db.QueryRow(ctx, sql, args...)
 }
 
-// Open parses a DSN, opens a pool and verifies connectivity.
+const (
+	// dataPoolFloor keeps ordinary request concurrency from reducing the data
+	// pool to pgx's CPU-derived minimum. The mixed-load benchmark runs four
+	// history readers and one attachment reader alongside Watch traffic.
+	dataPoolFloor = 16
+	// controlPoolMax reserves a small, independent connection budget for
+	// pairing and other control-plane writes under data-plane saturation.
+	controlPoolMax = 4
+)
+
+func dataPoolSize(configured int32) int32 {
+	if configured < dataPoolFloor {
+		return dataPoolFloor
+	}
+	return configured
+}
+
+// Open parses a DSN, opens separate data and control pools, and verifies
+// connectivity. The DSN controls the data pool; a bounded control pool is
+// opened from the same DSN so control writes never queue behind data reads.
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		// pgx parse errors can include user-supplied connection identity.
 		return nil, errors.New("parse database_url: invalid connection configuration")
 	}
+	cfg.MaxConns = dataPoolSize(cfg.MaxConns)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	store := newStore(pool)
-	if err := store.Ping(ctx); err != nil {
+	controlCfg := cfg.Copy()
+	controlCfg.MaxConns = controlPoolMax
+	if controlCfg.MinConns > controlPoolMax {
+		controlCfg.MinConns = controlPoolMax
+	}
+	control, err := pgxpool.NewWithConfig(ctx, controlCfg)
+	if err != nil {
 		pool.Close()
+		return nil, fmt.Errorf("open control database: %w", err)
+	}
+	store := &Store{db: pool, control: control}
+	if err := store.Ping(ctx); err != nil {
+		store.Close()
 		return nil, err
 	}
 	return store, nil
@@ -127,10 +162,25 @@ func NewWithPool(pool *pgxpool.Pool) *Store {
 	return newStore(pool)
 }
 
-// Close releases the connection pool.
+// Control returns a view backed by the reserved control pool. A store built
+// by NewWithPool has no separate control pool and returns itself.
+func (s *Store) Control() *Store {
+	if s == nil || s.control == nil {
+		return s
+	}
+	return &Store{db: s.control}
+}
+
+// Close releases both connection pools.
 func (s *Store) Close() {
-	if s != nil && s.db != nil {
+	if s == nil {
+		return
+	}
+	if s.db != nil {
 		s.db.Close()
+	}
+	if s.control != nil {
+		s.control.Close()
 	}
 }
 

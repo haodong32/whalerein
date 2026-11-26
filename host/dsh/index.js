@@ -20,6 +20,7 @@ import { createLogger, createLogSalt } from 'whalerein-host/log.js'
 import { createSettingsService } from './src/settings.js'
 import { resolveEnvironment, resolveTrust } from 'whalerein-host/configuration'
 import { profileSnapshot, validateProfileKeys } from './src/service-config.js'
+import { createBenchOutletFromEnv } from 'whalerein-host/observation/index.js'
 
 export const name = 'whalerein-dsh'
 // Cordis applies the plugin only once the real DSH services exist, so `auto`
@@ -184,11 +185,26 @@ export function createHost(rawConfig, options = {}) {
 }
 
 function createRuntime(config, options) {
-  const adapter = options.adapter ?? createAdapter({ mode: config.adapter, ctx: options.ctx, config, now: options.now, logger: options.logger })
+  // The composition root owns the one process outlet. A rejected clock or a
+  // non-trace mode never disables the product path.
+  let observation = options.observation ?? null
+  if (observation === null) {
+    try { observation = createBenchOutletFromEnv({ role: 'host', env: options.observationEnv ?? process.env }) }
+    catch { observation = null }
+  }
+  const adapter = options.adapter ?? createAdapter({
+    mode: config.adapter, ctx: options.ctx, config, now: options.now, logger: options.logger,
+    observation: observation?.forProducer?.('dsh') ?? null,
+  })
+  // A caller-supplied adapter (the integration fixture) still shares the one
+  // process outlet; attach the DSH producer view without replacing the object.
+  if (options.adapter && adapter && observation?.forProducer) {
+    adapter.observation = observation.forProducer('dsh')
+  }
   const credentials = options.credentials ?? (adapter instanceof FakeDshAdapter
     ? new MemoryHostCredentials({credentialFile: join(config.stateDir, 'fake-credentials.json')})
     : new DshHostCredentials({ctx: options.ctx, hostId: config.hostId}))
-  return new HostRuntime({ ...options, config, adapter, credentials })
+  return new HostRuntime({ ...options, config, adapter, credentials, observation })
 }
 
 /**
@@ -517,6 +533,7 @@ function applyStandalone(ctx, rawConfig) {
     } catch (error) {
       fallbackLog(typeof error?.code === 'string' ? error.code : 'internal')
     } finally {
+      try { await host.observation?.close?.() } catch { /* capture failure is not a product failure */ }
       release()
     }
   }

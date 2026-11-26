@@ -7,7 +7,7 @@ import subprocess
 import uuid
 from contextlib import contextmanager
 
-from environment import Process, ROOT, Watcher, wait
+from environment import ROOT, Process, Watcher, wait
 
 
 @contextmanager
@@ -182,16 +182,22 @@ class CutoverClient:
         return Watcher(self.args(*commands), self.env)
 
     def invoke(self, *commands, input_text=None):
-        process = subprocess.run(
-            self.args(*commands),
-            cwd=ROOT,
-            env=self.env,
-            input=input_text,
-            capture_output=True,
-            text=True,
-            timeout=45,
-            check=False,
-        )
+        try:
+            process = subprocess.run(
+                self.args(*commands),
+                cwd=ROOT,
+                env=self.env,
+                input=input_text,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            # Keep the failing command family in the recorded reason; the
+            # session identifier and stdin payload stay out of it.
+            family = " ".join(str(command) for command in commands[:2])
+            raise TimeoutError(f"CLI {family} timed out after 45s") from error
         return process.returncode, self.envelope(process.stdout)
 
     def call(self, *commands, input_text=None):

@@ -30,6 +30,7 @@ use crate::access::{
 };
 use crate::api::{Cancellation, CoreError, CoreResult};
 use crate::diagnostics::journal::Diagnostics;
+use crate::observation::bench::{event_frame_identity, BenchContext, BenchEvent, TokenDomain};
 use crate::runtime::{ConnectionState, Runtime};
 
 /// Bounded bytes one observer may queue for live previews.
@@ -91,14 +92,16 @@ pub(crate) struct ConnectionInput {
 /// connection.
 /// An attached observer split into its receiver halves plus a detach guard.
 pub(crate) struct SubscriptionParts {
-    pub control: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
-    pub live: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
+    pub control: mpsc::Receiver<QueuedEvent>,
+    pub live: mpsc::Receiver<QueuedEvent>,
     pub interrupted: Arc<AtomicBool>,
     pub overflow: Arc<AtomicBool>,
     pub live_overflow: Arc<AtomicBool>,
     pub error: Arc<Mutex<Option<CoreError>>>,
     pub queued: Arc<AtomicUsize>,
     pub live_queued: Arc<AtomicUsize>,
+    pub depth: Arc<AtomicUsize>,
+    pub live_depth: Arc<AtomicUsize>,
 }
 
 pub(crate) struct SubscriptionGuard {
@@ -115,16 +118,27 @@ impl Drop for SubscriptionGuard {
     }
 }
 
+/// One authenticated frame waiting in an observer's local queue.
+pub(crate) struct QueuedEvent {
+    pub class: DeliveryClass,
+    pub envelope: EventEnvelope,
+    /// Boundary reading taken before the queue insert. Zero when capture is
+    /// disabled; wait time is then unavailable rather than invented.
+    pub enqueued_ns: u64,
+}
+
 struct Subscriber {
     id: u64,
-    control: mpsc::Sender<(DeliveryClass, EventEnvelope)>,
-    live: mpsc::Sender<(DeliveryClass, EventEnvelope)>,
+    control: mpsc::Sender<QueuedEvent>,
+    live: mpsc::Sender<QueuedEvent>,
     interrupted: Arc<AtomicBool>,
     overflow: Arc<AtomicBool>,
     live_overflow: Arc<AtomicBool>,
     error: Arc<Mutex<Option<CoreError>>>,
     queued: Arc<AtomicUsize>,
     live_queued: Arc<AtomicUsize>,
+    depth: Arc<AtomicUsize>,
+    live_depth: Arc<AtomicUsize>,
     control_budget: usize,
     live_budget: usize,
 }
@@ -376,6 +390,7 @@ pub(crate) struct HostConnection {
     queries: QueryWaiters,
     notices: Arc<NoticeWaiters>,
     publisher: Arc<PublisherSlot>,
+    bench: Arc<BenchContext>,
     /// The target connection stamp observed for the current generation. Core
     /// does not know its own broker connection id; it validates that every
     /// reply for a generation is addressed to the same target.
@@ -401,6 +416,7 @@ impl HostConnection {
             queries: QueryWaiters::default(),
             notices: Arc::new(NoticeWaiters::default()),
             publisher: Arc::new(PublisherSlot::default()),
+            bench: input.diagnostics.bench().clone(),
             target: Mutex::new(None),
         });
         let runner = connection.clone();
@@ -590,6 +606,8 @@ impl HostConnection {
         let error = Arc::new(Mutex::new(None));
         let queued = Arc::new(AtomicUsize::new(0));
         let live_queued = Arc::new(AtomicUsize::new(0));
+        let depth = Arc::new(AtomicUsize::new(0));
+        let live_depth = Arc::new(AtomicUsize::new(0));
         self.subscribers
             .lock()
             .expect("connection subscribers")
@@ -603,6 +621,8 @@ impl HostConnection {
                 error: error.clone(),
                 queued: queued.clone(),
                 live_queued: live_queued.clone(),
+                depth: depth.clone(),
+                live_depth: live_depth.clone(),
                 control_budget,
                 live_budget,
             });
@@ -616,6 +636,8 @@ impl HostConnection {
                 error,
                 queued,
                 live_queued,
+                depth,
+                live_depth,
             },
             SubscriptionGuard {
                 subscriber_id: id,
@@ -641,37 +663,77 @@ impl HostConnection {
     }
 
     /// Deliver one frame to every observer. A full queue marks only that
-    /// observer; the transport keeps running.
+    /// observer; the transport keeps running. In trace mode the accepted or
+    /// rejected local enqueue is stamped with the subscriber's queue pressure.
     fn fan_out(&self, class: DeliveryClass, envelope: &EventEnvelope) {
         let bytes = envelope.encoded_len();
+        let bench_enabled = self.bench.enabled();
+        let frame = bench_enabled.then(|| {
+            self.bench
+                .token(TokenDomain::Frame, &event_frame_identity(envelope))
+        });
+        let enqueued_ns = if bench_enabled {
+            self.bench.now_ns()
+        } else {
+            0
+        };
         for subscriber in self
             .subscribers
             .lock()
             .expect("connection subscribers")
             .iter()
         {
-            let (sender, counter, budget, overflow) = match class {
+            let (sender, counter, depth, budget, overflow) = match class {
                 DeliveryClass::Control => (
                     &subscriber.control,
                     &subscriber.queued,
+                    &subscriber.depth,
                     subscriber.control_budget,
                     &subscriber.overflow,
                 ),
                 DeliveryClass::Live => (
                     &subscriber.live,
                     &subscriber.live_queued,
+                    &subscriber.live_depth,
                     subscriber.live_budget,
                     &subscriber.live_overflow,
                 ),
             };
-            if counter.load(Ordering::SeqCst) + bytes > budget {
+            let rejected_reason = if counter.load(Ordering::SeqCst) + bytes > budget {
                 overflow.store(true, Ordering::SeqCst);
-                continue;
-            }
-            counter.fetch_add(bytes, Ordering::SeqCst);
-            if sender.try_send((class, envelope.clone())).is_err() {
-                counter.fetch_sub(bytes, Ordering::SeqCst);
-                overflow.store(true, Ordering::SeqCst);
+                Some("byte_budget")
+            } else {
+                counter.fetch_add(bytes, Ordering::SeqCst);
+                depth.fetch_add(1, Ordering::SeqCst);
+                match sender.try_send(QueuedEvent {
+                    class,
+                    envelope: envelope.clone(),
+                    enqueued_ns,
+                }) {
+                    Ok(()) => None,
+                    Err(_) => {
+                        counter.fetch_sub(bytes, Ordering::SeqCst);
+                        depth.fetch_sub(1, Ordering::SeqCst);
+                        overflow.store(true, Ordering::SeqCst);
+                        Some("queue_full")
+                    }
+                }
+            };
+            if let (true, Some(frame)) = (bench_enabled, frame.as_ref()) {
+                self.bench.emit(BenchEvent::CoreEnqueue {
+                    frame: frame.clone(),
+                    queue_depth: depth.load(Ordering::SeqCst) as u64,
+                    queue_bytes: counter.load(Ordering::SeqCst) as u64,
+                    accepted: rejected_reason.is_none(),
+                    reason: rejected_reason.map(str::to_owned),
+                    // The queued item is still a sealed envelope: no increment
+                    // identity exists before decrypt, so none is invented.
+                    stream: None,
+                    block: None,
+                    seq_start: None,
+                    seq_end: None,
+                    batch: None,
+                });
             }
         }
     }

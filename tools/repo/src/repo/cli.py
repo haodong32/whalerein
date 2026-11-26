@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import signal
 import sys
@@ -110,13 +111,16 @@ Full reference: tools/repo/README.md""",
         "bench": (
             "  ./repo bench\n"
             "  ./repo bench --attempts 3 --warmup 0 --output .data/benchmarks/smoke-suite\n"
+            "  ./repo bench --observation aggregate\n"
             "  ./repo bench --network jitter --link client\n"
             "  ./repo bench --scenario recovery\n"
-            "  ./repo bench --scenario mixed-load"
+            "  ./repo bench --scenario mixed-load --p95-scope per-arm --attempts 40\n"
+            "  ./repo bench --replay .data/benchmarks/smoke-suite/watch-normal-host"
         ),
         "bench-compare": (
             "  ./repo bench-compare --baseline .data/benchmarks/a --candidate .data/benchmarks/b\n"
-            "  ./repo bench-compare -b a1 -b a2 -c b1 -c b2 --json"
+            "  ./repo bench-compare -b a1 -b a2 -c b1 -c b2 --json\n"
+            "  ./repo bench-compare --vary observation -b off -c aggregate --budget budget.json"
         ),
     }
     for name, description in descriptions.items():
@@ -216,9 +220,9 @@ Full reference: tools/repo/README.md""",
             sub.add_argument(
                 "--warmup",
                 type=int,
-                default=3,
+                default=4,
                 metavar="N",
-                help="warmup attempts excluded from results (default: 3)",
+                help="warmup attempts excluded from results (default: 4; zero is valid)",
             )
             sub.add_argument(
                 "--delay",
@@ -286,6 +290,30 @@ Full reference: tools/repo/README.md""",
                 help="per-case execution deadline in seconds (default: 900; build is separate)",
             )
             sub.add_argument(
+                "--observation",
+                choices=("off", "aggregate", "trace"),
+                default="off",
+                help="observation mode: off, aggregate, or trace (default: off)",
+            )
+            sub.add_argument(
+                "--p95-scope",
+                choices=("pooled", "per-arm"),
+                default="pooled",
+                help="P95 scope for mixed load: pooled or per-arm (default: pooled); "
+                "per-arm needs at least 40 measured attempts (20 per arm)",
+            )
+            sub.add_argument(
+                "--cpu-profile",
+                action="store_true",
+                help="request optional OS CPU profiling for this diagnostic run",
+            )
+            sub.add_argument(
+                "--replay",
+                type=Path,
+                metavar="DIR",
+                help="re-derive a saved current report offline without a container",
+            )
+            sub.add_argument(
                 "--output",
                 type=Path,
                 metavar="DIR",
@@ -295,9 +323,9 @@ Full reference: tools/repo/README.md""",
         if name == "bench-compare":
             sub.add_argument(
                 "--vary",
-                choices=("build", "network"),
+                choices=("build", "network", "observation", "aa", "predecessor"),
                 default="build",
-                help="the only variable allowed to differ between arms (default: build)",
+                help="the one-way comparison dimension (default: build)",
             )
             sub.add_argument(
                 "-b",
@@ -316,6 +344,17 @@ Full reference: tools/repo/README.md""",
                 required=True,
                 metavar="DIR",
                 help="saved candidate run directory or benchmark.json (repeatable, ordered)",
+            )
+            sub.add_argument(
+                "--budget",
+                type=Path,
+                metavar="FILE",
+                help="frozen observer-cost budget declaration for mode/predecessor comparisons",
+            )
+            sub.add_argument(
+                "--now",
+                metavar="ISO8601",
+                help="evaluation time for stale-budget detection",
             )
             sub.add_argument(
                 "--output",
@@ -359,10 +398,18 @@ def dispatch(args, root, runner):
         from .benchmark import compare as benchmark_compare
         from .benchmark import summary as benchmark_summary
 
+        budget = None
+        if args.budget:
+            try:
+                budget = json.loads(args.budget.read_text())
+            except (OSError, ValueError) as exc:
+                raise UsageError("could not read benchmark budget: " + str(exc)) from exc
         result = benchmark_compare.compare(
             [benchmark_compare.load(path) for path in args.baseline],
             [benchmark_compare.load(path) for path in args.candidate],
             vary=args.vary,
+            budget=budget,
+            now=args.now,
         )
         for line in benchmark_summary.comparison(result).splitlines():
             runner.out.info(line)
@@ -370,6 +417,21 @@ def dispatch(args, root, runner):
             benchmark_compare.save(args.output, result)
             runner.out.info("Comparison: " + str(args.output))
         return {"comparison": result, "output": str(args.output) if args.output else None}, 0
+    if args.command == "bench" and args.replay:
+        from .benchmark import summary as benchmark_summary
+
+        result = benchmark.replay(args.replay, output=args.output)
+        for line in benchmark_summary.render(result.document).splitlines():
+            runner.out.info(line)
+        if result.path:
+            runner.out.info("Replay: " + str(result.path))
+        return {
+            "report": str(result.path) if result.path else None,
+            "replay": True,
+            "status": result.document["status"]["state"],
+            "outcomes": result.document["derived"]["outcomes"],
+            "errors": [sanitize(entry) for entry in result.errors],
+        }, result.exit_code
     if args.command == "bench":
         from .benchmark import summary as benchmark_summary
 
@@ -386,6 +448,9 @@ def dispatch(args, root, runner):
             seed=args.seed,
             concurrency=args.concurrency,
             timeout=args.benchmark_timeout,
+            observation=args.observation,
+            cpu_profile=args.cpu_profile,
+            p95_scope=args.p95_scope,
         )
         directory = args.output or root / ".data/benchmarks" / (
             datetime.now(UTC).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8]
@@ -409,16 +474,18 @@ def dispatch(args, root, runner):
             runner.out.info(line)
         if result.path:
             runner.out.info("Report: " + str(result.path))
+        derived = result.document["derived"]
         return {
             "report": str(result.path) if result.path else None,
             "status": result.document["status"]["state"],
-            "outcomes": result.document["outcomes"],
-            "latency": result.document["latency"]["samples"],
-            "streaming": result.document.get("streaming"),
-            "diagnostics": result.document.get("diagnostics", {}),
+            "outcomes": derived["outcomes"],
+            "latency": derived["latency"]["samples"],
+            "streaming": derived.get("streaming"),
+            "diagnostics": derived.get("diagnostics", {}),
             "network_probe": result.document["environment"].get("network_probe"),
             "snapshot": result.document["environment"]["artifacts"],
-            "workflow_results": result.document.get("workflow_results", {}),
+            "workflow_results": derived.get("workflow_results", {}),
+            "execution": result.document.get("execution", {}),
             "errors": [sanitize(entry) for entry in result.errors],
         }, result.exit_code
     if args.command == "proto" or (args.command == "check" and args.target == "proto"):

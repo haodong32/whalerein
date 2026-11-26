@@ -30,6 +30,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/httpapi"
 	"github.com/whalerein/whalerein/access/internal/line"
+	latencyobs "github.com/whalerein/whalerein/access/internal/observation"
 	"github.com/whalerein/whalerein/access/internal/pairing"
 	"github.com/whalerein/whalerein/access/internal/payload"
 	"github.com/whalerein/whalerein/access/internal/query"
@@ -199,9 +200,20 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger) erro
 }
 
 // runServerWithStore permits deterministic startup failure and cleanup checks.
-func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Logger, ops startupStoreOps) error {
+func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Logger, ops startupStoreOps) (runErr error) {
 	metrics := diagnostics.NewMetrics()
 	masker := diagnostics.NewMasker()
+	// One bounded outlet per Access process, shared by every module below. Off
+	// and aggregate mode return a nil sink and create no writer.
+	sink, err := latencyobs.Open(latencyobs.Config{})
+	if err != nil {
+		return fmt.Errorf("latency observation outlet: %w", err)
+	}
+	defer func() {
+		if err := sink.Close(); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("latency observation shutdown: %w", err))
+		}
+	}()
 	resolver, err := clientaddr.NewResolver(cfg.HTTP.ClientAddress.TrustedProxies)
 	if err != nil {
 		return fmt.Errorf("client address configuration: %w", err)
@@ -283,6 +295,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Metrics:     metrics,
 		Masker:      masker,
 		Logger:      logger,
+		Observation: sink,
 	})
 	if err != nil {
 		return err
@@ -322,7 +335,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 
 	authDeps := auth.Dependencies{
-		Store:     db,
+		Store:     db.Control(),
 		Admission: admissionService,
 		Enforcer:  lineManager,
 		Observer:  lineManager,
@@ -344,7 +357,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		},
 	}
 	if cfg.Mode == "external" {
-		authDeps.Sessions = db
+		authDeps.Sessions = db.Control()
 	}
 	authService, err := auth.New(authDeps)
 	if err != nil {
@@ -352,9 +365,11 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 
 	relayService, err := relay.New(relay.Dependencies{
-		Auth:     authService,
-		Store:    db,
-		Payloads: storageService,
+		Auth:        authService,
+		Store:       db,
+		Payloads:    storageService,
+		Metrics:     metrics,
+		Observation: sink,
 		Config: relay.Config{
 			Enabled:          cfg.Storage.Enabled,
 			NodeID:           cfg.Storage.NodeID,
@@ -373,10 +388,12 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	// finish through the node-local payload service. The broker blocks a
 	// reference publish until Stage returns a readable object.
 	stager, err := relay.NewStager(db, storageService, relay.StagerConfig{
-		Enabled:   cfg.Storage.Enabled,
-		NodeID:    cfg.Storage.NodeID,
-		OwnerID:   cfg.Storage.OwnerID,
-		Retention: cfg.Storage.Retention.D(),
+		Enabled:     cfg.Storage.Enabled,
+		NodeID:      cfg.Storage.NodeID,
+		OwnerID:     cfg.Storage.OwnerID,
+		Retention:   cfg.Storage.Retention.D(),
+		Metrics:     metrics,
+		Observation: sink,
 	})
 	if err != nil {
 		return fmt.Errorf("payload stager: %w", err)
@@ -391,6 +408,8 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Config: query.Config{
 			MaxTTL: cfg.Requests.MaxTTL.D(),
 		},
+		Metrics:     metrics,
+		Observation: sink,
 	})
 	if err != nil {
 		return fmt.Errorf("query lane: %w", err)
@@ -420,9 +439,10 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			NoticeInterval:           cfg.Requests.ForwardInterval.D(),
 			NoticeBatch:              cfg.Requests.BatchSize,
 		},
-		Metrics: metrics,
-		Masker:  masker,
-		Logger:  logger,
+		Metrics:     metrics,
+		Masker:      masker,
+		Logger:      logger,
+		Observation: sink,
 	}
 	if cfg.Mode == "external" {
 		requestDeps.Sessions = db
@@ -440,7 +460,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 
 	pairingService, err := pairing.New(pairing.Dependencies{
-		Store:     db,
+		Store:     db.Control(),
 		Policy:    lineManager,
 		Transport: service,
 		Presence:  service,

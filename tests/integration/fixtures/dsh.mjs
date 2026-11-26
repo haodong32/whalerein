@@ -3,6 +3,7 @@ import { MemoryHostCredentials } from '../../../host/runtime/src/security/creden
 import { createHash, randomUUID } from 'node:crypto'
 import net from 'node:net'
 import { createInterface } from 'node:readline'
+import { monitorEventLoopDelay, PerformanceObserver, performance } from 'node:perf_hooks'
 import { DefinitiveExecutionError } from '../../../host/runtime/src/errors.js'
 import { FakeDshAdapter } from '../../../host/dsh/src/adapter/fake.js'
 import { encode,decode } from './adapter.mjs'
@@ -25,6 +26,23 @@ adapter.sendUserMessage=async(...args)=>{
 }
 // Local fixture control starts each benchmark reply on a fixed schedule.
 const benchTextTimes=new Map()
+// Optional Node runtime evidence for the bench sampler. Enabled only when the
+// fixture runs a trace capture, so ordinary DSH behaviour and overhead are
+// unchanged. The counters are reset on every read to expose per-window facts.
+const benchRuntimeEnabled=process.env.WHALEREIN_BENCH_MODE==='trace'
+const benchLoopDelay=benchRuntimeEnabled?monitorEventLoopDelay({resolution:20}):null
+benchLoopDelay?.enable()
+let benchGcCount=0
+let benchGcPauseMs=0
+let benchRuntimeStartNs=process.hrtime.bigint()
+let benchEventLoopUtilization=benchRuntimeEnabled?performance.eventLoopUtilization():null
+let benchGcObserver=null
+if(benchRuntimeEnabled){
+  benchGcObserver=new PerformanceObserver(list=>{
+    for(const entry of list.getEntries()){benchGcCount++;benchGcPauseMs+=entry.duration}
+  })
+  benchGcObserver.observe({entryTypes:['gc']})
+}
 const emitPreview=(session,stream,revision,frame)=>adapter.emit(session,{
   type:'assistant/preview',kind:'output',ephemeral:true,
   data:{stream_id:stream,revision,reply_id:stream,block_id:'text-0',...frame}})
@@ -279,6 +297,31 @@ createInterface({input:process.stdin}).on('line',async line=>{
       })
     }
     else if(method==='bench_clock_ns') value=process.hrtime.bigint().toString()
+    else if(method==='bench_runtime') {
+      if(!benchRuntimeEnabled) value={available:false,reason:'unsupported'}
+      else {
+        const now=process.hrtime.bigint()
+        const elapsedMs=Number(now-benchRuntimeStartNs)/1e6
+        const utilization=performance.eventLoopUtilization(benchEventLoopUtilization)
+        value={
+          available:true,
+          window_ms:Math.round(elapsedMs*1000)/1000,
+          event_loop_delay_ms:{
+            p50:Math.round(benchLoopDelay.percentile(50)/1e3)/1e3,
+            p99:Math.round(benchLoopDelay.percentile(99)/1e3)/1e3,
+            max:Math.round(benchLoopDelay.max/1e3)/1e3,
+            mean:Math.round(benchLoopDelay.mean/1e3)/1e3,
+          },
+          utilization:Math.round(utilization.utilization*1e6)/1e6,
+          gc:{count:benchGcCount,pause_ms:Math.round(benchGcPauseMs*1000)/1000},
+        }
+        benchLoopDelay.reset()
+        benchGcCount=0
+        benchGcPauseMs=0
+        benchRuntimeStartNs=now
+        benchEventLoopUtilization=performance.eventLoopUtilization()
+      }
+    }
     else if(method==='bench_text_times_ns') {
       value=benchTextTimes.get(session_id)??[]
       benchTextTimes.delete(session_id)

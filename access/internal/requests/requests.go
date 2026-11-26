@@ -24,6 +24,7 @@ import (
 
 	"github.com/whalerein/whalerein/access/internal/broker"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/observation"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
@@ -139,32 +140,34 @@ type DeviceSessionStore interface {
 }
 
 type Dependencies struct {
-	Sessions DeviceSessionStore
-	Store    Store
-	Broker   Broker
-	Presence Presence
-	Grants   GrantAuthority
-	Payloads PayloadChecker
-	Config   Config
-	Metrics  *diagnostics.Metrics
-	Masker   *diagnostics.Masker
-	Logger   *slog.Logger
-	Now      func() time.Time
+	Sessions    DeviceSessionStore
+	Store       Store
+	Broker      Broker
+	Presence    Presence
+	Grants      GrantAuthority
+	Payloads    PayloadChecker
+	Config      Config
+	Metrics     *diagnostics.Metrics
+	Masker      *diagnostics.Masker
+	Logger      *slog.Logger
+	Now         func() time.Time
+	Observation *observation.Sink
 }
 
 // Service owns request acceptance, forwarding and result application.
 type Service struct {
-	sessions DeviceSessionStore
-	store    Store
-	broker   Broker
-	presence Presence
-	grants   GrantAuthority
-	payloads PayloadChecker
-	cfg      Config
-	metrics  *diagnostics.Metrics
-	masker   *diagnostics.Masker
-	logger   *slog.Logger
-	now      func() time.Time
+	sessions    DeviceSessionStore
+	store       Store
+	broker      Broker
+	presence    Presence
+	grants      GrantAuthority
+	payloads    PayloadChecker
+	cfg         Config
+	metrics     *diagnostics.Metrics
+	masker      *diagnostics.Masker
+	logger      *slog.Logger
+	now         func() time.Time
+	observation *observation.Sink
 }
 
 const (
@@ -229,29 +232,51 @@ func New(deps Dependencies) (*Service, error) {
 		deps.Masker = diagnostics.NewMasker()
 	}
 	return &Service{
-		store:    deps.Store,
-		sessions: deps.Sessions,
-		broker:   deps.Broker,
-		presence: deps.Presence,
-		grants:   deps.Grants,
-		payloads: deps.Payloads,
-		cfg:      deps.Config,
-		metrics:  deps.Metrics,
-		masker:   deps.Masker,
-		logger:   deps.Logger,
-		now:      deps.Now,
+		store:       deps.Store,
+		sessions:    deps.Sessions,
+		broker:      deps.Broker,
+		presence:    deps.Presence,
+		grants:      deps.Grants,
+		payloads:    deps.Payloads,
+		cfg:         deps.Config,
+		metrics:     deps.Metrics,
+		masker:      deps.Masker,
+		logger:      deps.Logger,
+		now:         deps.Now,
+		observation: deps.Observation,
 	}, nil
 }
 
 // Submit authenticates the request envelope, deduplicates commands, writes one
 // row, then publishes after the insert committed.
-func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request, bool, error) {
-	started := s.now()
+func (s *Service) Submit(ctx context.Context, input SubmitInput) (result store.Request, created bool, err error) {
+	started := time.Now()
+	requestID := ""
+	bodyBytes := 0
+	if input.Request != nil {
+		requestID = input.Request.GetRequestId()
+		bodyBytes = len(input.Request.GetBody())
+	}
+	defer func() {
+		if requestID == "" {
+			return
+		}
+		outcome := commandAdmissionOutcome(err)
+		attempt := uint64(1)
+		if result.ForwardAttempts > 0 {
+			attempt = uint64(result.ForwardAttempts) + 1
+		}
+		s.observeCommand(commandScope(input.HostID, input.DeviceID), requestID, attempt, observation.CommandAdmit, outcome, bodyBytes)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("command_admit", time.Since(started), string(outcome))
+		}
+	}()
+	startedAt := s.now()
 	ctx = store.WithRequestDeviceSession(ctx, input.SessionID)
 	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
 	req, validationErr := s.validate(input)
 	if validationErr != nil {
-		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+		s.metrics.ObserveHostRequest(s.now().Sub(startedAt), true)
 		return store.Request{}, false, validationErr
 	}
 	// Read the durable revisions exactly once for this admission. The request's
@@ -259,14 +284,14 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 	// returns the already persisted row without rewriting it.
 	stamp, stampErr := s.admissionStamp(ctx, input)
 	if stampErr != nil {
-		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+		s.metrics.ObserveHostRequest(s.now().Sub(startedAt), true)
 		return store.Request{}, false, stampErr
 	}
 	req.Stamp = stamp
 	if len(req.BodyReference) > 0 {
 		reference, err := decodeReference(req.BodyReference)
 		if err != nil {
-			s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+			s.metrics.ObserveHostRequest(s.now().Sub(startedAt), true)
 			return store.Request{}, false, err
 		}
 		if err := s.checkReference(ctx, reference, store.PayloadCheckScope{
@@ -276,12 +301,12 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 			ChannelID:  req.ChannelID,
 			Purpose:    whalereinv1.PayloadPurpose_PAYLOAD_PURPOSE_REQUEST,
 		}); err != nil {
-			s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+			s.metrics.ObserveHostRequest(s.now().Sub(startedAt), true)
 			return store.Request{}, false, err
 		}
 	}
 	if sizeErr := s.checkForwardedSize(req); sizeErr != nil {
-		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+		s.metrics.ObserveHostRequest(s.now().Sub(startedAt), true)
 		return store.Request{}, false, sizeErr
 	}
 	switch {
@@ -303,7 +328,7 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 
 	outcome, err := s.store.CreateRequest(ctx, req)
 	if err != nil {
-		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+		s.metrics.ObserveHostRequest(s.now().Sub(startedAt), true)
 		if errors.Is(err, store.ErrConflict) {
 			return store.Request{}, false, fmt.Errorf("%w: duplicate request_id", ErrConflict)
 		}
@@ -313,7 +338,7 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 		return store.Request{}, false, fmt.Errorf("create request: %w", err)
 	}
 	if outcome.DigestMismatch {
-		s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+		s.metrics.ObserveHostRequest(s.now().Sub(startedAt), true)
 		s.logger.Warn("command digest mismatch",
 			"host", s.masker.Host(input.HostID), "device", s.masker.Device(input.DeviceID))
 		return outcome.Request, false, ErrDigestMismatch
@@ -322,21 +347,21 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (store.Request,
 		// Same command id and digest: renew only the existing row's own lease
 		// and return it without a second publish.
 		if _, renewErr := s.store.RenewClientLease(ctx, input.DeviceID, outcome.Request.RequestID, clientPollLease); renewErr != nil {
-			s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+			s.metrics.ObserveHostRequest(s.now().Sub(startedAt), true)
 			return store.Request{}, false, fmt.Errorf("renew replayed request: %w", renewErr)
 		}
-		s.metrics.ObserveHostRequest(s.now().Sub(started), false)
+		s.metrics.ObserveHostRequest(s.now().Sub(startedAt), false)
 		return outcome.Request, false, nil
 	}
 
 	if outcome.Request.Status == whalereinv1.OnlineStatus_received {
 		forwardErr := s.ForwardDue(ctx)
 		if forwardErr != nil {
-			s.metrics.ObserveHostRequest(s.now().Sub(started), true)
+			s.metrics.ObserveHostRequest(s.now().Sub(startedAt), true)
 			s.logger.Warn("forward due requests failed", "error", forwardErr.Error())
 		}
 	}
-	s.metrics.ObserveHostRequest(s.now().Sub(started), false)
+	s.metrics.ObserveHostRequest(s.now().Sub(startedAt), false)
 	s.logger.Info("host request accepted",
 		"host", s.masker.Host(input.HostID), "device", s.masker.Device(input.DeviceID),
 		"request", s.masker.Request(outcome.Request.RequestID),
@@ -670,6 +695,9 @@ func (s *Service) ForwardDue(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		rowStarted := time.Now()
+		attempt := uint64(row.ForwardAttempts) + 1
+		retry := row.ForwardAttempts > 0
 		if len(row.BodyReference) > 0 {
 			// A referenced request is forwarded only while its exact object is
 			// readable. The Host cannot resolve an expired or fenced reference;
@@ -748,10 +776,16 @@ func (s *Service) ForwardDue(ctx context.Context) error {
 				if _, applyErr := s.store.ApplyHostResult(ctx, store.HostResultUpdate{RequestID: row.RequestID, HostID: row.HostID, DeviceID: row.DeviceID, Status: whalereinv1.OnlineStatus_rejected, TransportPreflight: true, ErrorCode: code, At: now}); applyErr != nil {
 					return applyErr
 				}
+				if retry {
+					s.observeCommandRetry(row, attempt, observation.OutcomeError, rowStarted)
+				}
 				s.logger.Warn("logical transport preflight failed", "trace_id", row.TraceID, "code", code.String(), "bytes", len(row.RequestBody))
 				continue
 			}
 			s.metrics.RouteError()
+			if retry {
+				s.observeCommandRetry(row, attempt, observation.OutcomeError, rowStarted)
+			}
 			s.logger.Warn("host request publish failed",
 				"host", s.masker.Host(row.HostID),
 				"request", s.masker.Request(row.RequestID),
@@ -766,12 +800,25 @@ func (s *Service) ForwardDue(ctx context.Context) error {
 		if err := s.store.MarkPublished(ctx, row.RequestID, now, s.cfg.RetryInterval); err != nil {
 			return err
 		}
+		if retry {
+			s.observeCommandRetry(row, attempt, observation.OutcomeOK, rowStarted)
+		}
 		s.logger.Info("host request forwarded",
 			"host", s.masker.Host(row.HostID),
 			"request", s.masker.Request(row.RequestID),
 			"status", store.StatusName(row.Status), "trace_id", row.TraceID, "kind", row.Kind, "bytes", len(row.RequestBody))
 	}
 	return nil
+}
+
+// observeCommandRetry records one transport attempt that follows an earlier
+// unconfirmed publication. The stable request identity is preserved and the
+// attempt distinguishes the retry.
+func (s *Service) observeCommandRetry(row store.Request, attempt uint64, outcome observation.Outcome, started time.Time) {
+	s.observeCommand(commandScope(row.HostID, row.DeviceID), row.RequestID, attempt, observation.CommandRecover, outcome, len(row.RequestBody))
+	if s.metrics != nil {
+		s.metrics.ObserveAccessStage("command_recover", time.Since(started), string(outcome))
+	}
 }
 
 func terminalStatus(status whalereinv1.OnlineStatus) bool {
@@ -895,9 +942,18 @@ func (s *Service) SweepClientLeases(ctx context.Context) {
 			}
 		}
 	}
-	for _, row := range candidates {
+	for index, row := range candidates {
 		if ctx.Err() != nil {
 			return
+		}
+		if index < len(expired) {
+			// Only a lease that this sweep moved to expired is a new terminal
+			// disposition. A replayed pending cancellation keeps its earlier
+			// terminal fact and must not inflate the count every pass.
+			s.observeCommand(commandScope(row.HostID, row.DeviceID), row.RequestID, uint64(row.ForwardAttempts)+1, observation.CommandTerminal, observation.OutcomeExpired, 0)
+			if s.metrics != nil {
+				s.metrics.ObserveAccessStageDisposition("command_terminal", string(observation.OutcomeExpired))
+			}
 		}
 		s.publishCancellation(ctx, row, now)
 	}
@@ -1131,10 +1187,21 @@ func (s *Service) Get(ctx context.Context, deviceID, requestID string) (store.Re
 		// A request that never reached a terminal state is expired, not still
 		// host_accepted. Returning the row would make the CLI poll a status
 		// that can never change.
+		s.observeCommand(commandScope(req.HostID, req.DeviceID), req.RequestID, uint64(req.ForwardAttempts)+1, observation.CommandTerminal, observation.OutcomeExpired, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStageDisposition("command_terminal", string(observation.OutcomeExpired))
+		}
 		return req, ErrExpired
 	}
 	if req.ResultReference != nil && s.readableResultReference(ctx, req) == nil {
 		req.ResultReference = nil
+	}
+	if terminalStatus(req.Status) {
+		outcome := commandTerminalOutcome(req.Status)
+		s.observeCommand(commandScope(req.HostID, req.DeviceID), req.RequestID, uint64(req.ForwardAttempts)+1, observation.CommandTerminal, outcome, len(req.ResultBody))
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStageDisposition("command_terminal", string(outcome))
+		}
 	}
 	return req, nil
 }
@@ -1230,6 +1297,7 @@ func (s *Service) resultIngestLimit(row store.Request) int64 {
 // only the matching request row using the allowed conditional transitions.
 
 func (s *Service) HandleHostResult(ctx context.Context, topicHost string, result *whalereinv1.HostResult) error {
+	started := time.Now()
 	ctx = store.WithDeviceSessionAuthority(ctx, s.cfg.SessionAuthorityRevision)
 	if result == nil || topicHost == "" || result.GetRequestId() == "" {
 		return ErrInvalidResult
@@ -1333,7 +1401,12 @@ func (s *Service) HandleHostResult(ctx context.Context, topicHost string, result
 	if err != nil {
 		return fmt.Errorf("apply host result: %w", err)
 	}
+	attempt := uint64(row.ForwardAttempts) + 1
 	if applied {
+		s.observeCommand(commandScope(row.HostID, row.DeviceID), row.RequestID, attempt, observation.CommandReceipt, observation.OutcomeOK, len(resultBody)+len(referenceBytes))
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("command_receipt", time.Since(started), string(observation.OutcomeOK))
+		}
 		s.metrics.ObserveHostResult(result.GetStatus(), result.GetErrorCode())
 		s.logger.Info("host result stored",
 			"host", s.masker.Host(topicHost),
@@ -1341,8 +1414,54 @@ func (s *Service) HandleHostResult(ctx context.Context, topicHost string, result
 			"status", store.StatusName(result.GetStatus()),
 			"trace_id", row.TraceID, "kind", row.Kind, "code", result.GetErrorCode().String(), "layer", "host", "duration_ms", s.now().Sub(row.CreatedAt).Milliseconds())
 	} else {
+		// A result for an already terminal or expired row is evidence of a late
+		// delivery, not a state transition. It cannot turn an observed timeout
+		// into success.
+		s.observeCommand(commandScope(row.HostID, row.DeviceID), row.RequestID, attempt, observation.CommandReceipt, observation.OutcomeLate, 0)
+		if s.metrics != nil {
+			s.metrics.ObserveAccessStage("command_receipt", time.Since(started), string(observation.OutcomeLate))
+		}
 		s.logger.Debug("host result ignored after terminal or expiry",
 			"request", s.masker.Request(row.RequestID))
 	}
 	return nil
+}
+
+// observeCommand emits one durable-command boundary. The request identity is
+// stable across retries; attempt is the transport attempt.
+func (s *Service) observeCommand(scope, request string, attempt uint64, stage observation.CommandStage, outcome observation.Outcome, bytes int) {
+	if s.observation == nil {
+		return
+	}
+	event := observation.CommandEvent{
+		Scope: scope, Request: request, Attempt: attempt, Stage: stage, Durable: true, Outcome: outcome,
+	}
+	if bytes > 0 {
+		event.Bytes = uint64(bytes)
+		event.HasBytes = true
+	}
+	s.observation.Command(event)
+}
+
+func commandAdmissionOutcome(err error) observation.Outcome {
+	return observation.OutcomeForError(err, ErrExpired)
+}
+
+func commandTerminalOutcome(status whalereinv1.OnlineStatus) observation.Outcome {
+	switch status {
+	case whalereinv1.OnlineStatus_succeeded:
+		return observation.OutcomeOK
+	case whalereinv1.OnlineStatus_failed, whalereinv1.OnlineStatus_rejected:
+		return observation.OutcomeError
+	case whalereinv1.OnlineStatus_host_offline, whalereinv1.OnlineStatus_unknown:
+		return observation.OutcomeTimeout
+	default:
+		return observation.OutcomeError
+	}
+}
+
+// commandScope binds a durable request token to the authenticated host/device
+// pair. A same-id command from another device never joins this operation.
+func commandScope(hostID, deviceID string) string {
+	return observation.Scope(hostID, deviceID)
 }

@@ -6,6 +6,7 @@
 //! blocks question readiness. The public handle only delivers typed
 //! `SessionEvent`s; wire messages never leave this module.
 
+pub mod bench;
 mod history;
 mod questions;
 
@@ -25,8 +26,12 @@ use crate::access::DeliveryClass;
 use crate::api::core::watch::{SinkFuture, UpdateSink};
 use crate::api::{Cancellation, ObservationInterests, SessionEvent, SessionEventPayload};
 use crate::api::{Core, CoreError, CoreResult, QuestionView};
-use crate::connection::SubscriptionGuard;
-use crate::conversation::{Conversation, ViewUpdate};
+use crate::connection::{QueuedEvent, SubscriptionGuard};
+use crate::conversation::{Conversation, LiveDisposition, ViewUpdate};
+use crate::observation::bench::{
+    BenchContext, BenchEvent, DeliveryKind, DequeueDisposition, FrameRange, JoinMilestone,
+    TokenDomain,
+};
 use crate::runtime::ConnectionState;
 use crate::session::SessionKey;
 use crate::sync::BatchOutcome;
@@ -38,6 +43,11 @@ use questions::{PageFuture, QuestionPageSource, QuestionReconciler, Step};
 /// Monotonic observer generation. One profile has one active observation, so a
 /// process-local counter is enough to fence replacement within this Core.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Process-lifetime delivery ordinal for the public observation stream.
+/// Distinct observations remain joinable because the ordinal is paired with
+/// the process lifetime, not with a per-watch counter.
+static NEXT_DELIVERY: AtomicU64 = AtomicU64::new(1);
 
 /// Why question reconciliation was requested before registration, after a
 /// transport loss, or by an authoritative invalidation.
@@ -460,13 +470,7 @@ async fn run_owner(
         .recent_page
         .map(|limits| PagedHistory::new(&key, limits));
     if let Some(paged) = paged.as_mut() {
-        let mut sink = EventSink {
-            events: &events,
-            key: &key,
-            observation_id: &observation_id,
-            generation,
-            failed: false,
-        };
+        let mut sink = paged_sink(&core, &events, &key, &observation_id, generation);
         if let Err(error) = paged
             .publish_cache(&core, &mut conversation, &mut sink)
             .await
@@ -531,13 +535,7 @@ async fn run_owner(
             }
             Err(error) if !watch_fatal(&error) => {
                 if let Some(paged) = paged.as_mut() {
-                    let mut sink = EventSink {
-                        events: &events,
-                        key: &key,
-                        observation_id: &observation_id,
-                        generation,
-                        failed: false,
-                    };
+                    let mut sink = paged_sink(&core, &events, &key, &observation_id, generation);
                     paged.transport_unavailable(error.code(), &mut sink).await;
                 }
                 signal_lost(questions.as_ref(), error.code());
@@ -621,10 +619,111 @@ async fn send_event(
             session: key.clone(),
             observation_id: observation_id.to_owned(),
             generation,
+            delivery: None,
+            preview_range: None,
             payload,
         })
         .await
         .is_ok()
+}
+
+/// Deliver one conversation update and stamp the actual delivery boundary.
+///
+/// The ordinal is internal metadata on `SessionEvent`; user-visible JSON never
+/// carries it. `frame` is the opaque receipt token for the frame that produced
+/// the update, or the sync operation token for a baseline page. `range` is the
+/// tokenized live increment the update names, present only for a preview.
+#[allow(clippy::too_many_arguments)]
+async fn send_conversation(
+    bench: &BenchContext,
+    events: &mpsc::Sender<SessionEvent>,
+    key: &SessionKey,
+    observation_id: &str,
+    generation: u64,
+    update: ViewUpdate,
+    frame: &str,
+    range: Option<&FrameRange>,
+) -> (bool, Option<u64>) {
+    let capturing = bench.enabled();
+    let kind = if capturing {
+        delivered_kind(&update)
+    } else {
+        None
+    };
+    let bytes = if capturing {
+        delivered_bytes(&update)
+    } else {
+        0
+    };
+    let preview_range = match (&update, range) {
+        (ViewUpdate::Preview { .. }, Some(range)) => Some(range.clone()),
+        _ => None,
+    };
+    let delivery_range = preview_range.clone();
+    let ordinal = kind.map(|_| NEXT_DELIVERY.fetch_add(1, Ordering::SeqCst));
+    let sent = events
+        .send(SessionEvent {
+            session: key.clone(),
+            observation_id: observation_id.to_owned(),
+            generation,
+            delivery: ordinal,
+            preview_range,
+            payload: SessionEventPayload::Conversation(update),
+        })
+        .await
+        .is_ok();
+    if sent {
+        if let (Some(kind), Some(ordinal)) = (kind, ordinal) {
+            bench.emit(BenchEvent::CoreDelivery {
+                frame: frame.to_owned(),
+                delivery: ordinal,
+                kind,
+                bytes,
+                stream: delivery_range.as_ref().map(|range| range.stream.clone()),
+                block: delivery_range
+                    .as_ref()
+                    .and_then(|range| range.block.clone()),
+                seq_start: delivery_range.as_ref().map(|range| range.seq_start),
+                seq_end: delivery_range.as_ref().map(|range| range.seq_end),
+                batch: delivery_range.as_ref().map(|range| range.batch.clone()),
+            });
+        }
+    }
+    (sent, ordinal)
+}
+
+fn delivered_kind(update: &ViewUpdate) -> Option<DeliveryKind> {
+    match update {
+        ViewUpdate::Preview { .. } => Some(DeliveryKind::Preview),
+        ViewUpdate::Message { .. } => Some(DeliveryKind::Message),
+        ViewUpdate::AttemptEnded { .. } => Some(DeliveryKind::AttemptEnded),
+        ViewUpdate::State(_) | ViewUpdate::ToolActivity(_) | ViewUpdate::Reset => None,
+    }
+}
+
+/// Content-free byte size of a delivered update. Only the rendered text length
+/// is observed; no text leaves this function.
+fn delivered_bytes(update: &ViewUpdate) -> u64 {
+    match update {
+        ViewUpdate::Preview { text, .. } => text.len() as u64,
+        ViewUpdate::Message { message, .. } => message
+            .blocks
+            .iter()
+            .map(|block| match &block.content {
+                Some(crate::conversation::content_block::Content::Text(text)) => {
+                    text.text.len() as u64
+                }
+                Some(crate::conversation::content_block::Content::Reasoning(reasoning)) => {
+                    reasoning.text.len() as u64
+                }
+                _ => 0,
+            })
+            .sum(),
+        ViewUpdate::AttemptEnded { .. }
+        | ViewUpdate::State(_)
+        | ViewUpdate::ToolActivity(_)
+        | ViewUpdate::Reset => 0,
+    }
 }
 
 async fn emit_question(
@@ -645,6 +744,8 @@ async fn emit_question(
 }
 
 struct EventSink<'a> {
+    bench: Arc<BenchContext>,
+    frame: String,
     events: &'a mpsc::Sender<SessionEvent>,
     key: &'a SessionKey,
     observation_id: &'a str,
@@ -667,9 +768,43 @@ impl EventSink<'_> {
     }
 }
 
+fn paged_sink<'a>(
+    core: &Core,
+    events: &'a mpsc::Sender<SessionEvent>,
+    key: &'a SessionKey,
+    observation_id: &'a str,
+    generation: u64,
+) -> EventSink<'a> {
+    EventSink {
+        bench: core.diagnostics.bench().clone(),
+        frame: String::new(),
+        events,
+        key,
+        observation_id,
+        generation,
+        failed: false,
+    }
+}
+
 impl UpdateSink for EventSink<'_> {
     fn emit<'a>(&'a mut self, update: &'a ViewUpdate) -> SinkFuture<'a> {
-        Box::pin(self.publish(SessionEventPayload::Conversation(update.clone())))
+        Box::pin(async move {
+            let (sent, _) = send_conversation(
+                self.bench.as_ref(),
+                self.events,
+                self.key,
+                self.observation_id,
+                self.generation,
+                update.clone(),
+                &self.frame,
+                None,
+            )
+            .await;
+            if !sent {
+                self.failed = true;
+            }
+            sent
+        })
     }
 }
 
@@ -703,14 +838,18 @@ async fn run_connection(
     let (subscription, detach) = connection.subscribe();
     core.wait_host_transport(&key.host_id, &connection, cancellation)
         .await?;
+    let subscribed_ns = core.diagnostics.bench().now_ns();
     let connection_generation = connection.generation();
     let channel = core.ensure_channel(&key.host_id, fresh).await?;
+    let channel_ready_ns = core.diagnostics.bench().now_ns();
     let interrupted = subscription.interrupted.clone();
     let overflow = subscription.overflow.clone();
     let live_overflow = subscription.live_overflow.clone();
     let error = subscription.error.clone();
     let queued = subscription.queued.clone();
     let live_queued = subscription.live_queued.clone();
+    let depth = subscription.depth.clone();
+    let live_depth = subscription.live_depth.clone();
     let control_rx = subscription.control;
     let live_rx = subscription.live;
     // A cloud region change invalidates the token this transport connected
@@ -790,6 +929,32 @@ async fn run_connection(
     }
     core.diagnostics
         .record_stage("core", "watch_ready", "succeeded", "none");
+    let watch_ready_ns = core.diagnostics.bench().now_ns();
+    let connection_id = format!("{}:{connection_generation}", key.host_id);
+    emit_join_at(
+        core,
+        &ready.watch_id,
+        &connection_id,
+        connection_generation,
+        JoinMilestone::Subscribed,
+        subscribed_ns,
+    );
+    emit_join_at(
+        core,
+        &ready.watch_id,
+        &connection_id,
+        connection_generation,
+        JoinMilestone::ChannelReady,
+        channel_ready_ns,
+    );
+    emit_join_at(
+        core,
+        &ready.watch_id,
+        &connection_id,
+        connection_generation,
+        JoinMilestone::WatchReady,
+        watch_ready_ns,
+    );
     let epoch = initial
         .as_ref()
         .map(|state| state.live_epoch.clone())
@@ -808,7 +973,11 @@ async fn run_connection(
             ));
         }
         conversation.reset(&epoch);
+        let bench = core.diagnostics.bench();
+        let attach_frame = bench.token(TokenDomain::Frame, &format!("attach:{observation_id}"));
         let mut sink = EventSink {
+            bench: bench.clone(),
+            frame: attach_frame,
             events,
             key,
             observation_id,
@@ -826,6 +995,13 @@ async fn run_connection(
             }
             core.sync_conversation(key, conversation, false, false, &projection, &mut sink)
                 .await?;
+            emit_join(
+                core,
+                &ready.watch_id,
+                &connection_id,
+                connection_generation,
+                JoinMilestone::CaughtUp,
+            );
         }
         let _ = core
             .runtime
@@ -854,7 +1030,8 @@ async fn run_connection(
     } else {
         None
     };
-    conversation_loop(
+    let watch_id_for_close = ready.watch_id.clone();
+    let result = conversation_loop(
         core,
         &connection,
         connection_generation,
@@ -885,9 +1062,19 @@ async fn run_connection(
         error,
         queued,
         live_queued,
+        depth,
+        live_depth,
         sync,
     )
-    .await
+    .await;
+    emit_join(
+        core,
+        &watch_id_for_close,
+        &connection_id,
+        connection_generation,
+        JoinMilestone::Closed,
+    );
+    result
 }
 
 /// The approvals last delivered to the viewer, kept so a transiently failed
@@ -919,8 +1106,8 @@ async fn conversation_loop(
     mut paged: Option<&mut PagedHistory>,
     mut paged_state: Option<crate::conversation::SessionState>,
     approvals: &mut ApprovalCache,
-    mut control_rx: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
-    mut live_rx: mpsc::Receiver<(DeliveryClass, EventEnvelope)>,
+    mut control_rx: mpsc::Receiver<QueuedEvent>,
+    mut live_rx: mpsc::Receiver<QueuedEvent>,
     events: &mpsc::Sender<SessionEvent>,
     cancellation: &Cancellation,
     questions: Option<&mpsc::UnboundedSender<QuestionSignal>>,
@@ -931,6 +1118,8 @@ async fn conversation_loop(
     error: Arc<Mutex<Option<CoreError>>>,
     queued: Arc<AtomicUsize>,
     live_queued: Arc<AtomicUsize>,
+    depth: Arc<AtomicUsize>,
+    live_depth: Arc<AtomicUsize>,
     sync: Option<crate::sync::SyncService>,
 ) -> CoreResult<End> {
     let mut connection_state = connection.subscribe_state();
@@ -941,6 +1130,7 @@ async fn conversation_loop(
     let mut baseline_approvals = Box::pin(fetch_approvals(core, key));
     let mut live_open = true;
     let mut state_revision = initial_revision;
+    let mut first_update = true;
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.tick().await;
     loop {
@@ -981,7 +1171,7 @@ async fn conversation_loop(
                 history_read = None;
                 let paged = paged.as_deref_mut().expect("paged history mode");
                 let buffered = paged.finish_read();
-                let mut sink = EventSink { events, key, observation_id, generation, failed: false };
+                let mut sink = paged_sink(core, events, key, observation_id, generation);
                 match result {
                     Ok(history) => {
                         paged.install(core, conversation, history, &mut sink).await?;
@@ -1010,7 +1200,7 @@ async fn conversation_loop(
                         approvals.items = fresh;
                         approvals.stale = false;
                         baseline.approvals = approvals.items.clone();
-                        let mut sink = EventSink { events, key, observation_id, generation, failed: false };
+                        let mut sink = paged_sink(core, events, key, observation_id, generation);
                         if !sink.emit(&ViewUpdate::State(baseline)).await {
                             pump.finish().await;
                             return Ok(End::Done);
@@ -1018,7 +1208,7 @@ async fn conversation_loop(
                 }
             }
             received = control_rx.recv() => {
-                let Some((class, envelope)) = received else {
+                let Some(queued_event) = received else {
                     let failure = error.lock().expect("watch error mutex").take();
                     if let Some(failure) = failure {
                         return Err(failure);
@@ -1026,8 +1216,12 @@ async fn conversation_loop(
                     pump.finish().await;
                     return Ok(End::Reconnect);
                 };
+                let class = queued_event.class;
+                let envelope = queued_event.envelope;
                 queued.fetch_sub(envelope.encoded_len(), Ordering::SeqCst);
-                match handle_envelope(
+                depth.fetch_sub(1, Ordering::SeqCst);
+                let (frame, wait_ns) = frame_fact(core, &envelope, queued_event.enqueued_ns);
+                let handling = handle_envelope(
                     core,
                     key,
                     observation_id,
@@ -1048,9 +1242,21 @@ async fn conversation_loop(
                     paged.as_deref_mut(),
                     byte_budget,
                     &envelope,
+                    &frame,
+                    wait_ns,
                 )
-                .await?
-                {
+                .await?;
+                if handling.delivered && first_update {
+                    first_update = false;
+                    emit_join(
+                        core,
+                        &watch_id,
+                        &format!("{}:{connection_generation}", key.host_id),
+                        connection_generation,
+                        JoinMilestone::FirstUpdate,
+                    );
+                }
+                match handling.flow {
                     Flow::Continue => {}
                     Flow::Done => {
                         pump.finish().await;
@@ -1063,14 +1269,18 @@ async fn conversation_loop(
                 }
             }
             received = live_rx.recv(), if live_open => {
-                let Some((class, envelope)) = received else {
+                let Some(queued_event) = received else {
                     // The live sender ended with the same MQTT task that owns
                     // control; control completion determines the loop's end.
                     live_open = false;
                     continue;
                 };
+                let class = queued_event.class;
+                let envelope = queued_event.envelope;
                 live_queued.fetch_sub(envelope.encoded_len(), Ordering::SeqCst);
-                match handle_envelope(
+                live_depth.fetch_sub(1, Ordering::SeqCst);
+                let (frame, wait_ns) = frame_fact(core, &envelope, queued_event.enqueued_ns);
+                let handling = handle_envelope(
                     core,
                     key,
                     observation_id,
@@ -1091,9 +1301,21 @@ async fn conversation_loop(
                     paged.as_deref_mut(),
                     byte_budget,
                     &envelope,
+                    &frame,
+                    wait_ns,
                 )
-                .await?
-                {
+                .await?;
+                if handling.delivered && first_update {
+                    first_update = false;
+                    emit_join(
+                        core,
+                        &watch_id,
+                        &format!("{}:{connection_generation}", key.host_id),
+                        connection_generation,
+                        JoinMilestone::FirstUpdate,
+                    );
+                }
+                match handling.flow {
                     Flow::Continue => {}
                     Flow::Done => {
                         pump.finish().await;
@@ -1210,7 +1432,13 @@ async fn conversation_loop(
                     // Repair it through the paged history read, which keeps
                     // every response bounded.
                     if sync.cursor(key)?.as_deref() != Some(lease.history_head.as_str()) {
+                        let lease_frame = core.diagnostics.bench().token(
+                            TokenDomain::Frame,
+                            &format!("lease:{observation_id}"),
+                        );
                         let mut sink = EventSink {
+                            bench: core.diagnostics.bench().clone(),
+                            frame: lease_frame,
                             events,
                             key,
                             observation_id,
@@ -1355,6 +1583,151 @@ fn enforce_delivery_class(
 }
 
 /// Resolve, decrypt and apply one received envelope through the class contract.
+struct Handling {
+    flow: Flow,
+    disposition: DequeueDisposition,
+    reason: Option<&'static str>,
+    /// A conversation update actually reached the observation stream.
+    delivered: bool,
+}
+
+fn emit_receipt(
+    core: &Core,
+    frame: &str,
+    bytes: u64,
+    decode: crate::observation::bench::Decode,
+    scope: Option<String>,
+    range: Option<&FrameRange>,
+    reason: Option<&'static str>,
+) {
+    emit_receipt_fact(
+        core.diagnostics.bench(),
+        frame,
+        bytes,
+        decode,
+        scope,
+        range,
+        reason,
+    );
+}
+
+/// Emit one receipt fact against an explicit process outlet. Split from
+/// [`emit_receipt`] so a test can observe the boundary without a live `Core`.
+fn emit_receipt_fact(
+    bench: &BenchContext,
+    frame: &str,
+    bytes: u64,
+    decode: crate::observation::bench::Decode,
+    scope: Option<String>,
+    range: Option<&FrameRange>,
+    reason: Option<&'static str>,
+) {
+    if !bench.enabled() {
+        return;
+    }
+    bench.emit(BenchEvent::CoreReceipt {
+        frame: frame.to_owned(),
+        kind: crate::observation::bench::ReceiptKind::Event,
+        bytes,
+        decode,
+        scope,
+        stream: range.map(|range| range.stream.clone()),
+        batch: range.map(|range| range.batch.clone()),
+        block: range.and_then(|range| range.block.clone()),
+        seq_start: range.map(|range| range.seq_start),
+        seq_end: range.map(|range| range.seq_end),
+        reason: reason.map(str::to_owned),
+    });
+}
+
+fn emit_dequeue(
+    core: &Core,
+    frame: &str,
+    wait_ns: u64,
+    disposition: DequeueDisposition,
+    reason: Option<&'static str>,
+) {
+    let bench = core.diagnostics.bench();
+    if !bench.enabled() {
+        return;
+    }
+    bench.emit(BenchEvent::CoreDequeue {
+        frame: frame.to_owned(),
+        wait_ns,
+        disposition,
+        reason: reason.map(str::to_owned),
+        // The queue entry is a sealed envelope; dequeue stays frame-joined and
+        // never guesses the increment a decoded frame may later name.
+        stream: None,
+        block: None,
+        seq_start: None,
+        seq_end: None,
+        batch: None,
+    });
+}
+
+fn frame_fact(core: &Core, envelope: &EventEnvelope, enqueued_ns: u64) -> (String, u64) {
+    let bench = core.diagnostics.bench();
+    if !bench.enabled() {
+        return (String::new(), 0);
+    }
+    let frame = bench.token(
+        TokenDomain::Frame,
+        &crate::observation::bench::event_frame_identity(envelope),
+    );
+    let wait_ns = if enqueued_ns == 0 {
+        // The enqueue boundary was not observed; never invent residence time.
+        0
+    } else {
+        bench.now_ns().saturating_sub(enqueued_ns)
+    };
+    (frame, wait_ns)
+}
+
+fn emit_join_at(
+    core: &Core,
+    watch_id: &str,
+    connection_id: &str,
+    generation: u64,
+    milestone: JoinMilestone,
+    ts: u64,
+) {
+    let bench = core.diagnostics.bench();
+    if !bench.enabled() {
+        return;
+    }
+    bench.emit_at(
+        BenchEvent::CoreJoin {
+            watch: bench.token(TokenDomain::Watch, watch_id),
+            connection: bench.token(TokenDomain::Connection, connection_id),
+            generation,
+            milestone,
+        },
+        ts,
+    );
+}
+
+fn emit_join(
+    core: &Core,
+    watch_id: &str,
+    connection_id: &str,
+    generation: u64,
+    milestone: JoinMilestone,
+) {
+    let ts = core.diagnostics.bench().now_ns();
+    emit_join_at(core, watch_id, connection_id, generation, milestone, ts);
+}
+
+fn scope_token(core: &Core, update: &whalerein_proto::SessionUpdate) -> Option<String> {
+    update.session.as_ref().map(|session| {
+        core.diagnostics.bench().token(
+            TokenDomain::Session,
+            &format!("{}:{}", session.host_id, session.session_id),
+        )
+    })
+}
+
+/// Resolve, decrypt and apply one received envelope through the class contract.
 #[allow(clippy::too_many_arguments)]
 async fn handle_envelope(
     core: &Core,
@@ -1377,7 +1750,10 @@ async fn handle_envelope(
     paged: Option<&mut PagedHistory>,
     byte_budget: usize,
     envelope: &EventEnvelope,
-) -> CoreResult<Flow> {
+    frame: &str,
+    wait_ns: u64,
+) -> CoreResult<Handling> {
+    let bytes = envelope.encoded_len() as u64;
     // The control and live topics are shared by this Device's connections.
     // Only the observation that owns the Noise channel can open the event.
     if envelope.device_id == channel.device_id()
@@ -1385,15 +1761,85 @@ async fn handle_envelope(
         && !envelope.channel_id.is_empty()
         && envelope.channel_id != channel.channel_id()
     {
-        return Ok(Flow::Continue);
+        emit_receipt(
+            core,
+            frame,
+            bytes,
+            crate::observation::bench::Decode::Rejected,
+            None,
+            None,
+            Some("channel_replaced"),
+        );
+        emit_dequeue(
+            core,
+            frame,
+            wait_ns,
+            DequeueDisposition::Stale,
+            Some("channel_replaced"),
+        );
+        return Ok(Handling {
+            flow: Flow::Continue,
+            disposition: DequeueDisposition::Stale,
+            reason: Some("channel_replaced"),
+            delivered: false,
+        });
     }
     // Resolve and verify a referenced control event before opening it.
-    let envelope = core.resolve_event_envelope(envelope).await?;
-    let update = match crate::sync::open_event(channel, &envelope)? {
-        crate::sync::OpenedEvent::Update(update) => update,
-        crate::sync::OpenedEvent::Closed(closed) => {
+    let envelope = match core.resolve_event_envelope(envelope).await {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            emit_receipt(
+                core,
+                frame,
+                bytes,
+                crate::observation::bench::Decode::Rejected,
+                None,
+                None,
+                Some(error.code()),
+            );
+            emit_dequeue(
+                core,
+                frame,
+                wait_ns,
+                DequeueDisposition::Rejected,
+                Some(error.code()),
+            );
+            return Err(error);
+        }
+    };
+    let update = match crate::sync::open_event(channel, &envelope) {
+        Ok(crate::sync::OpenedEvent::Update(update)) => {
+            let range = FrameRange::from_update(core.diagnostics.bench().as_ref(), &update);
+            emit_receipt(
+                core,
+                frame,
+                bytes,
+                crate::observation::bench::Decode::Ok,
+                scope_token(core, &update),
+                range.as_ref(),
+                None,
+            );
+            update
+        }
+        Ok(crate::sync::OpenedEvent::Closed(closed)) => {
+            emit_receipt(
+                core,
+                frame,
+                bytes,
+                crate::observation::bench::Decode::Ok,
+                None,
+                None,
+                None,
+            );
             // A terminal close is control intent; it is never a live preview.
             if class != DeliveryClass::Control {
+                emit_dequeue(
+                    core,
+                    frame,
+                    wait_ns,
+                    DequeueDisposition::Rejected,
+                    Some("live_close"),
+                );
                 return Err(CoreError::Security(
                     "control payload received on the live topic".into(),
                 ));
@@ -1401,19 +1847,86 @@ async fn handle_envelope(
             if closed.watch_id == watch_id && closed.session.as_ref() == Some(wire_key) {
                 // A Host-authored terminal close is authoritative, like an
                 // Access authority reason: never reconnect.
+                emit_dequeue(
+                    core,
+                    frame,
+                    wait_ns,
+                    DequeueDisposition::Rejected,
+                    Some("watch_closed"),
+                );
                 return Err(CoreError::AuthorityClosed(closed.reason));
             }
-            return Ok(Flow::Continue);
+            emit_dequeue(
+                core,
+                frame,
+                wait_ns,
+                DequeueDisposition::Stale,
+                Some("other_watch"),
+            );
+            return Ok(Handling {
+                flow: Flow::Continue,
+                disposition: DequeueDisposition::Stale,
+                reason: Some("other_watch"),
+                delivered: false,
+            });
+        }
+        Err(error) => {
+            emit_receipt(
+                core,
+                frame,
+                bytes,
+                crate::observation::bench::Decode::Rejected,
+                None,
+                None,
+                Some(error.code()),
+            );
+            emit_dequeue(
+                core,
+                frame,
+                wait_ns,
+                DequeueDisposition::Rejected,
+                Some(error.code()),
+            );
+            return Err(error);
         }
     };
-    enforce_delivery_class(class, &update)?;
+    if let Err(error) = enforce_delivery_class(class, &update) {
+        emit_dequeue(
+            core,
+            frame,
+            wait_ns,
+            DequeueDisposition::Rejected,
+            Some(error.code()),
+        );
+        return Err(error);
+    }
     if update.session.as_ref() != Some(wire_key) || update.watch_id != watch_id {
-        return Ok(Flow::Continue);
+        emit_dequeue(
+            core,
+            frame,
+            wait_ns,
+            DequeueDisposition::Stale,
+            Some("scope_mismatch"),
+        );
+        return Ok(Handling {
+            flow: Flow::Continue,
+            disposition: DequeueDisposition::Stale,
+            reason: Some("scope_mismatch"),
+            delivered: false,
+        });
     }
     let Some(payload) = update.payload else {
-        return Err(CoreError::Security("empty typed update".into()));
+        let error = CoreError::Security("empty typed update".into());
+        emit_dequeue(
+            core,
+            frame,
+            wait_ns,
+            DequeueDisposition::Rejected,
+            Some(error.code()),
+        );
+        return Err(error);
     };
-    handle_update(
+    let handling = match handle_update(
         core,
         key,
         observation_id,
@@ -1431,8 +1944,24 @@ async fn handle_envelope(
         paged,
         byte_budget,
         payload,
+        frame,
     )
     .await
+    {
+        Ok(handling) => handling,
+        Err(error) => {
+            emit_dequeue(
+                core,
+                frame,
+                wait_ns,
+                DequeueDisposition::Rejected,
+                Some(error.code()),
+            );
+            return Err(error);
+        }
+    };
+    emit_dequeue(core, frame, wait_ns, handling.disposition, handling.reason);
+    Ok(handling)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1454,61 +1983,106 @@ async fn handle_update(
     paged: Option<&mut PagedHistory>,
     byte_budget: usize,
     payload: session_update::Payload,
-) -> CoreResult<Flow> {
+    frame: &str,
+) -> CoreResult<Handling> {
+    let bench = core.diagnostics.bench();
     match payload {
         session_update::Payload::Questions(descriptor) => {
             if interests.questions {
                 signal_descriptor(questions, descriptor);
             }
-            Ok(Flow::Continue)
+            Ok(Handling {
+                flow: Flow::Continue,
+                disposition: DequeueDisposition::Applied,
+                reason: None,
+                delivered: false,
+            })
         }
-        session_update::Payload::Live(frame) => {
+        session_update::Payload::Live(frame_payload) => {
             if !interests.conversation {
-                return Ok(Flow::Continue);
+                return Ok(Handling {
+                    flow: Flow::Continue,
+                    disposition: DequeueDisposition::Applied,
+                    reason: None,
+                    delivered: false,
+                });
             }
-            let Some(view) = conversation.live(&frame)? else {
-                return Ok(Flow::Continue);
+            let range = FrameRange::from_frame(bench.as_ref(), &frame_payload);
+            let (view, live) = conversation.live_decided(&frame_payload)?;
+            let disposition = match live {
+                LiveDisposition::Applied => DequeueDisposition::Applied,
+                LiveDisposition::Duplicate => DequeueDisposition::Duplicate,
+                LiveDisposition::Stale => DequeueDisposition::Stale,
             };
-            Ok(
-                if send_event(
-                    events,
-                    key,
-                    observation_id,
-                    generation,
-                    SessionEventPayload::Conversation(view),
-                )
-                .await
-                {
-                    Flow::Continue
-                } else {
-                    Flow::Done
-                },
+            let Some(view) = view else {
+                return Ok(Handling {
+                    flow: Flow::Continue,
+                    disposition,
+                    reason: None,
+                    delivered: false,
+                });
+            };
+            let (sent, _) = send_conversation(
+                bench.as_ref(),
+                events,
+                key,
+                observation_id,
+                generation,
+                view,
+                frame,
+                range.as_ref(),
             )
+            .await;
+            Ok(Handling {
+                flow: if sent { Flow::Continue } else { Flow::Done },
+                disposition,
+                reason: None,
+                delivered: sent,
+            })
         }
         session_update::Payload::History(batch) => {
             if !interests.conversation {
-                return Ok(Flow::Continue);
+                return Ok(Handling {
+                    flow: Flow::Continue,
+                    disposition: DequeueDisposition::Applied,
+                    reason: None,
+                    delivered: false,
+                });
             }
             if let Some(paged) = paged {
                 if batch.projection_id != *projection {
-                    return Ok(Flow::Reconnect);
+                    return Ok(Handling {
+                        flow: Flow::Reconnect,
+                        disposition: DequeueDisposition::Stale,
+                        reason: Some("projection_changed"),
+                        delivered: false,
+                    });
                 }
-                let mut sink = EventSink {
-                    events,
-                    key,
-                    observation_id,
-                    generation,
-                    failed: false,
-                };
+                let mut sink = paged_sink(core, events, key, observation_id, generation);
                 let contiguous = paged
                     .receive(core, conversation, batch, byte_budget, &mut sink)
                     .await?;
                 return Ok(if sink.failed {
-                    Flow::Done
+                    Handling {
+                        flow: Flow::Done,
+                        disposition: DequeueDisposition::Rejected,
+                        reason: None,
+                        delivered: false,
+                    }
                 } else if contiguous {
-                    Flow::Continue
+                    Handling {
+                        flow: Flow::Continue,
+                        disposition: DequeueDisposition::Applied,
+                        reason: None,
+                        delivered: true,
+                    }
                 } else {
-                    Flow::Reconnect
+                    Handling {
+                        flow: Flow::Reconnect,
+                        disposition: DequeueDisposition::Applied,
+                        reason: None,
+                        delivered: false,
+                    }
                 });
             }
             let Some(sync) = sync else {
@@ -1519,26 +2093,41 @@ async fn handle_update(
             if batch.projection_id.is_empty() || batch.projection_id != *projection {
                 conversation.reset_projection("");
                 *projection = batch.projection_id.clone();
-                return Ok(Flow::Reconnect);
+                return Ok(Handling {
+                    flow: Flow::Reconnect,
+                    disposition: DequeueDisposition::Stale,
+                    reason: Some("projection_changed"),
+                    delivered: false,
+                });
             }
             let outcome = sync.apply_batch(key, &batch)?;
+            let mut delivered = false;
             match outcome {
                 BatchOutcome::Applied => {
                     for change in &batch.changes {
                         let Some(view) = conversation.committed_once(change)? else {
                             continue;
                         };
-                        if !send_event(
+                        let (sent, _) = send_conversation(
+                            bench.as_ref(),
                             events,
                             key,
                             observation_id,
                             generation,
-                            SessionEventPayload::Conversation(view),
+                            view,
+                            frame,
+                            None,
                         )
-                        .await
-                        {
-                            return Ok(Flow::Done);
+                        .await;
+                        if !sent {
+                            return Ok(Handling {
+                                flow: Flow::Done,
+                                disposition: DequeueDisposition::Applied,
+                                reason: None,
+                                delivered: true,
+                            });
                         }
+                        delivered = true;
                         for activity in conversation.take_activity_updates() {
                             if !send_event(
                                 events,
@@ -1549,14 +2138,32 @@ async fn handle_update(
                             )
                             .await
                             {
-                                return Ok(Flow::Done);
+                                return Ok(Handling {
+                                    flow: Flow::Done,
+                                    disposition: DequeueDisposition::Applied,
+                                    reason: None,
+                                    delivered: true,
+                                });
                             }
                         }
                     }
+                    Ok(Handling {
+                        flow: Flow::Continue,
+                        disposition: DequeueDisposition::Applied,
+                        reason: None,
+                        delivered,
+                    })
                 }
-                BatchOutcome::Duplicate => {}
+                BatchOutcome::Duplicate => Ok(Handling {
+                    flow: Flow::Continue,
+                    disposition: DequeueDisposition::Duplicate,
+                    reason: None,
+                    delivered: false,
+                }),
                 BatchOutcome::Gap => {
                     let mut sink = EventSink {
+                        bench: bench.clone(),
+                        frame: frame.to_owned(),
                         events,
                         key,
                         observation_id,
@@ -1566,11 +2173,21 @@ async fn handle_update(
                     core.sync_conversation(key, conversation, true, false, projection, &mut sink)
                         .await?;
                     if sink.failed {
-                        return Ok(Flow::Done);
+                        return Ok(Handling {
+                            flow: Flow::Done,
+                            disposition: DequeueDisposition::WaitingGap,
+                            reason: Some("history_gap"),
+                            delivered: false,
+                        });
                     }
+                    Ok(Handling {
+                        flow: Flow::Continue,
+                        disposition: DequeueDisposition::WaitingGap,
+                        reason: Some("history_gap"),
+                        delivered: false,
+                    })
                 }
             }
-            Ok(Flow::Continue)
         }
         session_update::Payload::State(state) => {
             if state.session.as_ref() != Some(wire_key) {
@@ -1582,17 +2199,32 @@ async fn handle_update(
                 }
             }
             if !interests.conversation {
-                return Ok(Flow::Continue);
+                return Ok(Handling {
+                    flow: Flow::Continue,
+                    disposition: DequeueDisposition::Applied,
+                    reason: None,
+                    delivered: false,
+                });
             }
             if state.projection_id.is_empty() || state.projection_id != *projection {
                 if paged.is_none() {
                     conversation.reset_projection("");
                 }
                 *projection = state.projection_id.clone();
-                return Ok(Flow::Reconnect);
+                return Ok(Handling {
+                    flow: Flow::Reconnect,
+                    disposition: DequeueDisposition::Stale,
+                    reason: Some("projection_changed"),
+                    delivered: false,
+                });
             }
             if state.live_epoch != epoch {
-                return Ok(Flow::Reconnect);
+                return Ok(Handling {
+                    flow: Flow::Reconnect,
+                    disposition: DequeueDisposition::Stale,
+                    reason: Some("epoch_changed"),
+                    delivered: false,
+                });
             }
             if state.revision > *state_revision {
                 *state_revision = state.revision;
@@ -1619,14 +2251,35 @@ async fn handle_update(
                 )
                 .await
                 {
-                    return Ok(Flow::Done);
+                    return Ok(Handling {
+                        flow: Flow::Done,
+                        disposition: DequeueDisposition::Applied,
+                        reason: None,
+                        delivered: false,
+                    });
                 }
+                return Ok(Handling {
+                    flow: Flow::Continue,
+                    disposition: DequeueDisposition::Applied,
+                    reason: None,
+                    delivered: false,
+                });
             }
-            Ok(Flow::Continue)
+            Ok(Handling {
+                flow: Flow::Continue,
+                disposition: DequeueDisposition::Duplicate,
+                reason: None,
+                delivered: false,
+            })
         }
         session_update::Payload::Reset(_) => {
             if !interests.conversation {
-                return Ok(Flow::Continue);
+                return Ok(Handling {
+                    flow: Flow::Continue,
+                    disposition: DequeueDisposition::Applied,
+                    reason: None,
+                    delivered: false,
+                });
             }
             if let Some(paged) = paged {
                 paged.invalidate();
@@ -1634,7 +2287,12 @@ async fn handle_update(
                 conversation.reset("");
                 core.sync_service()?.discard_stage(key)?;
             }
-            Ok(Flow::Reconnect)
+            Ok(Handling {
+                flow: Flow::Reconnect,
+                disposition: DequeueDisposition::Applied,
+                reason: None,
+                delivered: false,
+            })
         }
     }
 }

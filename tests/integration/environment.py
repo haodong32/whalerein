@@ -115,7 +115,9 @@ class Process:
                     # instead of failing later on a missing field.
                     raise RuntimeError(f"Fixture control {method} failed: {result.get('error')}")
                 return result["value"]
-        raise TimeoutError("Fixture control timed out")
+        raise TimeoutError(
+            f"Fixture control {method} timed out (child exit={self.child.poll()})"
+        )
 
 
 def relay_http(path, method="GET", body=None, token=None, headers=None, timeout=10,

@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/broker"
+	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/observation"
 	"github.com/whalerein/whalerein/access/internal/payload"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
@@ -47,6 +49,8 @@ type StagerConfig struct {
 	Retention     time.Duration
 	CleanupBatch  int
 	OperationTime time.Duration
+	Metrics       *diagnostics.Metrics
+	Observation   *observation.Sink
 }
 
 // Stager implements broker.PayloadStager and the requests PayloadChecker.
@@ -77,6 +81,9 @@ func NewStager(store StagerStore, payloads StagerPayloads, config StagerConfig) 
 	}
 	if config.OperationTime <= 0 {
 		config.OperationTime = time.Minute
+	}
+	if config.Metrics == nil {
+		config.Metrics = diagnostics.NewMetrics()
 	}
 	return &Stager{store: store, payloads: payloads, config: config, now: func() time.Time { return time.Now().UTC() }}, nil
 }
@@ -163,9 +170,20 @@ func (s *Stager) Stage(ctx context.Context, request broker.StageRequest) (*whale
 	default:
 		return nil, fmt.Errorf("%w: unsupported staging purpose", broker.ErrStagingFailed)
 	}
+	reserveStarted := time.Now()
 	object, err := s.payloads.Reserve(ctx, input)
 	if err != nil {
 		return nil, stagingUnavailable(err)
+	}
+	observationRequest := request.RequestID
+	if observationRequest == "" {
+		observationRequest = request.MessageID
+	}
+	s.observeStaged(relayScope(request.HostID, request.DeviceID), observationRequest, object.ObjectID, observation.RelayReserve, observation.OutcomeOK, int(object.Length))
+	s.config.Metrics.ObserveAccessStage("relay_stage", time.Since(reserveStarted), string(observation.OutcomeOK))
+	if object.Length > 0 {
+		stageBytes := object.Length
+		s.config.Metrics.ObserveAccessStageBytes("relay_stage", stageBytes)
 	}
 	ref := payload.Ref{
 		ObjectID:   object.ObjectID,
@@ -175,15 +193,32 @@ func (s *Stager) Stage(ctx context.Context, request broker.StageRequest) (*whale
 		ChannelID:  object.ChannelID,
 		Purpose:    object.Purpose,
 	}
+	uploadStarted := time.Now()
 	if err := s.payloads.Write(ctx, ref, bytes.NewReader(request.Ciphertext)); err != nil {
+		s.observeStaged(relayScope(request.HostID, request.DeviceID), observationRequest, object.ObjectID, observation.RelayUpload, observation.OutcomeError, 0)
+		s.config.Metrics.ObserveAccessStage("relay_upload", time.Since(uploadStarted), string(observation.OutcomeError))
 		_ = s.payloads.Cancel(ctx, ref)
 		return nil, stagingUnavailable(err)
 	}
+	s.observeStaged(relayScope(request.HostID, request.DeviceID), observationRequest, object.ObjectID, observation.RelayUpload, observation.OutcomeOK, len(request.Ciphertext))
+	s.config.Metrics.ObserveAccessStage("relay_upload", time.Since(uploadStarted), string(observation.OutcomeOK))
+	s.config.Metrics.ObserveAccessStageBytes("relay_upload", int64(len(request.Ciphertext)))
+
+	// finish records the declared staged length; verify records the
+	// digest-verified logical bytes after the payload service publishes it.
+	s.observeStaged(relayScope(request.HostID, request.DeviceID), observationRequest, object.ObjectID, observation.RelayFinish, observation.OutcomeOK, int(object.Length))
+	s.config.Metrics.ObserveAccessStage("relay_finish", time.Since(uploadStarted), string(observation.OutcomeOK))
+	verifyStarted := time.Now()
 	finished, err := s.payloads.Finish(ctx, ref)
 	if err != nil {
+		s.observeStaged(relayScope(request.HostID, request.DeviceID), observationRequest, object.ObjectID, observation.RelayVerify, observation.OutcomeError, 0)
+		s.config.Metrics.ObserveAccessStage("relay_verify", time.Since(verifyStarted), string(observation.OutcomeError))
 		_ = s.payloads.Cancel(ctx, ref)
 		return nil, stagingUnavailable(err)
 	}
+	s.observeStaged(relayScope(request.HostID, request.DeviceID), observationRequest, object.ObjectID, observation.RelayVerify, observation.OutcomeOK, int(finished.Length))
+	s.config.Metrics.ObserveAccessStage("relay_verify", time.Since(verifyStarted), string(observation.OutcomeOK))
+	s.config.Metrics.ObserveAccessStageBytes("relay_verify", int64(finished.Length))
 	return &whalereinv1.PayloadReference{
 		ObjectId:        finished.ObjectID,
 		OwnerNodeId:     finished.OwnerID,
@@ -300,4 +335,11 @@ func int64Pointer(value uint64) *int64 {
 	}
 	converted := int64(value)
 	return &converted
+}
+
+// observeStaged emits one staged-object boundary for the broker relay, which
+// has no HTTP object route. The route is always reference: an inline message
+// never creates a relay object and therefore has no Access object interval.
+func (s *Stager) observeStaged(scope, request, object string, stage observation.RelayStage, outcome observation.Outcome, bytes int) {
+	emitObjectFact(s.config.Observation, scope, request, object, stage, outcome, bytes)
 }

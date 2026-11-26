@@ -193,11 +193,51 @@ source emission starts the clock. The fixture checks for zero native sends.
 
 ```sh
 ./repo bench
+./repo bench --observation aggregate
 ./repo bench --scenario recovery
-./repo bench --scenario mixed-load
+./repo bench --scenario mixed-load --p95-scope per-arm --attempts 40
 ./repo bench --network jitter --link client
+./repo bench --replay .data/benchmarks/20261125T120000-abcd1234
 ./repo bench-compare --vary network -b suite/watch-normal-host -c suite/watch-high-rtt-host
 ```
+
+### Current contract
+
+The bench writes **case schema 2**, **suite schema 2** and workload version 8
+only. Retired and future case, suite, event and comparison documents are
+rejected with an explicit unsupported-version error; there are no legacy
+readers, version branches or fallback decoding. Keep older reports as
+historical artifacts and start new baselines from identical current-format
+conditions.
+
+The raw fixture checkpoint is `benchmark.json`. `repo.benchmark.model`
+validates it and derives every business row, deadline snapshot, denominator,
+percentile and verdict; the runner, summary and comparator never re-derive
+business rules. Offline `--replay DIR` reads that published current report,
+re-runs the same model with no container, and fails if the derived sections
+differ from the saved ones.
+
+Each case records its endpoint (`cli_stdout`), observation mode, capture
+quality, artifact manifest, product outcome, warmup/measured denominators,
+deadline visibility and terminal integrity, plus pending bytes, peak backlog,
+longest pending stall and attribution coverage. A trace-mode case also
+publishes one `case.pftrace` with a checksum and exemplar index. Failed trace
+export makes the command exit nonzero while preserving the business verdict.
+
+### Observation modes
+
+| Mode | Capture |
+| --- | --- |
+| `off` (default) | External Watch/CLI measurements only. |
+| `aggregate` | Adds the existing component aggregate metrics. No detailed timeline. |
+| `trace` | Adds typed component facts and one native bounded `case.pftrace`. |
+
+Secrets are passed to the fixture in a mode-0600 env file, never on the logged
+command line: `WHALEREIN_BENCH_MODE`, `WHALEREIN_BENCH_OBSERVATION`,
+`WHALEREIN_BENCH_RUN_ID`, `WHALEREIN_BENCH_CAPTURE_KEY` and the private
+`/reports` outlet directory. The seeded slot plan is written to the private
+case directory before the container starts, so partial facts and unstarted
+slots survive interruption.
 
 ### Default suite
 
@@ -206,13 +246,14 @@ source emission starts the clock. The fixture checks for zero native sends.
 | Normal | One Watch with the default text cadence and no extra network impairment |
 | Sustained weak network | The same Watch with added RTT, jitter, and random loss as three separate cases on the Host link |
 | Brief outage | The same Watch during a client-link blackout. The fixture forces the existing Watch TCP connection down and restores the link after the scheduled interval |
-| Mixed load | The same Watch alongside four online history reads scheduled independently at fixed offsets. Each read retrieves eight 8 KiB messages through a separate CLI Device |
+| Mixed load | Counterbalanced idle/bulk pairs with scheduled history reads and an attachment on the bulk arm |
 
 The default suite runs six cases from one frozen source snapshot and build.
-Each case owns its container and `benchmark.json`. The root `suite.json` indexes
-case status, correctness, P95 streaming metrics and workflow observations.
-Failed cases stay in the report while subsequent cases run. An interruption
-leaves unstarted cases pending.
+Each case owns its container, private slot plan and `benchmark.json`. The root
+`suite.json` indexes case status, slot plan, observation mode, capture quality,
+endpoint, artifact manifest and outcomes. Failed cases stay in the report while
+subsequent cases run. An interruption leaves unstarted cases pending and keeps
+the facts already written.
 
 Set `--scenario watch`, `--scenario recovery`, or `--scenario mixed-load` for
 one workload. Supplying `--network` or `--link` also selects a single case.
@@ -234,43 +275,74 @@ endpoint listeners and a reference listener before measurement.
 
 ### Results
 
-- **Correct by deadline** counts attempts that produce the exact final reply
-  and settle once in the observation window. Failures remain in the denominator.
-- **Maximum display delay** measures the slowest source increment in an attempt.
-  A milestone completes when the corresponding correct prefix first appears in
-  the public Watch output. An increment first shown in the final reply keeps
-  its original source timestamp.
-- **Largest 50 ms output share** counts the most visible answer bytes written
-  in any 50 ms window as a fraction of final reply bytes. It includes reprints.
+- **Correct by deadline** requires an on-time valid terminal and passing
+  terminal integrity. Both are judged separately from deadline visibility.
+- **First text** measures the first positive verified visible prefix.
+- **Pending bytes, peak backlog and longest pending stall** describe what was
+  still outstanding at the cutoff and how long text waited for an advance.
+- **Maximum display delay** measures the slowest source increment in an
+  attempt. An increment first shown in the final reply keeps its original
+  source timestamp.
+- **Attribution** is available only in trace mode with a verified shared clock
+  and complete coverage. Off/aggregate mark it unavailable instead of guessing.
+- **Waterfall** joins each source increment through the adapter, Host
+  coalescing/queue/publish, Core receipt/delivery and CLI write to the observed
+  stdout record. Matched edges are unioned inside the increment window; missing
+  or ambiguous edges stay explicit and the remainder is `residual_ms`. Host
+  coalesced batches join per-frame handoffs by sequence-range containment, not
+  by a merged batch token. `access_transport` covers client-bound broker
+  forwarding only; it has no stream identity, so preview transport is not
+  claimed as a per-increment join.
 
-The observer timestamps public CLI records on the source's monotonic clock.
-Recovery reports the observed blackout and time from restoration until the
-correct prefix catches up with text emitted before restoration. Mixed load
-reports history correctness and time to the exact, usable online page
-separately from Watch. A failed history read makes the case exit nonzero.
-The report keeps the CLI's structured error code when available.
-The diagnostic section reports first-text latency and the distribution of
-source-to-visible delays across individual text increments from correctly
-completed measured attempts. The segment percentiles describe those increments.
-Formal comparisons still use per-attempt maximum display delay and burst
-share. Reports retain final reply and output-gap timelines for diagnosis.
+Slot accounting reconciles every planned attempt, including setup failures,
+interruption and unstarted work. Product, fixture and unknown failures stay
+separate. Failures remain in correctness denominators. For mixed load the
+report shows scheduled/started/completed/overlapping reads, the union of Watch
+exposure, bulk-minus-idle deltas in both pair orders and the bulk-read gate;
+zero or unknown overlap cannot establish load impact.
 
-Defaults are 30 measured attempts and three warmups per case, a 100 ms source
-cadence, a 10 s deadline and a 1 s duplicate observation window. Use a small
-attempt count to check execution before running the full suite.
+Defaults are 30 measured attempts and four warmups per case, a 100 ms source
+cadence, a 10 s deadline and a 1 s duplicate observation window. Zero warmups
+are valid. Mixed load requires an even measured count and an even warmup count;
+odd plans fail before any build artifact or container exists. A per-arm P95
+request (`--p95-scope per-arm`) requires at least 40 measured attempts and at
+least 20 eligible successes per arm.
 
 ### Comparisons
 
-Use identical workload, fixture, network and resource settings to compare
-builds. `--vary network` locks the build, workload and link while the profile
-changes. Repeat the same profile and build for A/A. Pair independently run
-reports in the supplied order.
+`./repo bench-compare` writes a schema-2 comparison declaration and result with
+explicit versions, configuration fingerprint, single-machine topology,
+shared-clock policy, artifact provenance, observation mode, budget revision and
+conditions. Each dimension is one-way and incomparable inputs are rejected:
 
-V6 comparisons report paired per-run P95 differences for display delay and
-burst share alongside correctness. Intervals require five matched pairs,
-20 successful samples for each P95, and at least 95% correctness per run,
-including background reads in mixed load. Legacy reports retain their original
-metrics and can be compared within the same scenario version.
+| `--vary` | May differ | Everything else |
+| --- | --- | --- |
+| `build` | product build | network, observation mode, fixture, platform, workload |
+| `network` | declared network setting | same build, observation mode and workload |
+| `observation` | observation mode | same build, network and workload |
+| `aa` | nothing | same build and identical conditions; measures precision |
+| `predecessor` | product build | off mode on both arms, same harness/workload/endpoint |
+
+Matched runs contribute one difference per metric. The comparator requires at
+least five matched pairs and at least 20 usable successes per P95 (or a stricter
+declared floor). It reports the mean paired difference with a one-sided upper
+bound; a difference beyond the tolerance is a regression, a bound crossing the
+tolerance is inconclusive, and missing coverage or too few samples stays
+inconclusive. External correctness/latency/resource verdicts are reported
+separately from same-build mode overhead and the disabled-path predecessor
+comparison.
+
+Observation and predecessor verdicts require a frozen budget declaration
+(`--budget FILE`); without one they stay inconclusive. A stale or expired
+budget is never a pass. A/A runs establish measurement noise but not product
+overhead. Record both predecessor and candidate revisions; an unrelated product
+change or incompatible baseline limits causal attribution and stays
+inconclusive. Use `--output FILE` to save the comparison JSON.
+
+`--vary build` permits different builds under otherwise identical conditions;
+use `--vary aa` for the same build. `--vary network` locks the build and varies
+only the selected profile. Pair independently run reports in the supplied
+order.
 
 ## Test selection
 

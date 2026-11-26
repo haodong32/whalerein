@@ -191,6 +191,27 @@ impl DiagnosticContext {
         Self(Arc::new(Diagnostics::new(Some(sink))))
     }
 
+    /// Attach the process bench outlet. The context must be composed before
+    /// `Core::open`; modules then emit through the injected context instead of
+    /// global state.
+    pub fn with_bench(self, bench: Arc<crate::observation::bench::BenchContext>) -> Self {
+        Self(Arc::new(self.0.with_bench(bench)))
+    }
+
+    /// Bench context for this process lifetime. Disabled unless the
+    /// composition root injected a trace outlet.
+    pub fn bench(&self) -> &Arc<crate::observation::bench::BenchContext> {
+        self.0.bench()
+    }
+
+    /// Same outlet and sequence stream with a different producer role.
+    pub fn bench_for(
+        &self,
+        producer: crate::observation::bench::Producer,
+    ) -> Arc<crate::observation::bench::BenchContext> {
+        self.0.bench().for_producer(producer)
+    }
+
     pub fn trace_id(&self) -> &str {
         self.0.trace_id()
     }
@@ -241,6 +262,7 @@ pub(crate) struct Diagnostics {
     trace_id: String,
     events: Mutex<VecDeque<HistoryEvent>>,
     sink: Option<Arc<dyn DiagnosticSink>>,
+    bench: Arc<crate::observation::bench::BenchContext>,
 }
 
 impl Default for Diagnostics {
@@ -255,7 +277,33 @@ impl Diagnostics {
             trace_id: random_id(16),
             events: Mutex::new(VecDeque::new()),
             sink,
+            bench: crate::observation::bench::BenchContext::disabled(
+                crate::observation::bench::Producer::Core,
+            ),
         }
+    }
+
+    /// Replace the disabled bench context with the process outlet. Diagnostics
+    /// history is empty at composition time, so rebuilding it here loses no
+    /// records.
+    fn with_bench(&self, bench: Arc<crate::observation::bench::BenchContext>) -> Self {
+        Self {
+            trace_id: self.trace_id.clone(),
+            events: Mutex::new(
+                self.events
+                    .lock()
+                    .expect("diagnostic journal mutex")
+                    .iter()
+                    .cloned()
+                    .collect(),
+            ),
+            sink: self.sink.clone(),
+            bench,
+        }
+    }
+
+    pub fn bench(&self) -> &Arc<crate::observation::bench::BenchContext> {
+        &self.bench
     }
 
     pub fn trace_id(&self) -> &str {
