@@ -565,8 +565,11 @@ def test_shaped_network_declares_per_direction_impairment():
     assert network.shaped_links(settings) == ("host",)
 
 
-def test_profiler_and_missing_metrics_are_explicitly_unsupported():
+def test_profiler_and_missing_metrics_are_explicitly_unsupported(monkeypatch):
     """latency/AC-11.unsupported: an unavailable optional capability is not a zero."""
+    # The CI image may carry a profiler binary; force the unsupported branch so
+    # the assertion is about the fallback, not about the host's toolchain.
+    monkeypatch.setattr(sampler.shutil, "which", lambda name: None)
     capability = sampler.profiler_capability()
     assert capability["available"] is False
     assert capability["tool"] is None
