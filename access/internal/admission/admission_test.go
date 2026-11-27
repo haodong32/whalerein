@@ -272,7 +272,7 @@ func TestDeviceDenyCoversEveryHostUntilNarrowed(t *testing.T) {
 	}
 }
 
-func TestReconcileRestoresAuthorityFromDurableState(t *testing.T) {
+func TestReconcileDoesNotClearALocalDenialOrDeviceFence(t *testing.T) {
 	source := newFakeStore()
 	source.put("host", "device", true, 4)
 	source.put("other", "device", false, 2)
@@ -283,11 +283,18 @@ func TestReconcileRestoresAuthorityFromDurableState(t *testing.T) {
 	if err := service.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if allowed, err := service.Authorize(context.Background(), "host", "device"); err != nil || !allowed {
-		t.Fatalf("active grant not restored: allowed=%v err=%v", allowed, err)
+	if allowed, err := service.Authorize(context.Background(), "host", "device"); err != nil || allowed {
+		t.Fatalf("local denial cleared by reconcile: allowed=%v err=%v", allowed, err)
 	}
 	if allowed, err := service.Authorize(context.Background(), "other", "device"); err != nil || allowed {
 		t.Fatalf("revoked grant reopened: allowed=%v err=%v", allowed, err)
+	}
+	service.CompleteDeviceRevoke("device")
+	if err := service.Allow(context.Background(), "host", "device"); err != nil {
+		t.Fatalf("confirmed pairing: %v", err)
+	}
+	if allowed, err := service.Authorize(context.Background(), "host", "device"); err != nil || !allowed {
+		t.Fatalf("confirmed active grant not allowed: allowed=%v err=%v", allowed, err)
 	}
 }
 
@@ -395,7 +402,7 @@ func TestWarmReconcilesAndCountsCachedEntries(t *testing.T) {
 	if err := service.Warm(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if entries := service.Counts(); entries != 2 {
+	if entries := service.Counts(); entries != 1 {
 		t.Fatalf("entries = %d", entries)
 	}
 	if _, err := service.Authorize(context.Background(), "host", "device"); err != nil {
