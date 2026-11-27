@@ -492,17 +492,6 @@ func TestStartAuthorityWorkerRequiresCompleteConfiguration(t *testing.T) {
 	startAuthorityWorker(ctx, &control.Client{}, nil, nil, nil, cfg, nil)
 }
 
-func TestAuthorityKeyForTrustIsEmptyWithoutKeys(t *testing.T) {
-	if authorityKeyForTrust(external.Trust{}) != nil {
-		t.Fatal("empty trust produced a key")
-	}
-	key := make([]byte, 32)
-	got := authorityKeyForTrust(external.Trust{Keys: []external.VerificationKey{{PublicKey: key}}})
-	if len(got) != 32 {
-		t.Fatalf("key = %d", len(got))
-	}
-}
-
 func TestAuthorityOptionsAcceptEmptyAndConfiguredTrust(t *testing.T) {
 	if authorityOptions(external.Trust{}) == nil {
 		t.Fatal("empty trust produced no option")

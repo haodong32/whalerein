@@ -144,24 +144,35 @@ func (s *Service) relaySessionProof(ctx context.Context, proof *whalereinv1.Sess
 	if err != nil {
 		return err
 	}
+	return s.publishHostRequest(ctx, proof.GetHostId(),
+		whalereinv1.RequestKind_REQUEST_KIND_SESSION_PROOF,
+		proof.GetDeviceId(), proof.GetChannelId(), body)
+}
+
+// publishHostRequest is the single Access -> Host request/response shape for
+// authority and proof delivery. The caller supplies an already-encoded body.
+func (s *Service) publishHostRequest(
+	ctx context.Context, hostID string, kind whalereinv1.RequestKind,
+	deviceID, channelID string, body []byte,
+) error {
 	const timeout = 2 * time.Second
 	request := &whalereinv1.HostRequest{
 		RequestId:       store.NewOperationID(),
-		HostId:          proof.GetHostId(),
-		DeviceId:        proof.GetDeviceId(),
-		Kind:            whalereinv1.RequestKind_REQUEST_KIND_SESSION_PROOF,
+		HostId:          hostID,
+		DeviceId:        deviceID,
+		Kind:            kind,
 		ProtocolVersion: 1,
-		ChannelId:       proof.GetChannelId(),
+		ChannelId:       channelID,
 		ExpiresAtUnixMs: s.now().Add(timeout).UnixMilli(),
 		Body:            body,
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	result, err := s.hostClientProbe.PublishAndAwait(probeCtx, proof.GetHostId(), request, timeout)
+	result, err := s.hostClientProbe.PublishAndAwait(probeCtx, hostID, request, timeout)
 	if err != nil {
 		return err
 	}
-	if result.GetRequestId() != request.RequestId || result.GetHostId() != proof.GetHostId() ||
+	if result.GetRequestId() != request.RequestId || result.GetHostId() != hostID ||
 		result.GetStatus() != whalereinv1.OnlineStatus_succeeded {
 		return ErrEnforcementUnavailable
 	}
@@ -179,25 +190,10 @@ func (s *Service) PublishAuthority(ctx context.Context, hostID string, authority
 	if err != nil {
 		return err
 	}
-	const timeout = 2 * time.Second
-	request := &whalereinv1.HostRequest{
-		RequestId:       store.NewOperationID(),
-		HostId:          hostID,
-		DeviceId:        authority.GetDeviceId(),
-		Kind:            whalereinv1.RequestKind_REQUEST_KIND_AUTHORITY,
-		ProtocolVersion: 1,
-		ExpiresAtUnixMs: s.now().Add(timeout).UnixMilli(),
-		Body:            body,
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	result, err := s.hostClientProbe.PublishAndAwait(probeCtx, hostID, request, timeout)
-	if err != nil {
+	if err := s.publishHostRequest(ctx, hostID,
+		whalereinv1.RequestKind_REQUEST_KIND_AUTHORITY,
+		authority.GetDeviceId(), "", body); err != nil {
 		return err
-	}
-	if result.GetRequestId() != request.RequestId || result.GetHostId() != hostID ||
-		result.GetStatus() != whalereinv1.OnlineStatus_succeeded {
-		return ErrEnforcementUnavailable
 	}
 	// A proof can arrive before its permit. Retry the stored proof now that the
 	// Host has staged the authority.

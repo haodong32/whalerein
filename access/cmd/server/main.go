@@ -672,14 +672,10 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 }
 
 func authorityOptions(trust external.Trust) external.Option {
-	return external.WithAuthorityPublicKey(authorityKeyForTrust(trust))
-}
-
-func authorityKeyForTrust(trust external.Trust) []byte {
 	if len(trust.Keys) == 0 {
-		return nil
+		return external.WithAuthorityPublicKey(nil)
 	}
-	return trust.Keys[0].PublicKey
+	return external.WithAuthorityPublicKey(trust.Keys[0].PublicKey)
 }
 
 func startAuthorityWorker(ctx context.Context, client *control.Client, db *store.Store,
