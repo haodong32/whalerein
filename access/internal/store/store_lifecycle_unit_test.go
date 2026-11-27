@@ -26,7 +26,7 @@ func TestStoreLifecycleHelpersFailClosed(t *testing.T) {
 	if (&Store{}).Pool() != nil {
 		t.Fatal("an empty store has no pool")
 	}
-	if _, err := Open(ctx, "not a connection string"); err == nil {
+	if _, err := Open(ctx, "postgres://not-a-local-path"); err == nil {
 		t.Fatal("an invalid DSN must be refused")
 	}
 }

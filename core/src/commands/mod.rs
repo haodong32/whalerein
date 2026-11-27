@@ -1503,6 +1503,8 @@ fn build_request(
         connection_ref: String::new(),
         grant_generation: 0,
         enrollment_generation: 0,
+        device_session_id: String::new(),
+        proof_expected: false,
     }
 }
 

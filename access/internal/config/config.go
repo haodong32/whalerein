@@ -53,7 +53,7 @@ type Config struct {
 	Listen                string           `yaml:"listen"`
 	InternalListen        string           `yaml:"internal_listen"`
 	PublicURL             string           `yaml:"public_url"`
-	DatabaseURL           string           `yaml:"database_url"`
+	DatabasePath          string           `yaml:"database_path"`
 	AdminToken            string           `yaml:"admin_token"`
 	HostProvisioningToken string           `yaml:"host_provisioning_token"`
 	Broker                BrokerConfig     `yaml:"broker"`
@@ -89,6 +89,15 @@ type ExternalConfig struct {
 	MQTTURL          string                    `yaml:"mqtt_url"`
 	ClockSkew        Duration                  `yaml:"clock_skew"`
 	VerificationKeys []ExternalVerificationKey `yaml:"verification_keys"`
+
+	// Central node directory. All four values are configured together: a
+	// managed node reports its health and current incarnation to exactly one
+	// account service. Standalone mode leaves them empty.
+	ControlURL   string `yaml:"control_url"`
+	NodeID       string `yaml:"node_id"`
+	NodeToken    string `yaml:"node_token"`
+	Incarnation  string `yaml:"incarnation"`
+	NodeCapacity int    `yaml:"node_capacity"`
 }
 
 // ExternalVerificationKey is one pinned issuer key with its validity window.
@@ -468,6 +477,22 @@ func (c Config) validateExternal() []string {
 		require("external.session_authority_revision", c.External.SessionAuthorityRevision)
 	}
 	require("external.mqtt_url", c.External.MQTTURL)
+	controlSet := c.External.ControlURL != "" || c.External.NodeID != "" ||
+		c.External.NodeToken != "" || c.External.Incarnation != ""
+	if controlSet {
+		require("external.control_url", c.External.ControlURL)
+		require("external.node_id", c.External.NodeID)
+		require("external.node_token", c.External.NodeToken)
+		require("external.incarnation", c.External.Incarnation)
+		if c.External.NodeCapacity < 0 {
+			problems = append(problems, "external.node_capacity must not be negative")
+		}
+		if parsed, err := url.Parse(c.External.ControlURL); err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			problems = append(problems, "external.control_url must be an absolute URL")
+		} else if parsed.Scheme != "https" && !loopbackHost(parsed.Hostname()) {
+			problems = append(problems, "external.control_url must use HTTPS unless it is loopback")
+		}
+	}
 	if len(c.External.VerificationKeys) == 0 {
 		problems = append(problems, "external.verification_keys needs at least one key")
 	}
@@ -510,7 +535,8 @@ func (c Config) Validate() error {
 		// External mode owns these settings. Accepting one in Standalone but
 		// ignoring it would silently drop an operator's enforcement request,
 		// which matters most for the Device-session cutover.
-		if len(c.External.VerificationKeys) > 0 || c.External.Issuer != "" ||
+		if len(c.External.VerificationKeys) > 0 || c.External.Issuer != "" || c.External.ControlURL != "" ||
+			c.External.NodeID != "" || c.External.NodeToken != "" || c.External.Incarnation != "" ||
 			c.External.RequireDeviceSession || c.External.SessionEnvironment != "" ||
 			c.External.SessionAuthorityRevision != "" || c.External.ServiceIdentity != "" ||
 			c.External.Region != "" || c.External.MQTTURL != "" || c.External.ClockSkew != 0 {
@@ -544,7 +570,7 @@ func (c Config) Validate() error {
 			problems = append(problems, "public_url must not embed credentials (userinfo)")
 		}
 	}
-	require("database_url", c.DatabaseURL)
+	require("database_path", c.DatabasePath)
 	require("admin_token", c.AdminToken)
 	require("host_provisioning_token", c.HostProvisioningToken)
 	require("broker.url", c.Broker.URL)

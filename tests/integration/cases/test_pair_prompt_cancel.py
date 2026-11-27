@@ -9,32 +9,9 @@ import time
 
 import pytest
 from environment import ROOT, Device, http
+from journey_helpers import sql as scalar
 
 pytestmark = pytest.mark.chain
-
-
-def scalar(schema, statement):
-    result = subprocess.run(
-        [
-            "psql",
-            "-h",
-            "127.0.0.1",
-            "-p",
-            "55432",
-            "-U",
-            "postgres",
-            "-d",
-            "whalerein_test",
-            "-tAc",
-            f"SET search_path TO {schema}; {statement}",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return lines[-1] if lines else ""
 
 
 def interactive_pair(device, uri, action, timeout=30):

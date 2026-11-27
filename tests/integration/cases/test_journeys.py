@@ -314,7 +314,7 @@ def test_journey_cross_day_cleanup_and_recovery(scenario, paired_device):
     assert sql(
         scenario.schema,
         f"SELECT bodies_cleared FROM requests WHERE request_id='{request_id}'",
-    ) == "t"
+    ) in ("1", "t")
 
     before = effects(scenario, "sendUserMessage")
     recovered = paired_device.call("operation", "recover", request_id)

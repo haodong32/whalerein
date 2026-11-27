@@ -97,7 +97,7 @@ func TestMQTTIntegrationRoutesRequestsResultsEventsAndPresenceThroughMosquitto(t
 		return nil
 	})
 	ready := make(chan string, 4)
-	service.SetReadyHandler(func(_ context.Context, hostID string) error {
+	service.SetReadyHandler(func(_ context.Context, hostID string, _ *whalereinv1.HostReady) error {
 		ready <- hostID
 		return nil
 	})

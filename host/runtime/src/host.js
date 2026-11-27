@@ -12,6 +12,8 @@ import { lockInstance } from './state/instance-lock.js'
 import { StateStore } from './state/store.js'
 import { SecurityManager, defaultReceiveAdvertisement } from './security/manager.js'
 import { authorizationPublicKey } from './security/host-auth.js'
+import { AuthorityStore } from './security/authority-store.js'
+import { verifySessionProof } from './security/authority.js'
 import { bytesEqual } from './security/digest.js'
 import { CommandService } from './commands/service.js'
 import { questionResponseBudget } from './commands/question-pager.js'
@@ -32,6 +34,8 @@ const REQUEST_KINDS = new Set([
   'REQUEST_KIND_REVOCATION',
   'REQUEST_KIND_HOST_CLIENTS',
   'REQUEST_KIND_ACCESS_READY',
+  'REQUEST_KIND_AUTHORITY',
+  'REQUEST_KIND_SESSION_PROOF',
 ])
 
 function sanitizeDetail(value) {
@@ -80,6 +84,7 @@ export class HostRuntime {
   presenceEvents = 0
   #access = null
   #codec = null
+  #authorities = null
   #readyRetryTimer = null
   #readyRetryAttempt = 0
   #channelPruneTimer = null
@@ -106,6 +111,14 @@ export class HostRuntime {
     this.now = now
     this.observation = observation
     this.#codec = resolveCodec(codec)
+    let key = config.authorityPublicKey
+    if (typeof key === 'string' && key !== '') {
+      for (const encoding of ['base64url', 'base64']) {
+        const decoded = Uint8Array.from(Buffer.from(key, encoding))
+        if (decoded.length === 32) { key = decoded; break }
+      }
+    }
+    this.#authorities = new AuthorityStore(key)
   }
 
   get config() {
@@ -135,6 +148,14 @@ export class HostRuntime {
   get access() {
     return this.#access
   }
+
+  /** Record the proof key a Device demonstrated for one App session. */
+  /** Test/diagnostic view: is a permit installed for this exact session? */
+  sessionAuthorized(sessionId, deviceId) {
+    return this.#authorities.validFor(sessionId, this.#config.hostId, deviceId, this.now())
+  }
+
+
 
   async start() {
     if (this.#started) return this
@@ -527,6 +548,8 @@ export class HostRuntime {
         })
       }
       if (kind === 'REQUEST_KIND_REVOCATION') return await this.#handleRevocation(request)
+      if (kind === 'REQUEST_KIND_AUTHORITY') return await this.#handleAuthority(request)
+      if (kind === 'REQUEST_KIND_SESSION_PROOF') return await this.#handleSessionProof(request)
       if (!request.request_id) throw new PluginError('invalid_argument', 'request_id missing')
       if (request.host_id && request.host_id !== this.#config.hostId) {
         return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
@@ -569,6 +592,18 @@ export class HostRuntime {
           catch (error) {
             this.#logger?.warn('request_transport_rejected', { code: 'invalid_argument', kind, layer: 'host' })
             return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument', errorDetail: 'request transport metadata invalid' })
+          }
+        }
+        const gated = this.#config.requireAuthority ||
+          (request.proof_expected === true && this.#authorities.hasSession(request.device_session_id))
+        if (gated) {
+          const session = request.device_session_id
+          const routeGeneration = this.#access?.route?.generation
+          if (typeof session !== 'string' || session === '' ||
+              routeGeneration === undefined || routeGeneration === null ||
+              !this.#authorities.validFor(session, this.#config.hostId, request.device_id, this.now(),
+                routeGeneration)) {
+            return await this.#reply(request, { status: 'rejected', errorCode: 'unauthorized' })
           }
         }
         return await this.#security.withRequest(request, opened => this.#handleEncrypted(request, opened, requestTransport))
@@ -638,6 +673,75 @@ export class HostRuntime {
     }
   }
 
+  async #handleAuthority(request) {
+    if (!request.request_id || request.host_id !== this.#config.hostId || !request.device_id) {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
+    }
+    if (!this.#authorities.enabled) {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'unavailable' })
+    }
+    let authority
+    try {
+      authority = this.#codec.decode('whalerein.v1.ScopedAuthority', request.body)
+    } catch {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument' })
+    }
+    const sessionId = authority.session_id
+    if (typeof sessionId !== 'string' || sessionId === '' || authority.host_id !== this.#config.hostId ||
+        authority.device_id !== request.device_id) {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
+    }
+    const routeGeneration = Number(this.#access?.route?.generation ?? authority.route_generation)
+    const result = this.#authorities.stage(authority, {
+      hostId: this.#config.hostId,
+      deviceId: request.device_id,
+      sessionId,
+      servingNodeId: authority.serving_node_id,
+      routeGeneration,
+      proofPublicKey: authority.session_proof_public_key,
+    }, this.now())
+    if (!result.ok) {
+      this.#logger?.warn('authority_rejected', { code: 'forbidden', reason: result.reason, layer: 'host' })
+      return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
+    }
+    return await this.#reply(request, { status: 'succeeded' })
+  }
+
+  async #handleSessionProof(request) {
+    if (!request.request_id || request.host_id !== this.#config.hostId || !request.device_id) {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
+    }
+    let proof
+    try {
+      proof = this.#codec.decode('whalerein.v1.SessionProof', request.body)
+    } catch {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'invalid_argument' })
+    }
+    if (proof.host_id !== this.#config.hostId || proof.device_id !== request.device_id ||
+        proof.channel_id !== request.channel_id ||
+        typeof proof.session_id !== 'string' || proof.session_id === '') {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
+    }
+    const channelHash = this.#security?.channelTranscript?.(request.channel_id, request.device_id)
+    if (!(channelHash instanceof Uint8Array) || channelHash.length !== 32 ||
+        !(proof.transcript_hash instanceof Uint8Array) || proof.transcript_hash.length !== 32) {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'unauthorized' })
+    }
+    for (let i = 0; i < 32; i += 1) {
+      if (channelHash[i] !== proof.transcript_hash[i]) {
+        return await this.#reply(request, { status: 'rejected', errorCode: 'unauthorized' })
+      }
+    }
+    const key = this.#authorities.pendingProofKey(proof.session_id)
+    if (!verifySessionProof(key, proof, this.now())) {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
+    }
+    if (!this.#authorities.activate(proof.session_id, key, this.now())) {
+      return await this.#reply(request, { status: 'rejected', errorCode: 'forbidden' })
+    }
+    return await this.#reply(request, { status: 'succeeded' })
+  }
+
   async #handleRevocation(request) {
     let notice
     try {
@@ -647,6 +751,9 @@ export class HostRuntime {
     }
     try {
       const outcome = this.#security.handleRevocation({ notice })
+      for (const deviceId of notice.device_ids ?? []) {
+        this.#authorities.revokeDevice(deviceId)
+      }
       const body = this.#codec.encode('whalerein.v1.RevocationAck', outcome.ack)
       return await this.#reply(request, { status: 'succeeded', resultBody: body })
     } catch (error) {

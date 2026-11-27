@@ -779,6 +779,9 @@ export class ManagedEnrollmentClient {
       mqttUrl: credential.mqttUrl,
       username: credential.username,
       password: credential.password,
+      nodeId: credential.nodeId ?? '',
+      incarnation: credential.incarnation ?? '',
+      authorityPublicKey: credential.authorityPublicKey ?? '',
       accessOrigin: route.accessOrigin,
       region: route.region,
       routeExpiresAt: route.expiresAt,
@@ -1069,6 +1072,9 @@ export class ManagedEnrollmentClient {
       mqttUrl: credential.mqttUrl,
       username: credential.username,
       password: credential.password,
+      nodeId: credential.nodeId ?? '',
+      incarnation: credential.incarnation ?? '',
+      authorityPublicKey: credential.authorityPublicKey ?? '',
       accessOrigin: origin,
       region: payload.region ?? '',
       routeExpiresAt: null,
@@ -1082,6 +1088,21 @@ export class ManagedEnrollmentClient {
 
   #validateCredential(credential) {
     if (credential.hostId !== undefined && credential.hostId !== this.#hostId) fail('forbidden', 'credential Host mismatch')
+    for (const key of ['nodeId', 'incarnation']) {
+      if (credential[key] !== undefined && (typeof credential[key] !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(credential[key]))) {
+        fail('forbidden', `credential ${key} is invalid`)
+      }
+    }
+    if (credential.authorityPublicKey !== undefined && credential.authorityPublicKey !== '') {
+      let decoded
+      if (typeof credential.authorityPublicKey === 'string') {
+        for (const encoding of ['base64url', 'base64']) {
+          const candidate = Uint8Array.from(Buffer.from(credential.authorityPublicKey, encoding))
+          if (candidate.length === 32) { decoded = candidate; break }
+        }
+      }
+      if (!decoded || decoded.length !== 32) fail('forbidden', 'credential authority key is invalid')
+    }
     if (credential.username !== `host:${this.#hostId}`) fail('forbidden', 'credential username is not the Host principal')
     if (typeof credential.password !== 'string' || credential.password === '') fail('forbidden', 'credential is missing')
     const url = credential.mqttUrl

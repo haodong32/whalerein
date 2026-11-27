@@ -1240,7 +1240,7 @@ pub fn render_account_hosts(hosts: &[whalerein_core::api::AccountHost]) -> Strin
     if hosts.is_empty() {
         return "No computers registered to this Cloud workspace.\n".into();
     }
-    let mut out = String::from("HOST ID\tNAME\tHOST STATUS\tDEVICE ACCESS\n");
+    let mut out = String::from("HOST ID\tNAME\tHOST STATUS\tROUTE\tDEVICE ACCESS\n");
     for host in hosts {
         let status = match (host.observation.as_str(), host.enrollment_state.as_str()) {
             ("missing", _) => "not enrolled",
@@ -1256,8 +1256,15 @@ pub fn render_account_hosts(hosts: &[whalerein_core::api::AccountHost]) -> Strin
         } else {
             &host.device_access
         };
+        let route = match host.route.as_ref().map(|route| route.status()) {
+            Some(whalerein_core::api::RouteStatus::Current) => "current",
+            Some(whalerein_core::api::RouteStatus::Stale) => "stale",
+            Some(whalerein_core::api::RouteStatus::Unavailable) => "unavailable",
+            Some(whalerein_core::api::RouteStatus::Denied) => "denied",
+            Some(whalerein_core::api::RouteStatus::None) | None => "-",
+        };
         out.push_str(&format!(
-            "{}\t{}\t{status}\t{}\n",
+            "{}\t{}\t{status}\t{route}\t{}\n",
             sanitize_field(&host.host_id),
             sanitize_field(&host.display_name),
             sanitize_field(access),
@@ -2235,18 +2242,46 @@ mod tests {
         assert_eq!(
             render_account_hosts(&cloud),
             concat!(
-                "HOST ID\tNAME\tHOST STATUS\tDEVICE ACCESS\n",
-                "host-id-1\tComputer\tstatus unavailable\tunavailable\n",
-                "host-id-2\tComputer\tnot enrolled\tunavailable\n",
-                "host-id-3\tOther\tonline\tunavailable\n",
-                "host-id-4\tOther\tenrollment pending\tunavailable\n",
-                "host-id-5\tOther\tdisabled\tunavailable\n",
-                "host-id-6\tOther\toffline\tunavailable\n",
-                "host-id-7\tOther\tstatus unavailable\tunavailable\n",
+                "HOST ID\tNAME\tHOST STATUS\tROUTE\tDEVICE ACCESS\n",
+                "host-id-1\tComputer\tstatus unavailable\t-\tunavailable\n",
+                "host-id-2\tComputer\tnot enrolled\t-\tunavailable\n",
+                "host-id-3\tOther\tonline\t-\tunavailable\n",
+                "host-id-4\tOther\tenrollment pending\t-\tunavailable\n",
+                "host-id-5\tOther\tdisabled\t-\tunavailable\n",
+                "host-id-6\tOther\toffline\t-\tunavailable\n",
+                "host-id-7\tOther\tstatus unavailable\t-\tunavailable\n",
             )
         );
         assert_eq!(json!(cloud)[0]["host_id"], "host-id-1");
         assert!(render_account_hosts(&[]).starts_with("No computers"));
+    }
+
+    #[test]
+    fn account_hosts_render_route_status_without_conflating_denial_and_staleness() {
+        let hosts: Vec<whalerein_core::api::AccountHost> = serde_json::from_value(json!([
+            {"hostId":"host-current", "displayName":"Computer", "enrolled":true, "online":true,
+             "observation":"known", "enrollmentState":"enrollment_ready",
+             "route":{"nodeId":"node-a","routeGeneration":2,"state":"open","directory":"fresh","httpsUrl":"https://a","mqttUrl":"mqtts://a"}},
+            {"hostId":"host-stale", "displayName":"Computer", "enrolled":true, "online":true,
+             "observation":"known", "enrollmentState":"enrollment_ready",
+             "route":{"nodeId":"node-a","routeGeneration":2,"state":"open","directory":"stale","httpsUrl":"https://a","mqttUrl":"mqtts://a"}},
+            {"hostId":"host-denied", "displayName":"Computer", "enrolled":true, "online":true,
+             "observation":"known", "enrollmentState":"enrollment_ready",
+             "route":{"nodeId":"node-a","routeGeneration":2,"state":"open","directory":"fresh","httpsUrl":"https://a","mqttUrl":"mqtts://a","reason":"policy_denied"}}
+        ])).unwrap();
+        let rendered = render_account_hosts(&hosts);
+        assert!(
+            rendered.contains("host-current\tComputer\tonline\tcurrent"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("host-stale\tComputer\tonline\tstale"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("host-denied\tComputer\tonline\tdenied"),
+            "{rendered}"
+        );
     }
 
     #[test]

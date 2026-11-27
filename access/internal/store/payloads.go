@@ -400,19 +400,24 @@ func (s PayloadReadScope) matches(object PayloadObject) bool {
 // same statement. A repeated release deletes nothing and therefore cannot
 // double-release capacity.
 func (s *Store) ReleasePayloadRead(ctx context.Context, objectID, leaseID string) error {
-	_, err := s.poolExec(ctx, `
-		WITH removed AS (
-			DELETE FROM temporary_ciphertext_leases
-			WHERE lease_id = $1 AND object_id = $2
-			RETURNING object_id
-		), released AS (
-			UPDATE temporary_ciphertext_objects
-			SET reader_count = GREATEST(reader_count - 1, 0)
-			WHERE object_id = $2 AND EXISTS (SELECT 1 FROM removed)
-			RETURNING object_id
-		)
-		SELECT count(*) FROM released`, leaseID, objectID)
-	return err
+	tx, err := s.poolBegin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	removed, err := tx.Exec(ctx, `DELETE FROM temporary_ciphertext_leases
+		WHERE lease_id = $1 AND object_id = $2`, leaseID, objectID)
+	if err != nil {
+		return err
+	}
+	if removed.RowsAffected() > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE temporary_ciphertext_objects
+			SET reader_count = max(reader_count - 1, 0)
+			WHERE object_id = $1`, objectID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // CancelPayload closes admission immediately and enqueues cleanup. Repeating a

@@ -6,8 +6,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, StatusCode};
+use ring::signature::Ed25519KeyPair;
 use serde::de::DeserializeOwned;
 use url::Url;
 use whalerein_proto::{
@@ -21,6 +23,30 @@ use crate::access::transport::{TransportBudget, RELAY_EPOCH_V5};
 use crate::api::{error_code_name, CoreError, CoreResult};
 use crate::diagnostics::journal::{request_id_for_log, DiagnosticKind, Diagnostics};
 use crate::util::now_unix_ms;
+
+const SESSION_PROOF_PREFIX: &str = "whalerein/v1/session-proof";
+
+fn session_proof_input(
+    session_id: &str,
+    host_id: &str,
+    device_id: &str,
+    channel_id: &str,
+    transcript_hash: &[u8; 32],
+    issued: i64,
+    expires: i64,
+) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        SESSION_PROOF_PREFIX,
+        session_id,
+        host_id,
+        device_id,
+        channel_id,
+        URL_SAFE_NO_PAD.encode(transcript_hash),
+        issued,
+        expires
+    )
+}
 
 pub const TRACE_HEADER: &str = "x-whalerein-trace-id";
 /// Every raw relay-directory request carries the coordinated relay epoch.
@@ -395,6 +421,74 @@ impl AccessClient {
             });
         }
         result
+    }
+
+    /// Prove possession of the App-session key, bound to the exact Noise
+    /// transcript, and let Access relay it to the Host. A missing proof key
+    /// (legacy/iOS/Android sessions) is a no-op until those flows mint one.
+    pub async fn submit_session_proof(
+        &self,
+        host_id: &str,
+        device_id: &str,
+        channel_id: &str,
+        transcript_hash: &[u8; 32],
+    ) -> Result<(), AccessError> {
+        let Some((session_id, _)) = &self.cloud_session else {
+            return Ok(());
+        };
+        let Some((active_id, proof_key)) =
+            crate::account::native::local_session_proof(&self.cloud_session.as_ref().unwrap().1)
+                .map_err(|_| AccessError::transport("session proof key is unavailable"))?
+        else {
+            return Ok(());
+        };
+        if active_id != *session_id {
+            return Ok(());
+        }
+        let issued = now_unix_ms();
+        let expires = issued + 60_000;
+        let input = session_proof_input(
+            session_id,
+            host_id,
+            device_id,
+            channel_id,
+            transcript_hash,
+            issued,
+            expires,
+        );
+        let document = URL_SAFE_NO_PAD
+            .decode(proof_key)
+            .map_err(|_| AccessError::transport("session proof key is invalid"))?;
+        let pair = Ed25519KeyPair::from_pkcs8(&document)
+            .map_err(|_| AccessError::transport("session proof key is invalid"))?;
+        let signature = pair.sign(input.as_bytes());
+        let body = serde_json::json!({
+            "hostId": host_id,
+            "deviceId": device_id,
+            "channelId": channel_id,
+            "transcriptHash": URL_SAFE_NO_PAD.encode(transcript_hash),
+            "issuedAtUnixMs": issued,
+            "expiresAtUnixMs": expires,
+            "signature": URL_SAFE_NO_PAD.encode(signature.as_ref()),
+        });
+        let url = self.endpoint(&["v1", "sessions", session_id, "proof"])?;
+        let response = self
+            .request(reqwest::Method::POST, url, None)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| AccessError::transport("session proof request failed"))?;
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
+            // Older Access builds do not expose the proof endpoint yet. The
+            // channel still works under Access admission until the coordinated
+            // release turns the Host gate on.
+            return Ok(());
+        }
+        if !status.is_success() {
+            return Err(AccessError::transport("session proof was rejected"));
+        }
+        Ok(())
     }
 
     /// Renew one observation lease. 204 means the Device's grant, session and
@@ -1735,5 +1829,49 @@ mod relay_tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, Some(ErrorCode::Expired));
+    }
+}
+
+#[cfg(test)]
+mod session_proof_tests {
+    use super::*;
+
+    #[test]
+    fn proof_canonical_matches_the_host_contract() {
+        let hash = [0u8; 32];
+        assert_eq!(
+            session_proof_input(
+                "session-1",
+                "host-1",
+                "device-1",
+                "channel-1",
+                &hash,
+                1_700_000_000_000,
+                1_700_000_030_000,
+            ),
+            "whalerein/v1/session-proof|session-1|host-1|device-1|channel-1|AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|1700000000000|1700000030000"
+        );
+    }
+
+    #[test]
+    fn proof_signature_matches_the_host_fixture() {
+        let key = URL_SAFE_NO_PAD
+            .decode("MFECAQEwBQYDK2VwBCIEIEBVX8_htq2WRPytz3dGchBV_l5P71a1KpuAcmnIP6ZygSEAXWqO2VXVBSivN9KHeV_rF-5fFt_FgKfvsPPpM7FJKcs")
+            .unwrap();
+        let pair = Ed25519KeyPair::from_pkcs8(&key).unwrap();
+        let hash = [0u8; 32];
+        let input = session_proof_input(
+            "session-1",
+            "host-1",
+            "device-1",
+            "channel-1",
+            &hash,
+            1_700_000_000_000,
+            1_700_000_030_000,
+        );
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(pair.sign(input.as_bytes()).as_ref()),
+            "3OjP2K7k06XZdOnaCjcz9aXeHNw9Dqea41uUOiei_5U5JNvDIf_Biii4leS6l8sef92yEXlam0IOuGMAFzXeBw"
+        );
     }
 }

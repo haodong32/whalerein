@@ -26,7 +26,7 @@ pub const PROLOGUE_VERSION: &str = "whalerein/v1";
 ///
 /// This list is checked against `proto/v1/error_codes.json` and against the
 /// complete `ErrorCode -> exit code` table in `proto/v1/WIRE.md`.
-pub const ALL_ERROR_CODES: [ErrorCode; 24] = [
+pub const ALL_ERROR_CODES: [ErrorCode; 27] = [
     ErrorCode::Unspecified,
     ErrorCode::InvalidArgument,
     ErrorCode::Unauthorized,
@@ -51,6 +51,9 @@ pub const ALL_ERROR_CODES: [ErrorCode; 24] = [
     ErrorCode::PairingCommittedUnavailable,
     ErrorCode::PairingCommittedUnconfirmed,
     ErrorCode::ChannelReplaced,
+    ErrorCode::RouteStale,
+    ErrorCode::PolicyDenied,
+    ErrorCode::NodeUnavailable,
 ];
 
 /// Stable wire name of an `ErrorCode`.

@@ -32,9 +32,9 @@ func TestDeviceSessionStoreReportsFencedAndCurrentPermission(t *testing.T) {
 			if len(args) != 2 || args[1] != p.Revision {
 				t.Fatal("wrong revocation scope")
 			}
-		} else if len(args) != 9 || args[1] != p.WorkspaceID || args[2] != p.RegionID ||
+		} else if len(args) != 10 || args[1] != p.WorkspaceID || args[2] != p.RegionID ||
 			args[3] != p.DeviceID || args[4] != p.KeyFingerprint || args[5] != p.AuthorityRevision ||
-			args[7] != p.Revision || args[8] != p.ExpiresAt {
+			args[7] != p.Revision || args[8] != p.ExpiresAt || string(args[9].([]byte)) != string(p.ProofPublicKey) {
 			t.Fatal("wrong permit bindings")
 		}
 		return updateTag(updateCount), execErr

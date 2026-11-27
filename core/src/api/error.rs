@@ -451,6 +451,9 @@ pub fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::PairingFenced => "pairing_fenced",
         ErrorCode::PairingCommittedUnavailable => "pairing_committed_unavailable",
         ErrorCode::PairingCommittedUnconfirmed => "pairing_committed_unconfirmed",
+        ErrorCode::RouteStale => "route_stale",
+        ErrorCode::PolicyDenied => "policy_denied",
+        ErrorCode::NodeUnavailable => "node_unavailable",
         ErrorCode::ChannelReplaced => "channel_replaced",
     }
 }
@@ -463,13 +466,14 @@ pub fn error_code_action(code: ErrorCode) -> &'static str {
     match code {
         ErrorCode::Unspecified => "none",
         ErrorCode::InvalidArgument | ErrorCode::PayloadTooLarge => "fix_input",
-        ErrorCode::Unauthorized | ErrorCode::Forbidden => "reauth",
+        ErrorCode::Unauthorized | ErrorCode::Forbidden | ErrorCode::PolicyDenied => "reauth",
         ErrorCode::NotFound | ErrorCode::Conflict => "refresh",
         ErrorCode::Expired
         | ErrorCode::Unavailable
         | ErrorCode::Internal
         | ErrorCode::RateLimited
         | ErrorCode::RevocationsPending
+        | ErrorCode::NodeUnavailable
         | ErrorCode::ApprovalUnavailable => "retry",
         ErrorCode::UnsupportedCapability | ErrorCode::ProtocolVersionIncompatible => "upgrade",
         ErrorCode::PayloadDigestMismatch
@@ -479,6 +483,7 @@ pub fn error_code_action(code: ErrorCode) -> &'static str {
         ErrorCode::SnapshotRequired => "resync",
         ErrorCode::PairingFenced | ErrorCode::PairingCommittedUnavailable => "restart_pairing",
         ErrorCode::PairingCommittedUnconfirmed => "review_pairing",
+        ErrorCode::RouteStale => "refresh",
         ErrorCode::ChannelReplaced => "retry",
     }
 }
@@ -488,12 +493,13 @@ pub fn error_code_exit_code(code: ErrorCode) -> u8 {
     match code {
         ErrorCode::InvalidArgument => 2,
         ErrorCode::NotFound => 3,
-        ErrorCode::Unauthorized | ErrorCode::Forbidden => 4,
-        ErrorCode::Unavailable | ErrorCode::PayloadTooLarge => 5,
+        ErrorCode::Unauthorized | ErrorCode::Forbidden | ErrorCode::PolicyDenied => 4,
+        ErrorCode::Unavailable | ErrorCode::PayloadTooLarge | ErrorCode::NodeUnavailable => 5,
         ErrorCode::Conflict
         | ErrorCode::PairingFenced
         | ErrorCode::PairingCommittedUnavailable
         | ErrorCode::PairingCommittedUnconfirmed
+        | ErrorCode::RouteStale
         | ErrorCode::ChannelReplaced
         | ErrorCode::PayloadDigestMismatch
         | ErrorCode::ApprovalVersionMismatch
@@ -538,6 +544,9 @@ mod tests {
             (ErrorCode::Unavailable, 5),
             (ErrorCode::Conflict, 8),
             (ErrorCode::ChannelReplaced, 8),
+            (ErrorCode::RouteStale, 8),
+            (ErrorCode::PolicyDenied, 4),
+            (ErrorCode::NodeUnavailable, 5),
             (ErrorCode::PayloadDigestMismatch, 8),
             (ErrorCode::ApprovalAlreadyResolved, 8),
             (ErrorCode::Expired, 7),

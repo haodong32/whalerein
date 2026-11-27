@@ -47,8 +47,9 @@ type QueryHandler interface {
 	CancelAll()
 }
 
-// ReadyHandler runs host readiness work (revocation replay).
-type ReadyHandler func(ctx context.Context, hostID string) error
+// ReadyHandler runs host readiness work (revocation replay and route
+// attachment). It receives the validated HostReady body.
+type ReadyHandler func(ctx context.Context, hostID string, ready *whalereinv1.HostReady) error
 
 // HostKeyHandler stores the Ed25519 public key carried by HostReady.
 type HostKeyHandler func(ctx context.Context, hostID string, publicKey []byte) error
@@ -652,7 +653,7 @@ func (s *Service) handleReady(result *whalereinv1.HostResult) {
 	go func() {
 		ctx, cancel := context.WithTimeout(s.baseContext(), 60*time.Second)
 		defer cancel()
-		if err := handler(ctx, hostID); err != nil {
+		if err := handler(ctx, hostID, &ready); err != nil {
 			s.metrics.RouteError()
 			s.logger.Warn("host readiness handling failed", "host", s.masker.Host(hostID), "error", err.Error())
 		}

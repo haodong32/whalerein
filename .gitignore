@@ -50,6 +50,9 @@ certs/
 #   Cargo.lock, go.sum, uv.lock, package-lock.json
 #   deploy/**/*.example and *.template
 
+# Local Access backup binary built during acceptance.
+/access/backup
+
 # Native plugin build output.
 deploy/mosquitto/plugin/*.so
 

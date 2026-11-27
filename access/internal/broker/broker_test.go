@@ -460,7 +460,7 @@ func TestHostReadyRegistersHostAndUpdatesPresence(t *testing.T) {
 	// The line readiness hook establishes broker state before host traffic.
 	service.Presence().ApplySnapshot(nil, 0)
 	ready := make(chan string, 1)
-	service.SetReadyHandler(func(_ context.Context, hostID string) error {
+	service.SetReadyHandler(func(_ context.Context, hostID string, _ *whalereinv1.HostReady) error {
 		ready <- hostID
 		return errors.New("replay failed")
 	})
@@ -710,7 +710,7 @@ func TestPublishDeviceEventReturnsBrokerFailure(t *testing.T) {
 func TestReadyUsesBaseContextWhenRequestContextIsNil(t *testing.T) {
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{newFakeSession()}})
 	ready := make(chan struct{}, 1)
-	service.SetReadyHandler(func(context.Context, string) error {
+	service.SetReadyHandler(func(context.Context, string, *whalereinv1.HostReady) error {
 		ready <- struct{}{}
 		return nil
 	})
@@ -859,7 +859,7 @@ func TestReadyHandlerRunsOnlyForAnEmptyRequestIDHostReady(t *testing.T) {
 	service := testService(t, &fakeConnector{sessions: []*fakeSession{newFakeSession()}})
 	service.Presence().ApplySnapshot(nil, 0)
 	ready := make(chan string, 2)
-	service.SetReadyHandler(func(_ context.Context, hostID string) error {
+	service.SetReadyHandler(func(_ context.Context, hostID string, _ *whalereinv1.HostReady) error {
 		ready <- hostID
 		return nil
 	})

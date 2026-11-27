@@ -92,7 +92,7 @@ def isolated_keyring(tmp_path):
         )
         keyring.child.stdin.write(uuid.uuid4().hex)
         keyring.child.stdin.close()
-        wait(unlocked_default_collection, timeout=10, process=keyring)
+        wait(unlocked_default_collection, timeout=30, process=keyring)
         yield env
     finally:
         if keyring is not None:

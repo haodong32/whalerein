@@ -4,7 +4,7 @@ mode: standalone
 listen: "0.0.0.0:8080"
 internal_listen: "0.0.0.0:8081"
 public_url: "http://127.0.0.1:8080"
-database_url: "${WHALEREIN_DATABASE_URL}"
+database_path: "${WHALEREIN_DATABASE_PATH:-/var/lib/whalerein/data/access.db}"
 admin_token: "${WHALEREIN_ADMIN_TOKEN}"
 host_provisioning_token: "${WHALEREIN_HOST_PROVISIONING_TOKEN}"
 

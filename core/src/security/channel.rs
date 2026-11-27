@@ -251,6 +251,8 @@ pub fn request_kind_name(kind: RequestKind) -> &'static str {
         RequestKind::Revocation => "REQUEST_KIND_REVOCATION",
         RequestKind::HostClients => "REQUEST_KIND_HOST_CLIENTS",
         RequestKind::AccessReady => "REQUEST_KIND_ACCESS_READY",
+        RequestKind::Authority => "REQUEST_KIND_AUTHORITY",
+        RequestKind::SessionProof => "REQUEST_KIND_SESSION_PROOF",
     }
 }
 

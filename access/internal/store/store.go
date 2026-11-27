@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -70,6 +71,11 @@ type database interface {
 type Store struct {
 	db      database
 	control database
+	// sqlite selects the node-local schema and migration ledger. A Store
+	// opened through NewWithPool keeps the PostgreSQL fixture behavior used by
+	// migration tests; no runtime configuration can select it.
+	sqlite bool
+	busy   atomic.Uint64
 }
 
 // newStore binds a storage seam. Tests use it to install a scripted database.
@@ -124,11 +130,11 @@ func dataPoolSize(configured int32) int32 {
 // Open parses a DSN, opens separate data and control pools, and verifies
 // connectivity. The DSN controls the data pool; a bounded control pool is
 // opened from the same DSN so control writes never queue behind data reads.
-func Open(ctx context.Context, databaseURL string) (*Store, error) {
+func openPostgres(ctx context.Context, databaseURL string) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		// pgx parse errors can include user-supplied connection identity.
-		return nil, errors.New("parse database_url: invalid connection configuration")
+		return nil, errors.New("parse database_path: invalid connection configuration")
 	}
 	cfg.MaxConns = dataPoolSize(cfg.MaxConns)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
@@ -168,7 +174,7 @@ func (s *Store) Control() *Store {
 	if s == nil || s.control == nil {
 		return s
 	}
-	return &Store{db: s.control}
+	return &Store{db: s.control, sqlite: s.sqlite}
 }
 
 // Close releases both connection pools.
@@ -179,7 +185,7 @@ func (s *Store) Close() {
 	if s.db != nil {
 		s.db.Close()
 	}
-	if s.control != nil {
+	if s.control != nil && s.control != s.db {
 		s.control.Close()
 	}
 }
@@ -204,6 +210,9 @@ func (s *Store) Pool() *pgxpool.Pool {
 // Migrate applies checksummed migrations once under a transaction-scoped lock.
 // Existing unversioned installations are adopted without deleting their state.
 func (s *Store) Migrate(ctx context.Context) error {
+	if s != nil && s.sqlite {
+		return s.migrateSQLite(ctx)
+	}
 	return migrate(ctx, s.poolBegin)
 }
 

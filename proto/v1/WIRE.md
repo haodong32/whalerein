@@ -499,6 +499,23 @@ not treat it as a business request. This is how the Host obtains the middle-hop
 budget; `ChannelHello.receive` supplies the Device budget used for preview
 splitting. A Device cannot submit `REQUEST_KIND_ACCESS_READY`.
 
+### Host route attachment
+
+A managed Host announces its serving node in the `HostCredential` it receives
+at enrollment (`node_id`, `incarnation`). It keeps a durable monotonic
+`route_generation`, increments it before each runtime start, and adds a proof to
+`HostReady`: `route_generation`, `route_challenge`, `route_signed_at_unix_ms`,
+`route_signature`, `route_service`, `route_environment`,
+`route_signing_public_key` and `route_noise_public_key`.
+
+The signature is Ed25519 over the UTF-8 canonical string
+`whalerein/v1/host-route|attach|service|environment|host_id|node_id|incarnation|challenge|generation|base64url(noise_public_key)|signed_at_unix_ms`.
+Access verifies the announced keys against the Host enrollment, fills its own
+node identity and forwards `HostRouteAttach` to Central. Central re-verifies the
+signature and owns the route decision; Access never invents or caches one. A
+`HostReady` without route fields is still accepted for older Hosts but creates
+no managed route.
+
 ### Result notices
 
 Access commits durable notice intent in the same transaction as the
@@ -941,6 +958,9 @@ and Host mappings and must stay identical to it.
 | `pairing_fenced` | 8 | `restart_pairing` | The unfinished pairing intent can no longer commit. |
 | `pairing_committed_unavailable` | 8 | `restart_pairing` | The FINISH committed but its grant is gone; pair again. |
 | `pairing_committed_unconfirmed` | 8 | `review_pairing` | The FINISH committed but Host confirmation is unavailable. |
+| `route_stale` | 8 | `refresh` | The serving route is closed or superseded; refresh the directory and retry on the current node. |
+| `policy_denied` | 4 | `reauth` | Current managed policy denies this exact scope; do not retry on another node. |
+| `node_unavailable` | 5 | `retry` | The authenticated node is not accepting placements or has no current Host authority. |
 | `channel_replaced` | 8 | `retry` | The Host replaced the channel that owned the observation. |
 
 `upgrade` is terminal for the current attempt: a client must surface an upgrade
@@ -1606,3 +1626,51 @@ its in-process invitation serialization before its own deadline fails with
 `conflict` (HTTP 409) and changes no durable state; it never reports a Host
 transport failure. The Core CLI maps `unavailable` to exit 5 and `conflict` to
 exit 8.
+
+## Independent Access nodes
+
+One Access node serves one Host at a time. Central owns the durable route row,
+node health and bounded managed authority; an Access node owns its local SQLite
+database, temporary ciphertext and local Mosquitto broker. Node control messages
+carry metadata only and never contain request bodies, prompts, results or
+temporary ciphertext.
+
+- **Node report.** Access sends `NodeReport` every 10 seconds with a strictly
+  increasing sequence for its incarnation. Central uses its own receipt time.
+  A duplicate or stale sequence does not refresh health. At 30 seconds without
+  a fresh report Central excludes the node from new placements.
+- **Drain.** An operator marks one live incarnation drained through
+  `NodeDrain` with the node credential. A drained node keeps its established
+  routes but is never advertised for a new placement; a heartbeat does not
+  clear the flag. Resume only after the node is healthy again.
+- **Attach.** The Host increments a persistent generation before starting an
+  attachment. Access forwards `HostRouteAttach` with proof that it observed an
+  authenticated Host transport and the Host signature over the exact service,
+  environment, Host, node, incarnation, generation, challenge and keys. Central
+  returns `committed`, `idempotent`, `route_stale` or `conflict`. A greater
+  proved generation replaces the route; an equal open tuple is idempotent; a
+  closed or lower generation is stale and never reopens.
+- **Close.** A graceful Host shutdown publishes `HostReady{route_closing=true}`
+  with the same attach proof; Access forwards the exact tuple as
+  `HostRouteClose`. A transient disconnect does not close the route, so the same
+  process can reattach without a new generation. `HostRouteClose` for a
+  generation at or above the high-water mark
+  persists a terminal closed row even when its attach has not arrived. A close
+  for a greater generation needs the same Host proof as an attach. A forged
+  close changes nothing. Duplicate closes are idempotent.
+- **Discovery.** Only an open route is advertised. A directory answer reports
+  the node address, route generation and Central freshness separately from the
+  endpoint's local liveness. A stale hint never grants access.
+- **Authority.** `ScopedAuthority` binds issuer, environment, workspace, Host,
+  Device, App session, both grant generations, serving node, route generation,
+  the immutable App-session proof key, policy revision and an absolute expiry
+  of at most 60 seconds from Central confirmation. Access and Host verify the
+  signature, scope, node and expiry independently. A renewal never replaces the
+  proof key or extends beyond the committed maximum.
+- **Revocation.** Central records the revocation first and refuses issuance
+  under the affected revision. The `RevocationStatus` state is
+  `pending_enforcement` until the frozen maximum affected deadline and
+  `effective` afterwards. Node acknowledgements record delivery progress only.
+- **Denial vocabulary.** `route_stale` means the directory may supply a newer
+  route and a Device may retry on the current node; `policy_denied` is terminal
+  for the scope and must never trigger a retry elsewhere.

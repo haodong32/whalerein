@@ -38,11 +38,11 @@ func relayRequestFixture(t *testing.T, s *store.Store, requestID string, now tim
 // TestRequestReferenceAndNoticeIntentRoundTrip stores an epoch-4 body and
 // result reference and records one durable, coalesced notice intent.
 func TestRequestReferenceAndNoticeIntentRoundTrip(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	seedDevice(t, s, "host", "device")
 	// PostgreSQL keeps microseconds; truncate so the exact stored deadline is
 	// comparable with a value read back from the row.
-	now := time.Now().UTC().Truncate(time.Microsecond)
+	now := time.Now().UTC().Truncate(time.Millisecond)
 	row := relayRequestFixture(t, s, "r1", now)
 	outcome, err := s.CreateRequest(context.Background(), row)
 	if err != nil || !outcome.Created {
@@ -94,11 +94,11 @@ func TestRequestReferenceAndNoticeIntentRoundTrip(t *testing.T) {
 // TestNoticeIntentCoalescesIntermediateStateAndKeepsTerminal keeps only the
 // newest state pending and refuses to mark an older status published.
 func TestNoticeIntentCoalescesIntermediateStateAndKeepsTerminal(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	seedDevice(t, s, "host", "device")
 	// PostgreSQL keeps microseconds; truncate so the exact stored deadline is
 	// comparable with a value read back from the row.
-	now := time.Now().UTC().Truncate(time.Microsecond)
+	now := time.Now().UTC().Truncate(time.Millisecond)
 	row := relayRequestFixture(t, s, "r1", now)
 	if _, err := s.CreateRequest(context.Background(), row); err != nil {
 		t.Fatal(err)
@@ -136,11 +136,11 @@ func TestNoticeIntentCoalescesIntermediateStateAndKeepsTerminal(t *testing.T) {
 // TestHeartbeatRenewsOnlyExactLiveRequestAndNeverExtendsDeadline renews only
 // the exact live Device request and never extends its hard deadline.
 func TestHeartbeatRenewsOnlyExactLiveRequestAndNeverExtendsDeadline(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	seedDevice(t, s, "host", "device")
 	// PostgreSQL keeps microseconds; truncate so the exact stored deadline is
 	// comparable with a value read back from the row.
-	now := time.Now().UTC().Truncate(time.Microsecond)
+	now := time.Now().UTC().Truncate(time.Millisecond)
 	row := relayRequestFixture(t, s, "r1", now)
 	if _, err := s.CreateRequest(context.Background(), row); err != nil {
 		t.Fatal(err)
@@ -191,11 +191,11 @@ func TestHeartbeatRenewsOnlyExactLiveRequestAndNeverExtendsDeadline(t *testing.T
 // TestPublishExhaustionRecordsNoticeIntent records a durable notice intent
 // when publication retries are exhausted.
 func TestPublishExhaustionRecordsNoticeIntent(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	seedDevice(t, s, "host", "device")
 	// PostgreSQL keeps microseconds; truncate so the exact stored deadline is
 	// comparable with a value read back from the row.
-	now := time.Now().UTC().Truncate(time.Microsecond)
+	now := time.Now().UTC().Truncate(time.Millisecond)
 	row := relayRequestFixture(t, s, "r1", now)
 	row.CommandID = ""
 	row.Kind = whalereinv1.RequestKind_REQUEST_KIND_QUERY

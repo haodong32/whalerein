@@ -4,6 +4,7 @@
 // result/event control topics plus the QoS 0 live topic.
 
 import { readFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import mqtt from 'mqtt'
 import { ConfigError, topics, PROTOCOL_VERSION } from '../config.js'
 import { PluginError } from '../errors.js'
@@ -11,6 +12,7 @@ import { emitFact } from '../observation/index.js'
 import { RelayTransport } from './transport.js'
 import { publishPacketBytes } from './packet.js'
 import { RelayObjectClient } from './relay-client.js'
+import { signRouteAttach } from './route.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import {
   BROKER_PACKET_LIMIT_BYTES,
@@ -107,6 +109,12 @@ export class MqttAccess {
    * @param {object} [options.logger]
    * @param {() => number} [options.now]
    * @param {Uint8Array} [options.authorizationPublicKey] Ed25519 public key announced in HostReady.
+   * @param {string} [options.routeNodeId] serving node issued with the credential.
+   * @param {string} [options.routeIncarnation] serving node incarnation.
+   * @param {string} [options.routeService] managed service identity.
+   * @param {string} [options.routeEnvironment] managed environment.
+   * @param {number} [options.routeGeneration] durable monotonic route generation.
+   * @param {Uint8Array} [options.routeNoisePublicKey] Host Noise public key.
    * @param {import('../protocol.js').ProtoCodec} [options.codec]
    * @param {string|object} [options.transportProfile] packaged profile id or budget.
    */
@@ -116,6 +124,12 @@ export class MqttAccess {
     token,
     authorizationPublicKey = null,
     authorizationPrivateKey = null,
+    routeNodeId = '',
+    routeIncarnation = '',
+    routeService = '',
+    routeEnvironment = '',
+    routeGeneration = 0,
+    routeNoisePublicKey = null,
     accessOrigin = '',
     relayClient = null,
     relayObjectTtlMs,
@@ -133,6 +147,15 @@ export class MqttAccess {
     this.authorizationPublicKey = authorizationPublicKey instanceof Uint8Array && authorizationPublicKey.length === 32
       ? authorizationPublicKey
       : null
+    this.authorizationPrivateKey = authorizationPrivateKey instanceof Uint8Array ? authorizationPrivateKey : null
+    this.route = {
+      nodeId: typeof routeNodeId === 'string' ? routeNodeId : '',
+      incarnation: typeof routeIncarnation === 'string' ? routeIncarnation : '',
+      service: typeof routeService === 'string' ? routeService : '',
+      environment: typeof routeEnvironment === 'string' ? routeEnvironment : '',
+      generation: Number.isSafeInteger(routeGeneration) && routeGeneration > 0 ? routeGeneration : 0,
+      noisePublicKey: routeNoisePublicKey instanceof Uint8Array && routeNoisePublicKey.length === 32 ? routeNoisePublicKey : null,
+    }
     this.url = url
     this.hostId = hostId
     this.token = token
@@ -304,6 +327,12 @@ export class MqttAccess {
   }
 
   async stop() {
+    // A graceful shutdown closes the exact open route. A transport loss does
+    // not call this path, so the same process may reattach after a transient
+    // disconnect without minting a new generation.
+    if (this.#connected && this.route.generation > 0) {
+      try { await this.#publishReady({ closing: true }) } catch { /* best effort */ }
+    }
     this.#stopped = true
     this.#connected = false
     this.#generation++
@@ -520,7 +549,7 @@ export class MqttAccess {
     await this.#publishReady()
   }
 
-  async #publishReady() {
+  async #publishReady({ closing = false } = {}) {
     const receive = this.receiveAdvertisement()
     const ready = {
       host_id: this.hostId,
@@ -529,6 +558,26 @@ export class MqttAccess {
       relay_version: RELAY_VERSION,
     }
     if (this.authorizationPublicKey) ready.authorization_public_key = this.authorizationPublicKey
+    if (closing) ready.route_closing = true
+    const route = this.route
+    if (route.generation > 0 && route.nodeId && route.incarnation && route.service && route.environment &&
+        route.noisePublicKey && this.authorizationPrivateKey) {
+      const signedAtUnixMs = this.now()
+      const challenge = randomBytes(16).toString('hex')
+      const tuple = {
+        service: route.service, environment: route.environment, hostId: this.hostId,
+        nodeId: route.nodeId, incarnation: route.incarnation, challenge,
+        generation: route.generation, noiseKey: route.noisePublicKey, signedAtUnixMs,
+      }
+      ready.route_generation = route.generation
+      ready.route_challenge = challenge
+      ready.route_signed_at_unix_ms = signedAtUnixMs
+      ready.route_signature = signRouteAttach(this.authorizationPrivateKey, tuple)
+      ready.route_service = route.service
+      ready.route_environment = route.environment
+      ready.route_signing_public_key = this.authorizationPublicKey ?? new Uint8Array()
+      ready.route_noise_public_key = route.noisePublicKey
+    }
     const body = this.codec.encode('whalerein.v1.HostReady', ready)
     const result = this.codec.encode('whalerein.v1.HostResult', {
       host_id: this.hostId,

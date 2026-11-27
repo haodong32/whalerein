@@ -4,8 +4,9 @@
 
 Access is a Go monolith for transport authorization, pairing registration,
 durable command status copies, transient query correlation, and encrypted
-relay. PostgreSQL owns durable server state; the pinned Mosquitto 2.1.4 line
-(with the WhaleRein broker plugin) supplies transport and connection facts.
+relay. One local SQLite database owns durable server state; the pinned
+Mosquitto 2.1.4 line (with the WhaleRein broker plugin) supplies transport and
+connection facts. No other Access node shares either resource.
 
 Access implements Standalone mode in one process with installation-scoped resources.
 External account mode, separate API/relay deployments and regional automation
@@ -32,8 +33,8 @@ Unknown modes fail configuration validation; there is no external-account fallba
 httpapi -> auth, pairing, requests, payload
 pairing / requests / events -> store, broker
 payload -> store, quota directory
-store -> PostgreSQL
-broker -> Mosquitto plugin
+store -> local SQLite
+broker -> local Mosquitto plugin
 ```
 
 Handlers do not access SQL/MQTT directly. `cmd/server` wires callbacks;
@@ -73,7 +74,7 @@ There is no silent fallback from system verification to custom roots.
 
 ## Persistence
 
-| PostgreSQL table | Contents |
+| Local SQLite table | Contents |
 |---|---|
 | `hosts` | Host identity, protocol metadata, pinned authorization public key. |
 | `external_enrollments` | Current generation, keys, broker credential hash, operation and disabled state. |
@@ -90,9 +91,11 @@ There is no silent fallback from system verification to custom roots.
 | `temporary_ciphertext_objects` | Node-owned temporary ciphertext reservation, scope, state, exact length/digest, hard expiry, reader count, cleanup retries and grant fence revisions. |
 | `temporary_ciphertext_leases` | Idempotent reader leases that keep capacity charged until close. |
 
-Application tables use checksummed, apply-once migrations under an advisory lock.
-Unversioned installations are adopted without deletion; changed historical
-migrations or a database with unknown newer migrations prevent startup.
+Application tables use one checksummed, apply-once SQLite schema. A changed
+checksum or a database with an unknown newer migration prevents startup. One
+serialized writer, WAL, foreign keys and full synchronous commits keep local
+transactions short; a busy or full disk is a retryable failure, never a durable
+receipt.
 A partial unique `(host_id, device_id, command_id)` index enforces control dedupe.
 Forwarding work stays on the request row; revocation replay stays on the grant.
 Temporary ciphertext capacity is charged from reservation until successful file
@@ -101,17 +104,15 @@ per-host and per-node limits, and only a committed object is readable.
 Migrations remove the former fixed `local` workspace table and the duplicate
 `devices.auth_hash`; no account/tenant model is pre-installed in Standalone mode.
 
-### Connection pools
+### Storage envelope
 
-Access opens two PostgreSQL pools from the same DSN. The data pool serves
-history, relay, payload and ordinary request work and has a floor of 16
-connections; a larger `pool_max_conns` in the DSN is respected. A separate
-four-connection control pool serves pairing and authentication, so a saturated
-data pool cannot make a new Host pairing wait behind history pages or an
-attachment transfer. The control pool is deliberately small: it isolates the
-control plane instead of letting it grow with data concurrency. This is why the
-mixed-load case can run four history readers and one attachment reader while a
-Host still completes `host connect` within its deadline.
+Access opens one SQLite connection with a bounded busy timeout. WAL keeps reads
+from blocking a committed write, and the single writer serializes pairing,
+revocation and request transitions. Pairing and authentication share that
+connection budget; the design accepts serialized control writes rather than
+running a second database backend. Disk-full, locked and corrupt conditions are
+reported as typed retryable failures, and a snapshot is taken only with
+`VACUUM INTO` while the process is stopped.
 
 An external enrollment is a stable Host id plus a generation. Removing a
 generation disables it and revokes its grants; a fresh approval may re-enable
@@ -226,7 +227,7 @@ independent and stronger than transport or lease liveness.
 ## Temporary ciphertext storage
 
 Oversized relay payloads and attachment parts use one dedicated quota directory
-per Access node. PostgreSQL records the opaque object id, owning node/owner,
+per Access node. SQLite records the opaque object id, owning node/owner,
 complete scope (host, optional device/session/channel, exactly one request,
 message or event identity, purpose and part), the request, enrollment
 generation and Broker connection reference for a query-scoped result, grant
@@ -265,7 +266,7 @@ and saves the confirmed FINISH and Host pin in SecretStore before transmission.
 The Host verifies the forwarded credential hash against FINISH and durably stages
 its exact replay binding. FINISH/AUTHORIZE stage Host peer metadata. Access
 atomically consumes the invitation, writes the pinned device/grant, persists a
-token-free operation receipt and queues an idempotent COMMIT in the PostgreSQL
+token-free operation receipt and queues an idempotent COMMIT in the SQLite
 outbox. The grant's
 monotonic `grant_generation` increments in that transaction; direct delivery and
 the durable COMMIT carry exactly that generation. Failed repair
@@ -363,7 +364,7 @@ supply only one of them. This convention must ship with the plugin probe client;
 old Access versions reject it. Successful login proves credential acceptance,
 not the normal host's topic permissions or protocol execution.
 
-`/healthz` reports liveness; `/readyz` requires PostgreSQL and subscribed MQTT;
+`/healthz` reports liveness; `/readyz` requires the local SQLite write probe and subscribed MQTT;
 `/metrics` exposes bounded labels. Public routes are defined in
 [`server.go`](../../access/internal/httpapi/server.go); encoding is defined by the
 [wire contract](../../proto/v1/WIRE.md).

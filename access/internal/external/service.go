@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/store"
@@ -90,6 +91,24 @@ var (
 type Option func(*Service)
 
 // WithHostEnforcer wires the realtime enforcement used by Host removal.
+// WithNodeIdentity binds issued Host credentials to this serving node. A Host
+// signs route attachments with these values so Central can bind the proof to
+// the node connection that submitted it.
+func WithAuthorityPublicKey(key []byte) Option {
+	return func(s *Service) {
+		if len(key) == ed25519.PublicKeySize {
+			s.authorityPublicKey = append([]byte(nil), key...)
+		}
+	}
+}
+
+func WithNodeIdentity(nodeID, incarnation string) Option {
+	return func(service *Service) {
+		service.nodeID = nodeID
+		service.incarnation = incarnation
+	}
+}
+
 func WithHostEnforcer(enforcer HostEnforcer) Option {
 	return func(service *Service) { service.enforcer = enforcer }
 }
@@ -100,17 +119,22 @@ type Service struct {
 	sessionEnforcer      DeviceSessionEnforcer
 	requireDeviceSession bool
 
-	trust            Trust
-	store            Store
-	mqttURL          string
-	enforcer         HostEnforcer
-	now              func() time.Time
-	devicePairing    DevicePairing
-	deviceGrants     DeviceGrantStore
-	deviceEnforcer   DeviceGrantEnforcer
-	hostClientGrants HostClientGrants
-	hostClientProbe  HostClientProbe
-	hostPresence     HostPresence
+	trust              Trust
+	store              Store
+	mqttURL            string
+	nodeID             string
+	incarnation        string
+	authorityPublicKey []byte
+	enforcer           HostEnforcer
+	now                func() time.Time
+	devicePairing      DevicePairing
+	deviceGrants       DeviceGrantStore
+	deviceEnforcer     DeviceGrantEnforcer
+	hostClientGrants   HostClientGrants
+	hostClientProbe    HostClientProbe
+	hostPresence       HostPresence
+	proofMu            sync.Mutex
+	sessionProofs      map[string]*whalereinv1.SessionProof
 }
 
 // New constructs the service.
@@ -227,10 +251,13 @@ func (s *Service) EnrollHost(ctx context.Context, request *whalereinv1.HostEnrol
 	response := &whalereinv1.HostEnrollmentResponse{Status: enrollmentStatus(recording)}
 	if committed {
 		response.Credential = &whalereinv1.HostCredential{
-			HostId:   recording.HostID,
-			MqttUrl:  s.mqttURL,
-			Username: "host:" + recording.HostID,
-			Password: credential,
+			HostId:             recording.HostID,
+			MqttUrl:            s.mqttURL,
+			Username:           "host:" + recording.HostID,
+			Password:           credential,
+			NodeId:             s.nodeID,
+			Incarnation:        s.incarnation,
+			AuthorityPublicKey: append([]byte(nil), s.authorityPublicKey...),
 		}
 	}
 	return response, nil

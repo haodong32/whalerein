@@ -45,7 +45,7 @@ func integrationPayloadConfig(root string) payload.Config {
 
 func TestIntegrationReserveFetchAndRevokeFence(t *testing.T) {
 	ctx := context.Background()
-	db, _ := storetest.New(t)
+	db, _ := storetest.NewSQLite(t)
 	if _, err := db.EnsureHost(ctx, "host-1"); err != nil {
 		t.Fatal(err)
 	}

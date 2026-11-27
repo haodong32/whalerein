@@ -122,6 +122,8 @@ function createFetch({ metadata = metadataDocument(), pollReply = 'approved', op
           mqttUrl: 'mqtts://broker.example:8883',
           username: `host:${authorization.hostId}`,
           password: 'recovered-password',
+          nodeId: 'node-a',
+          incarnation: 'inc-1',
         },
       })
     }
@@ -143,6 +145,8 @@ function createFetch({ metadata = metadataDocument(), pollReply = 'approved', op
           mqttUrl: 'mqtts://broker.example:8883',
           username: `host:${intentBody.hostId}`,
           password: 'broker-password',
+          nodeId: 'node-a',
+          incarnation: 'inc-1',
         },
       })
     }
@@ -307,6 +311,12 @@ test('startConnect runs create, poll, proof-bound enrollment and real readiness 
     assert.equal(f.mqtts[0].options.accessOrigin, 'https://access.example')
     assert.ok(f.mqtts[0].options.authorizationPrivateKey instanceof Uint8Array)
     assert.equal(f.mqtts[0].options.authorizationPublicKey?.length, 32)
+    assert.equal(f.mqtts[0].options.routeNodeId, 'node-a')
+    assert.equal(f.mqtts[0].options.routeIncarnation, 'inc-1')
+    assert.equal(f.mqtts[0].options.routeGeneration, 1)
+    assert.equal(f.mqtts[0].options.routeService, 'official-production')
+    assert.equal(f.mqtts[0].options.routeEnvironment, 'production')
+    assert.equal(f.mqtts[0].options.routeNoisePublicKey?.length, 32)
     assert.equal(f.runtimes.length, 1)
     assert.equal(f.runtimes[0].started, true)
     // Secrets never appear in snapshots or details.

@@ -26,25 +26,21 @@ from journey_helpers import (
 
 pytestmark = pytest.mark.chain
 
-_REQUEST_COLUMNS = (
-    "'request_id',request_id,'status',status,'forward_state',forward_state,"
-    "'attempts',forward_attempts,'published_once',published_once,"
-    "'error_code',coalesce(error_code,0)"
-)
-
-
 def _command_row(scenario, request_id=None):
     """Read the durable Access request copy, the only allowed status evidence."""
     clause = f"request_id='{request_id}'" if request_id else "kind=3"
-    raw = sql(
-        scenario.schema,
-        "SELECT json_build_object("
-        + _REQUEST_COLUMNS
-        + f") FROM {scenario.schema}.requests WHERE {clause}"
-        " ORDER BY created_at DESC LIMIT 1",
+    rows = scenario.query(
+        "SELECT request_id,status,forward_state,forward_attempts,published_once,"
+        "coalesce(error_code,0) FROM requests WHERE " + clause +
+        " ORDER BY created_at DESC LIMIT 1"
     )
-    # psql also prints the leading SET command tag; only a JSON row counts.
-    return json.loads(raw) if raw.startswith("{") else None
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "request_id": row[0], "status": row[1], "forward_state": row[2],
+        "attempts": row[3], "published_once": row[4], "error_code": row[5],
+    }
 
 
 def _session(scenario, device):
@@ -63,9 +59,8 @@ def _retry_due_while_offline(scenario, request_id):
     row = _command_row(scenario, request_id)
     if row["status"] == "host_offline":
         return True
-    sql(
-        scenario.schema,
-        f"UPDATE {scenario.schema}.requests SET forward_after = now() "
+    scenario.sql(
+        "UPDATE requests SET forward_after=(unixepoch()*1000) "
         f"WHERE request_id='{request_id}' AND status='received'",
     )
     return False
@@ -105,7 +100,7 @@ def test_published_command_survives_offline_retry(scenario, paired_device):
         assert row["status"] == "received"
         assert row["attempts"] == 1
         assert row["error_code"] == 0
-        assert effects(scenario, "sendUserMessage") == before + 1
+        wait(lambda: effects(scenario, "sendUserMessage") == before + 1, timeout=10)
 
         # The Host disconnects before it can confirm the receipt. Access keeps
         # the published-but-still-received row until its retry becomes due.
@@ -116,7 +111,7 @@ def test_published_command_survives_offline_retry(scenario, paired_device):
         assert closed["status"] == "host_offline"
         assert closed["forward_state"] == "none"
         assert closed["attempts"] >= 2
-        assert closed["published_once"] is True
+        assert closed["published_once"] in (True, 1)
         assert effects(scenario, "sendUserMessage") == before + 1
     finally:
         # A failed assertion must not leave the submitting CLI running.
@@ -182,7 +177,7 @@ def test_ambiguous_publish_recovers_authenticated_outcome(scenario, paired_devic
         # claimed to have had no effect.
         assert row["status"] == "unknown"
         assert row["error_code"] == 18  # whalerein.v1.ErrorCode.unavailable
-        assert row["published_once"] is False
+        assert row["published_once"] in (False, 0)
         assert row["attempts"] == 3
         pending = pending_commands(paired_device)
         assert [entry["request_id"] for entry in pending] == [request_id]

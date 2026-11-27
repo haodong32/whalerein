@@ -150,3 +150,110 @@ func TestHostClientsWithoutPresenceSourceReportsUnavailable(t *testing.T) {
 		t.Fatalf("missing presence source = %+v, err=%v", got, err)
 	}
 }
+
+func TestPublishAuthorityWaitsForHostAcceptance(t *testing.T) {
+	var sent *whalereinv1.ScopedAuthority
+	fixture := &hostClientsFixture{observe: func(request *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+		if request.GetKind() != whalereinv1.RequestKind_REQUEST_KIND_AUTHORITY || request.GetHostId() != "host-1" ||
+			request.GetDeviceId() != "device-1" || request.GetRequestId() == "" || request.GetExpiresAtUnixMs() == 0 {
+			t.Fatalf("authority request = %v", request)
+		}
+		sent = &whalereinv1.ScopedAuthority{}
+		if err := proto.Unmarshal(request.GetBody(), sent); err != nil {
+			t.Fatal(err)
+		}
+		return &whalereinv1.HostResult{
+			RequestId: request.GetRequestId(), HostId: "host-1",
+			Status: whalereinv1.OnlineStatus_succeeded,
+		}, nil
+	}}
+	service := &Service{hostClientProbe: fixture, now: func() time.Time { return time.Unix(1, 0) }}
+	permit := &whalereinv1.ScopedAuthority{AuthorityId: "authority-1", HostId: "host-1", DeviceId: "device-1", SessionId: "session-1"}
+	if err := service.PublishAuthority(context.Background(), "host-1", permit); err != nil {
+		t.Fatal(err)
+	}
+	if sent.GetAuthorityId() != "authority-1" || sent.GetSessionId() != "session-1" {
+		t.Fatalf("sent authority = %#v", sent)
+	}
+	if err := service.PublishAuthority(context.Background(), "host-1", nil); !errors.Is(err, ErrEnforcementUnavailable) {
+		t.Fatalf("nil authority = %v", err)
+	}
+}
+
+type proofSessionStore struct {
+	session store.DeviceSession
+	err     error
+}
+
+func (s proofSessionStore) InstallDeviceSession(context.Context, store.DeviceSession) error {
+	return nil
+}
+func (s proofSessionStore) RevokeDeviceSession(context.Context, string, int64) error { return nil }
+func (s proofSessionStore) DeviceSessionByCredential(context.Context, []byte, time.Time) (store.DeviceSession, error) {
+	return s.session, s.err
+}
+func (s proofSessionStore) DeviceSessionPairingStatus(context.Context, store.DeviceSession, string, string) (string, error) {
+	return "", nil
+}
+
+func TestRegisterSessionProofChecksTheBearerSessionThenRelaysTheExactProof(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	proof := &whalereinv1.SessionProof{
+		SessionId: "session-1", HostId: "host-1", DeviceId: "device-1",
+		ChannelId: "channel-1", TranscriptHash: make([]byte, 32),
+		IssuedAtUnixMs: now.UnixMilli(), ExpiresAtUnixMs: now.Add(30 * time.Second).UnixMilli(),
+		Signature: make([]byte, 64),
+	}
+	var relayed []whalereinv1.RequestKind
+	fixture := &hostClientsFixture{observe: func(request *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+		relayed = append(relayed, request.GetKind())
+		if request.GetHostId() != "host-1" {
+			t.Fatalf("wrong Host relay: %v", request)
+		}
+		if request.GetKind() == whalereinv1.RequestKind_REQUEST_KIND_SESSION_PROOF {
+			if request.GetChannelId() != "channel-1" {
+				t.Fatalf("wrong proof channel: %v", request)
+			}
+			var got whalereinv1.SessionProof
+			if err := proto.Unmarshal(request.GetBody(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !proto.Equal(&got, proof) {
+				t.Fatalf("relayed proof = %v", &got)
+			}
+		}
+		return &whalereinv1.HostResult{
+			RequestId: request.GetRequestId(), HostId: request.GetHostId(),
+			Status: whalereinv1.OnlineStatus_succeeded,
+		}, nil
+	}}
+	service := &Service{
+		hostClientProbe: fixture, now: func() time.Time { return now },
+		deviceSessions: proofSessionStore{session: store.DeviceSession{
+			ID: "session-1", DeviceID: "device-1", ProofPublicKey: make([]byte, 32),
+		}},
+	}
+	if err := service.RegisterSessionProof(context.Background(), "session-1", "credential", proof); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.calls != 1 || len(relayed) != 1 {
+		t.Fatalf("relay calls = %d/%v", fixture.calls, relayed)
+	}
+	authority := &whalereinv1.ScopedAuthority{SessionId: "session-1", HostId: "host-1", DeviceId: "device-1"}
+	if err := service.PublishAuthority(context.Background(), "host-1", authority); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.calls != 3 || len(relayed) != 3 ||
+		relayed[1] != whalereinv1.RequestKind_REQUEST_KIND_AUTHORITY ||
+		relayed[2] != whalereinv1.RequestKind_REQUEST_KIND_SESSION_PROOF {
+		t.Fatalf("authority/proof retry = %d/%v", fixture.calls, relayed)
+	}
+	if err := service.RegisterSessionProof(context.Background(), "session-2", "credential", proof); !errors.Is(err, ErrAuthorizationMismatch) {
+		t.Fatalf("wrong session = %v", err)
+	}
+	stale := proto.Clone(proof).(*whalereinv1.SessionProof)
+	stale.ExpiresAtUnixMs = now.UnixMilli()
+	if err := service.RegisterSessionProof(context.Background(), "session-1", "credential", stale); !errors.Is(err, ErrAuthorizationMismatch) {
+		t.Fatalf("stale proof = %v", err)
+	}
+}

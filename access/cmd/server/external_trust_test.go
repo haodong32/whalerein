@@ -89,7 +89,7 @@ func TestExternalModeStartupFailsOnUnusableKeys(t *testing.T) {
 	broken := validKey(t)
 	broken.PublicKey = "not base64!"
 	cfg := externalConfig(broken)
-	cfg.DatabaseURL = "fixture"
+	cfg.DatabasePath = "fixture"
 	cfg.Broker.URL = "tcp://127.0.0.1:1"
 	cfg.Listen = "127.0.0.1:0"
 	cfg.InternalListen = "127.0.0.1:0"

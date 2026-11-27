@@ -250,7 +250,7 @@ func TestServerStartupFailsClosedAndReleasesOpenedStore(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			closed, migrated := 0, 0
 			cfg := config.Default()
-			cfg.DatabaseURL = "fixture"
+			cfg.DatabasePath = "fixture"
 			cfg.Broker.URL = "tcp://127.0.0.1:1"
 			cfg.Listen = "127.0.0.1:0"
 			cfg.InternalListen = "127.0.0.1:0"
@@ -504,7 +504,7 @@ func closedListenerOnce(t *testing.T) net.Listener {
 
 func TestRunServerWithStoreStartsServersAndStopsOnCancellation(t *testing.T) {
 	cfg := config.Default()
-	cfg.DatabaseURL = "fixture"
+	cfg.DatabasePath = "fixture"
 	cfg.Broker.URL = "tcp://127.0.0.1:1"
 	cfg.Listen = "127.0.0.1:0"
 	cfg.InternalListen = "127.0.0.1:0"

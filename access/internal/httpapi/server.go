@@ -178,6 +178,7 @@ func (s *Server) publicRoutes() []routeSpec {
 		routeSpec{method: http.MethodGet, pattern: "/v1/external/hosts/{host_id}/pairings/{operation_id}", handler: s.handleExternalPairingStatus},
 		routeSpec{method: http.MethodPost, pattern: "/v1/external/sessions/{session_id}/permission", handler: s.handleInstallExternalDeviceSession},
 		routeSpec{method: http.MethodPost, pattern: "/v1/external/sessions/{session_id}/revocation", handler: s.handleRevokeExternalDeviceSession},
+		routeSpec{method: http.MethodPost, pattern: "/v1/sessions/{session_id}/proof", handler: s.handleSessionProof},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/hosts", handler: s.handleEnrollHost},
 		routeSpec{method: http.MethodPost, pattern: "/v1/enrollments/devices/pairing", handler: s.handleCloudPairing},
 		routeSpec{method: http.MethodGet, pattern: "/v1/enrollments/hosts/{host_id}/devices/{device_id}", handler: s.handleCloudDeviceStatus},

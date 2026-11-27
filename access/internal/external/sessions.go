@@ -67,6 +67,7 @@ func (s *Service) InstallDeviceSession(ctx context.Context, id string, a *whaler
 		a.IssuedAtUnixMs <= 0 || issuedAt.After(now.Add(s.trust.ClockSkew)) ||
 		!expiresAt.After(issuedAt) || expiresAt.Sub(issuedAt) > MaxDeviceSessionLifetime ||
 		len(a.DevicePublicKeys) != 1 || len(a.DevicePublicKeys[0]) != 32 ||
+		(len(a.SessionProofPublicKey) != 0 && len(a.SessionProofPublicKey) != 32) ||
 		len(a.Nonce) != sha256.Size || a.HostId != "" || len(a.HostPublicKeys) != 0 {
 		return ErrAuthorizationMismatch
 	}
@@ -75,7 +76,8 @@ func (s *Service) InstallDeviceSession(ctx context.Context, id string, a *whaler
 	permission := store.DeviceSession{
 		ID: id, WorkspaceID: a.WorkspaceId, RegionID: a.RegionId, DeviceID: a.DeviceId,
 		KeyFingerprint: hex.EncodeToString(fingerprint[:]), AuthorityRevision: a.EnrollmentRevision,
-		CredentialHash: a.Nonce, Revision: revision, ExpiresAt: expiresAt,
+		CredentialHash: a.Nonce, ProofPublicKey: a.SessionProofPublicKey,
+		Revision: revision, ExpiresAt: expiresAt,
 	}
 	if err := s.deviceSessions.InstallDeviceSession(ctx, permission); err != nil {
 		return err
@@ -99,6 +101,9 @@ func (s *Service) RevokeDeviceSession(ctx context.Context, id string, revision i
 	if err := s.deviceSessions.RevokeDeviceSession(ctx, id, revision); err != nil {
 		return err
 	}
+	s.proofMu.Lock()
+	delete(s.sessionProofs, id)
+	s.proofMu.Unlock()
 	if err := s.sessionEnforcer.EndDeviceSession(ctx, id); err != nil {
 		return fmt.Errorf("%w: %v", ErrEnforcementUnavailable, err)
 	}

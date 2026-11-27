@@ -15,7 +15,7 @@ const minimalYAML = `
 listen: "127.0.0.1:18080"
 internal_listen: "127.0.0.1:18081"
 public_url: "https://access.example.com"
-database_url: "${DB_URL}"
+database_path: "${DB_URL}"
 admin_token: "${ADMIN_TOKEN}"
 host_provisioning_token: "${HOST_TOKEN}"
 broker:
@@ -120,7 +120,7 @@ func TestLoadResolvesEnvironmentAndReadsConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.DatabaseURL == "" {
+	if cfg.DatabasePath == "" {
 		t.Fatal("database URL empty")
 	}
 	if _, err := LoadWithEnv(filepath.Join(dir, "missing.yaml"), env(validEnv())); err == nil {
@@ -175,7 +175,7 @@ func TestValidateRejectsInvalidConfigurationValues(t *testing.T) {
 		{"rejects unsupported protocol version", func(c *Config) { c.Protocol.Version = 0 }, "protocol.version"},
 		{"rejects nonpositive broker keepalive", func(c *Config) { c.Broker.KeepAlive = 0 }, "broker durations"},
 		{"rejects unsupported log level", func(c *Config) { c.Log.Level = "trace" }, "log.level"},
-		{"rejects missing database URL", func(c *Config) { c.DatabaseURL = "" }, "database_url is required"},
+		{"rejects missing database URL", func(c *Config) { c.DatabasePath = "" }, "database_path is required"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,7 +194,7 @@ func TestRedactedConfigurationOmitsCredentials(t *testing.T) {
 	cfg.Broker.URL = "tls://user:url-password@mqtt.example.com:8883"
 	summary := cfg.Redacted()
 	text := summaryString(summary)
-	for _, secret := range []string{cfg.AdminToken, cfg.HostProvisioningToken, cfg.Broker.Password, cfg.Internal.CallbackToken, cfg.DatabaseURL, "url-password"} {
+	for _, secret := range []string{cfg.AdminToken, cfg.HostProvisioningToken, cfg.Broker.Password, cfg.Internal.CallbackToken, cfg.DatabasePath, "url-password"} {
 		if secret != "" && strings.Contains(text, secret) {
 			t.Fatalf("redacted summary contains secret %q: %s", secret, text)
 		}
@@ -586,5 +586,48 @@ external:
 
 			}
 		})
+	}
+}
+
+func TestExternalCentralNodeSettingsAreValidated(t *testing.T) {
+	base := minimalYAML + `
+mode: external
+external:
+  service_identity: "https://access.fixture.test"
+  issuer: "fixture://issuer/a"
+  region: "fixture-a"
+  mqtt_url: "mqtts://access.fixture.test:8883"
+  verification_keys:
+    - id: k
+      public_key: ` + base64.RawURLEncoding.EncodeToString(make([]byte, 32)) + `
+`
+	if _, err := Parse([]byte(base+`  control_url: "https://central.fixture.test"
+`), env(validEnv())); err == nil {
+		t.Fatal("partial central node settings were accepted")
+	}
+	complete := base + `  control_url: "https://central.fixture.test"
+  node_id: "node-a"
+  node_token: "node-token-value"
+  incarnation: "inc-1"
+  node_capacity: 8
+`
+	parsed, err := Parse([]byte(complete), env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.External.NodeID != "node-a" || parsed.External.NodeCapacity != 8 {
+		t.Fatalf("node config = %#v", parsed.External)
+	}
+	redacted := parsed.Redacted()
+	if _, ok := redacted["external.node_token"]; ok {
+		t.Fatal("node token was redacted into a printable field")
+	}
+	insecure := strings.Replace(complete, "https://central.fixture.test", "http://central.example.test", 1)
+	if _, err := Parse([]byte(insecure), env(validEnv())); err == nil {
+		t.Fatal("plaintext Central control URL was accepted")
+	}
+	loopback := strings.Replace(complete, "https://central.fixture.test", "http://127.0.0.1:8080", 1)
+	if _, err := Parse([]byte(loopback), env(validEnv())); err != nil {
+		t.Fatalf("loopback control URL: %v", err)
 	}
 }
