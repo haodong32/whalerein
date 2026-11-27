@@ -82,9 +82,6 @@ func TestRenewRequestsTheExactScopeAndCachesThePermit(t *testing.T) {
 		string(received.GetSessionProofPublicKey()) != string(proof) {
 		t.Fatalf("request = %#v", received)
 	}
-	if permit := worker.Authority("session"); permit.GetAuthorityId() != "authority-1" {
-		t.Fatalf("cached permit = %#v", permit)
-	}
 	if publisher.hostID != "host" || publisher.permit.GetAuthorityId() != "authority-1" {
 		t.Fatalf("published = %#v %#v", publisher.hostID, publisher.permit)
 	}
@@ -97,20 +94,18 @@ func TestRenewSkipsSessionsWithoutACurrentRoute(t *testing.T) {
 			ProofPublicKey: make([]byte, 32),
 		}}},
 		Routes: routeFake{}, NodeID: "node-a", Incarnation: "inc-1",
+		Publisher: &publisherFake{},
 	}
 	if err := worker.Renew(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if worker.Authority("session") != nil {
-		t.Fatal("permit cached without a route")
+	if worker.Publisher.(*publisherFake).permit != nil {
+		t.Fatal("permit published without a route")
 	}
 }
 
 func TestWorkerFailsClosedAndStopsWithContext(t *testing.T) {
 	var empty *Worker
-	if empty.Authority("session") != nil {
-		t.Fatal("nil worker returned a permit")
-	}
 	if err := empty.Renew(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -134,12 +129,14 @@ func TestWorkerFailsClosedAndStopsWithContext(t *testing.T) {
 		}}},
 		Routes:  routeFake{"host": {HostId: "host", NodeId: "node-a", Incarnation: "inc-1", Generation: 1}},
 		Control: client, NodeID: "node-a", Incarnation: "inc-1", Environment: "test",
+		Publisher: &publisherFake{},
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	if err := worker.Renew(context.Background()); err == nil {
 		t.Fatal("failed permit request was treated as success")
 	}
-	if worker.Authority("session") != nil {
-		t.Fatal("failed request cached a permit")
+	if worker.Publisher.(*publisherFake).permit != nil {
+		t.Fatal("failed request reached the publisher")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -163,13 +160,13 @@ func TestWorkerReportsScopeErrorsAndSkipsForeignRoutes(t *testing.T) {
 			GrantGeneration: 1, ProofPublicKey: make([]byte, 32),
 		}}},
 		Routes: routeFake{"host": {HostId: "host", NodeId: "node-b", Incarnation: "inc-1", Generation: 1}},
-		NodeID: "node-a", Incarnation: "inc-1",
+		NodeID: "node-a", Incarnation: "inc-1", Publisher: &publisherFake{},
 	}
 	if err := worker.Renew(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if worker.Authority("session") != nil {
-		t.Fatal("foreign route cached a permit")
+	if worker.Publisher.(*publisherFake).permit != nil {
+		t.Fatal("foreign route reached the publisher")
 	}
 }
 
@@ -199,7 +196,25 @@ func TestWorkerReportsPermitDeliveryFailureAfterCaching(t *testing.T) {
 	if err := worker.Renew(context.Background()); err == nil {
 		t.Fatal("delivery failure was hidden")
 	}
-	if worker.Authority("session") == nil {
-		t.Fatal("verified permit was not cached before delivery failed")
+	if worker.Publisher.(*publisherFake).permit == nil {
+		t.Fatal("verified permit was not handed to the publisher")
+	}
+}
+
+func TestRenewWithoutRoutesOrClockIsANoOp(t *testing.T) {
+	publisher := &publisherFake{}
+	worker := &Worker{
+		Scopes: scopeFake{scopes: []store.AuthorityScope{{
+			HostID: "host", DeviceID: "device", SessionID: "session",
+			GrantGeneration: 1, ProofPublicKey: make([]byte, 32),
+		}}},
+		Control: &control.Client{}, Publisher: publisher,
+		Now: func() time.Time { return time.Unix(1, 0) },
+	}
+	if err := worker.Renew(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.permit != nil {
+		t.Fatal("permit published without a route source")
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/control"
@@ -42,9 +41,6 @@ type Worker struct {
 	Interval    time.Duration
 	Now         func() time.Time
 	Logger      *slog.Logger
-
-	mu          sync.Mutex
-	authorities map[string]*whalereinv1.ScopedAuthority
 }
 
 // Renew requests one permit for every eligible session with a current route.
@@ -83,12 +79,6 @@ func (w *Worker) Renew(ctx context.Context) error {
 			}
 			continue
 		}
-		w.mu.Lock()
-		if w.authorities == nil {
-			w.authorities = map[string]*whalereinv1.ScopedAuthority{}
-		}
-		w.authorities[scope.SessionID] = permit
-		w.mu.Unlock()
 		if w.Publisher != nil {
 			if err := w.Publisher.PublishAuthority(ctx, scope.HostID, permit); err != nil {
 				errs = append(errs, err)
@@ -100,16 +90,6 @@ func (w *Worker) Renew(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// Authority returns the last accepted permit for one App session.
-func (w *Worker) Authority(sessionID string) *whalereinv1.ScopedAuthority {
-	if w == nil {
-		return nil
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.authorities[sessionID]
 }
 
 // Run renews immediately and then on the configured interval until cancel.
