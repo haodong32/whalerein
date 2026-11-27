@@ -68,7 +68,7 @@ func boundCloudOperation(t *testing.T, s *store.Store, hash []byte, workspace, h
 // permit and its unfinished intent, while a durable grant that Access already
 // confirmed remains usable from the new session without another pairing.
 func TestCloudPairingRefusesASupersededAppSessionAndReusesAConfirmedGrant(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	const workspace, host, device, revision, authority = "workspace", "host", "device", "1", "authority"

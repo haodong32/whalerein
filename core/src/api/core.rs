@@ -30,6 +30,7 @@ use crate::cache::Cache;
 use crate::commands::CommandService;
 use crate::diagnostics;
 use crate::diagnostics::journal::{DiagnosticContext, DiagnosticKind, DiagnosticSink, Diagnostics};
+use crate::observation::bench::{BenchEvent, CommandOutcome, CommandStage, TokenDomain};
 use crate::pairing::{default_capabilities, parse_pairing_uri, PairingDecision, PairingInitiator};
 use crate::runtime::channel::{
     ensure_channel_after_on, ensure_channel_on, require_payload_capability,
@@ -822,7 +823,19 @@ impl Core {
     pub(crate) async fn resolve_event_envelope(
         &self,
         envelope: &whalerein_proto::EventEnvelope,
+        class: crate::access::DeliveryClass,
     ) -> CoreResult<whalerein_proto::EventEnvelope> {
+        // Standalone live frames carry their ciphertext inline. Cloud delivery
+        // still resolves the active regional authorization.
+        if matches!(class, crate::access::DeliveryClass::Live)
+            && self
+                .instance
+                .as_ref()
+                .is_some_and(|instance| instance.cloud.is_none())
+        {
+            crate::access::transport::validate_live_event_representation(envelope)?;
+            return Ok(envelope.clone());
+        }
         let access = self.access_client().await?;
         // A referenced control event must fit the local control-envelope
         // budget; refuse a larger declaration before any fetch.
@@ -1726,6 +1739,7 @@ impl Core {
         request_id: Option<&str>,
     ) -> CoreResult<CommandHandle> {
         let expected_session = self.cloud_session_id()?;
+        let submitted_ns = self.diagnostics.bench().now_ns();
         let result = async {
             let config = self.require_config()?;
             let channel = self.ensure_channel(host_id, false).await?;
@@ -1772,7 +1786,57 @@ impl Core {
             }
         }
         .await;
+        // A failed submission has no canonical request identity exposed here;
+        // the receipt/dequeue path reports the failure. Do not invent a token.
+        if let Ok(handle) = &result {
+            // Admission and the authoritative receipt share the canonical
+            // request identity. The admission stamp uses the boundary reading
+            // captured before submission.
+            self.emit_command(
+                &handle.request_id,
+                1,
+                CommandStage::Admit,
+                None,
+                None,
+                Some(submitted_ns),
+            );
+            self.emit_command(
+                &handle.request_id,
+                1,
+                CommandStage::Receipt,
+                None,
+                None,
+                None,
+            );
+        }
         self.settle(result).await
+    }
+
+    /// Emit one command-boundary fact under the canonical request token.
+    fn emit_command(
+        &self,
+        request_id: &str,
+        attempt: u64,
+        stage: CommandStage,
+        outcome: Option<CommandOutcome>,
+        reason: Option<String>,
+        ts: Option<u64>,
+    ) {
+        let bench = self.diagnostics.bench();
+        if !bench.enabled() {
+            return;
+        }
+        let event = BenchEvent::CoreCommand {
+            request: bench.token(TokenDomain::Request, request_id),
+            attempt,
+            stage,
+            outcome,
+            reason,
+        };
+        match ts {
+            Some(ts) => bench.emit_at(event, ts),
+            None => bench.emit(event),
+        }
     }
 
     /// List durable unfinished control identities. Payloads and credentials are excluded.
@@ -1931,6 +1995,14 @@ impl Core {
                 .await
             {
                 Ok(result) => {
+                    self.emit_command(
+                        request_id,
+                        attempt as u64 + 1,
+                        CommandStage::Recover,
+                        Some(CommandOutcome::Ok),
+                        None,
+                        None,
+                    );
                     return commands.handle_from_command_result(request_id, command_id, &result);
                 }
                 Err(CoreError::UnknownResult) if attempt < 9 => {
@@ -1946,9 +2018,31 @@ impl Core {
                         .await
                         .map_err(|error| self.uncertain_recovery_error(error))?;
                 }
-                Err(error) => return Err(self.uncertain_recovery_error(error)),
+                Err(error) => {
+                    self.emit_command(
+                        request_id,
+                        attempt as u64 + 1,
+                        CommandStage::Recover,
+                        Some(if matches!(error, CoreError::Timeout) {
+                            CommandOutcome::Timeout
+                        } else {
+                            CommandOutcome::Error
+                        }),
+                        Some(error.code().to_owned()),
+                        None,
+                    );
+                    return Err(self.uncertain_recovery_error(error));
+                }
             }
         }
+        self.emit_command(
+            request_id,
+            10,
+            CommandStage::Recover,
+            Some(CommandOutcome::Timeout),
+            None,
+            None,
+        );
         Err(CoreError::UnknownResult)
     }
 
@@ -3075,6 +3169,8 @@ impl Core {
         host_id: &str,
         handle: CommandHandle,
     ) -> CoreResult<CommandHandle> {
+        let request_id = handle.request_id.clone();
+        let terminal_ns = self.diagnostics.bench().now_ns();
         let expected_session = self.cloud_session_id()?;
         let config = self.require_config()?;
         let channel = self
@@ -3105,6 +3201,30 @@ impl Core {
             }
             other => other,
         };
+        match &result {
+            Ok(_) => self.emit_command(
+                &request_id,
+                1,
+                CommandStage::Terminal,
+                Some(CommandOutcome::Ok),
+                None,
+                Some(terminal_ns),
+            ),
+            Err(error) => self.emit_command(
+                &request_id,
+                1,
+                CommandStage::Terminal,
+                Some(if matches!(error, CoreError::Timeout) {
+                    CommandOutcome::Timeout
+                } else if matches!(error, CoreError::UnknownResult) {
+                    CommandOutcome::Late
+                } else {
+                    CommandOutcome::Error
+                }),
+                Some(error.code().to_owned()),
+                Some(terminal_ns),
+            ),
+        }
         self.settle(result).await
     }
 

@@ -1,5 +1,5 @@
 // Resolved Host configuration for tests; connector parsing is tested in DSH.
-export function testConfig(raw = {}) {
+export function testConfig(raw = {}, extra = {}) {
   return {
     hostId: raw.host_id ?? 'host-1',
     hostToken: raw.host_token ?? 'token',
@@ -11,5 +11,6 @@ export function testConfig(raw = {}) {
     reconnectMinMs: raw.reconnect_min_ms ?? 500,
     reconnectMaxMs: raw.reconnect_max_ms ?? 30_000,
     logLevel: 'info',
+    ...extra,
   }
 }

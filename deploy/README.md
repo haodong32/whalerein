@@ -1,13 +1,14 @@
 # WhaleRein deployment assets
 
-Standalone self-hosting uses one open-source Access program, PostgreSQL and Mosquitto.
-External account mode is later work in that same program. This directory contains the Docker Compose stack only.
+Standalone self-hosting uses one open-source Access program, one local SQLite
+database and one local Mosquitto. Each Access node is independently deployable.
+This directory contains the single-node Compose stack only.
 Core, Access and the DSH plugin do not read Compose settings.
 
 This is the current standalone stack, not a verified multi-instance deployment.
 The proposed [Access redesign](../docs/architecture/access-evolution.md) defines
 future regional roles and automation separately from these working instructions.
-Shutdown, bounded log rotation, request-retention capacity, PostgreSQL failure
+Shutdown, bounded log rotation, request-retention capacity, SQLite failure
 handling, backup/restore validation and the rolling-upgrade window are documented
 in [deployment operations](../docs/deploy.md).
 
@@ -15,7 +16,7 @@ in [deployment operations](../docs/deploy.md).
 Client (whalerein CLI)
   │ HTTPS + MQTT 5
   ▼
-WhaleRein Access ── PostgreSQL
+WhaleRein Access ── local SQLite
   │ MQTT 5 (data + private $CONTROL)
   ▼
 Mosquitto 2.1.4 + WhaleRein plugin ── DSH host (whalerein-dsh plugin + DSH)
@@ -25,20 +26,20 @@ Mosquitto 2.1.4 + WhaleRein plugin ── DSH host (whalerein-dsh plugin + DSH)
 
 ```text
 deploy/
-├─ compose/stack.yaml               # PostgreSQL 18 + Mosquitto + Access
+├─ compose/stack.yaml               # Mosquitto + Access
 ├─ compose/access.yaml              # Access config mounted into the stack
 ├─ mosquitto/mosquitto.conf         # Broker and plugin options
 ├─ mosquitto/plugin/                # Native broker plugin (C)
 ├─ docker/mosquitto.Dockerfile      # Pinned Mosquitto image with the plugin
 ├─ docker/mosquitto-entrypoint.sh   # Materializes broker-local secrets
 ├─ docker/access.Dockerfile         # Access server image
-├─ tests/rolling-upgrade-matrix.sh  # static + Docker migration preflight
-└─ postgres/init/01-test-db.sql     # creates whalerein_test on a fresh volume
+└─ docker/access.Dockerfile         # Access server image with SQLite storage
 ```
 
-The Compose stack mounts a named `whalerein-access-payloads` volume at
-`/var/lib/whalerein/payloads` for disposable node-local ciphertext. It is not a
-backup target: PostgreSQL owns all admission, expiry and command state.
+The Compose stack mounts `whalerein-access-data` at
+`/var/lib/whalerein/data` for SQLite and `whalerein-access-payloads` at
+`/var/lib/whalerein/payloads` for temporary ciphertext. Both are node-local and
+are never synchronized to an account service.
 
 ## One-command stack
 
@@ -60,9 +61,9 @@ curl -sS http://127.0.0.1:8080/readyz
 ```
 
 Compose owns server-stack lifecycle. Run `up -d --build` to check current image
-inputs through Docker's build cache. For native Access debugging, start only its
-dependencies with `docker compose -f deploy/compose/stack.yaml up -d postgres mosquitto`
-and follow [Access development](../access/README.md). Project processes are not
+inputs through Docker's build cache. For native Access debugging, start only
+Mosquitto with `docker compose -f deploy/compose/stack.yaml up -d mosquitto` and
+follow [Access development](../access/README.md). Project processes are not
 started by the repository task tool.
 
 The published ports are loopback-only:
@@ -70,33 +71,32 @@ The published ports are loopback-only:
 ```text
 Access HTTP      http://127.0.0.1:8080
 Access internal  127.0.0.1:8081
-PostgreSQL 18    127.0.0.1:55432
 Mosquitto MQTT   127.0.0.1:1883
 ```
 
-Stop the stack while preserving PostgreSQL data (broker state is disposable):
+Stop the stack while preserving the SQLite data volume (broker state is disposable):
 
 ```bash
 docker compose -f deploy/compose/stack.yaml down
 ```
 
-`down` keeps the named `whalerein-access-payloads` volume. Its ciphertext is
-disposable and is not part of backup/restore; remove the volume explicitly only
-when decommissioning the node.
+`down` keeps the named data and payload volumes. The payload volume is
+disposable; the data volume is the only local durable authority. Remove either
+volume explicitly only when decommissioning the node.
 
-## PostgreSQL
+## Local SQLite
 
-Access owns its versioned schema in `access/internal/store/migrations`.
-`schema_migrations` records names and checksums. The schema includes the local
-workspace, identities, credential hashes, grants, pairing operations and requests. The Compose
-service uses `postgres:18-alpine` with trust authentication on the Docker
-network and creates `whalerein_dev`. `postgres/init/01-test-db.sql` creates
-`whalerein_test` on a fresh data volume. Access applies pending migrations at
-startup before `/readyz` turns green.
+Access owns one versioned schema in
+`access/internal/store/migrations_sqlite/001_schema.sql`.
+`schema_migrations` records the name and checksum. The schema includes Host
+identities, credential hashes, grants, pairing operations, requests, device
+sessions and temporary ciphertext metadata. Access opens the file named by
+`database_path`, applies the schema at startup and refuses an unknown newer
+checksum before `/readyz` turns green.
 
 ```bash
-docker compose -f deploy/compose/stack.yaml up -d postgres
-docker compose -f deploy/compose/stack.yaml stop postgres
+docker compose -f deploy/compose/stack.yaml up -d
+docker compose -f deploy/compose/stack.yaml stop access
 ```
 
 ## Mosquitto
@@ -130,7 +130,7 @@ The image is built from `deploy/docker/access.Dockerfile`. Its config is
 
 | Variable | Purpose |
 |---|---|
-| `WHALEREIN_DATABASE_URL` | PostgreSQL URL |
+| `WHALEREIN_DATABASE_PATH` | absolute local SQLite path |
 | `WHALEREIN_ADMIN_TOKEN` | Administrator bearer token for invitations |
 | `WHALEREIN_HOST_PROVISIONING_TOKEN` | Pre-shared token a host uses for broker auth |
 | `WHALEREIN_BROKER_PASSWORD` | Access's own broker credential |
@@ -149,7 +149,7 @@ curl --fail --silent --show-error http://127.0.0.1:8080/readyz
 pg_isready -h 127.0.0.1 -p 55432
 ```
 
-`/healthz` reports process liveness. `/readyz` additionally requires PostgreSQL
+`/healthz` reports process liveness. `/readyz` additionally requires the SQLite
 (including a write probe), an established subscribed MQTT session, a reconciled
 broker presence snapshot, a confirmed policy reconciliation, and — when
 `storage.enabled` is true — a writable payload directory with at least
@@ -340,12 +340,11 @@ live drops if preview latency matters; they never indicate control loss. No
 metric label contains a host, device, request, topic, object path or content
 identity.
 
-Validate the static deployment inputs and the schema matrix with
-`deploy/tests/rolling-upgrade-matrix.sh`. The static preflight runs without
-Docker and checks the storage volume/config, relay topics, profile/broker
-alignment and epoch constants. The Docker portion runs `--check-config`, checks
-the rendered geometry, and proves an old binary rejects the newer migration
-ledger.
+Validate the static deployment inputs with `./repo check` and the affected
+Access checks. The reviewed change is a fresh deployment: there is no
+PostgreSQL data import, dual backend or adjacent-version schema migration. A
+node always starts from its own empty SQLite file, or from a verified Standalone
+backup as described above.
 
 ## Coordinated relay cutover (epoch 5)
 
@@ -395,7 +394,7 @@ direct previews, not those application identities.
    ACL is topic-based. Do not duplicate or re-derive ACLs outside the
    authenticated policy. Confirm the plugin stamps `whalerein-connection` and
    rejects a client-supplied copy.
-5. Record the release artifact digests and take a coordinated PostgreSQL backup
+5. Record the release artifact digests and take a coordinated SQLite backup
    using [Backup and restore](#backup-and-restore).
 6. Record unresolved operations: `request_id`, `command_id`, `payload_digest`,
    status and whether native execution is possible. Do not resend them with new
@@ -407,15 +406,15 @@ Stop accepting new client submissions (at the ingress or by stopping clients)
 and keep the old Access and Host running long enough for in-flight requests to
 reach a terminal state or expire to `unknown`. The relay keeps no durable
 fragment directory to migrate. Record unresolved operations before forcing them
-terminal, then stop the old Host and Access and keep PostgreSQL. Do not delete or
+terminal, then stop the old Host and Access and keep the SQLite data volume. Do not delete or
 rewrite grants, keys, pins, pairing records, command identities or
 proved/unknown outcomes. The new Access never replays an acknowledgement or a
 delivery admitted under another epoch.
 
 ### 3. Deploy the epoch-5 set
 
-Start PostgreSQL, then the broker, then Access with the prepared config. Wait for
-`/readyz` to report database, broker and storage readiness. Start the Host
+Start the broker, then Access with the prepared config. Wait for
+`/readyz` to report SQLite, broker and storage readiness. Start the Host
 runtime/DSH plugin, then the supported clients. Start order prevents a Host or
 client from establishing a policy under an incomplete broker.
 
@@ -535,9 +534,10 @@ password-reset endpoint.
 
 Protect and back up all of these independently:
 
-- PostgreSQL, including the migration ledger, grants, revocations, pairing
-  operations and request/outcome records. Use PostgreSQL backup tools and verify
-  restoration in an isolated installation.
+- The local SQLite database, including the migration ledger, grants,
+  revocations, pairing operations and request/outcome records. Stop Access and
+  take a consistent copy; `internal/standalone` verifies the manifest, freshness
+  floor and exact digest before a restored installation may reuse pairings.
 - Host state, including peer keys, revocation generations and command deduplication
   records, plus the Host's private identity in its configured credential store.
 - Client SecretStore and configuration if local identity recovery is required.
@@ -552,7 +552,7 @@ to clients immediately or blindly resume its queued requests.
 
 The conservative historical-restore procedure is:
 
-1. Stop Access and the Host plugin; restore PostgreSQL into an isolated target.
+1. Stop Access and the Host plugin; restore SQLite into an isolated target.
    Restore/preserve Host command deduplication records and identity. Do not use a
    command journal older than the executions whose outcomes must be recovered.
 2. Before starting Access, invalidate restored credentials and invitations and

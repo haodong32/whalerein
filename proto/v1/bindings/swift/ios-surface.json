@@ -126,6 +126,21 @@
       "swiftCase": "Unavailable",
       "wireAction": "retry",
       "status": "mapped"
+    },
+    "route_stale": {
+      "swiftCase": "Unavailable",
+      "wireAction": "refresh",
+      "status": "follow-up"
+    },
+    "policy_denied": {
+      "swiftCase": "Security",
+      "wireAction": "reauth",
+      "status": "follow-up"
+    },
+    "node_unavailable": {
+      "swiftCase": "Unavailable",
+      "wireAction": "retry",
+      "status": "mapped"
     }
   },
   "comment": "Current Swift-visible surface. A status of follow-up means the wire action cannot be represented yet; the check fails when a new wire code is unclassified, not when a recorded follow-up exists."

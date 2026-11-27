@@ -20,22 +20,26 @@ test('typed live coalescing preserves contiguous intervals and flushes at lifecy
   const buffer = new LiveBuffer((update) => out.push(update))
   buffer.push(frame(1))
   buffer.push(frame(2))
-  assert.equal(out.length, 0)
-  await new Promise((resolve) => setTimeout(resolve, 30))
-  assert.equal(out[0].live.last_seq, 2)
-  assert.equal(out[0].live.delta.text.length, 2)
-  assert.equal(out[0].live.delta.kind, TEXT)
+  assert.deepEqual(out.map(update => update.live.last_seq), [1])
   buffer.push(frame(3))
-  buffer.push(frame(4, 'x', 'other'))
-  buffer.push(frame(5, 'x', 'other', 'different'))
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(out[1].live.last_seq, 3)
+  assert.equal(out[1].live.delta.text.length, 2)
+  assert.equal(out[0].live.delta.kind, TEXT)
+  buffer.push(frame(4))
+  assert.equal(out.length, 3)
+  buffer.push(frame(5, 'x', 'other'))
+  buffer.push(frame(6, 'x', 'other', 'different'))
   buffer.push({ session: { session_id: 's' }, live: { ended: { outcome: 'COMMITTED' } } })
-  assert.equal(out.length, 5)
+  assert.equal(out.length, 6)
   buffer.flush()
 })
 
 test('large or noncontiguous deltas flush without crossing stream positions', () => {
   const out = []
   const buffer = new LiveBuffer((update) => out.push(update))
+  buffer.push(frame(0))
+  assert.equal(out.shift().live.last_seq, 0)
   buffer.push(frame(1))
   buffer.push(frame(3))
   assert.equal(out.length, 1)
@@ -45,6 +49,8 @@ test('large or noncontiguous deltas flush without crossing stream positions', ()
 test('reasoning and text previews never coalesce across their checked block kind', () => {
   const out = []
   const buffer = new LiveBuffer((update) => out.push(update))
+  buffer.push(frame(0))
+  assert.equal(out.shift().live.last_seq, 0)
   buffer.push(frame(1, 'think', 'a', 'reasoning', REASONING))
   buffer.push(frame(2, 'answer', 'a', 'reasoning', TEXT))
   assert.equal(out.length, 1, 'a different kind flushes the reasoning preview')
@@ -58,6 +64,8 @@ test('reasoning and text previews never coalesce across their checked block kind
 test('a reset or attempt change flushes the pending preview first', () => {
   const out = []
   const buffer = new LiveBuffer((update) => out.push(update))
+  buffer.push(frame(0))
+  assert.equal(out.shift().live.last_seq, 0)
   buffer.push(frame(1))
   buffer.push({
     session: { session_id: 's' },
@@ -77,6 +85,8 @@ test('the route packet budget, not a fixed 8 KiB cap, bounds a coalesced preview
   const out = []
   const buffer = new LiveBuffer((update) => out.push(update), 20, 16)
   assert.equal(buffer.maxBytes, 16)
+  buffer.push(frame(0))
+  assert.equal(out.shift().live.last_seq, 0)
   buffer.push(frame(1, 'x'.repeat(10)))
   buffer.push(frame(2, 'x'.repeat(6)))
   assert.equal(out.length, 1, 'exactly at the budget flushes')
@@ -92,6 +102,8 @@ test('the route packet budget, not a fixed 8 KiB cap, bounds a coalesced preview
 test('a pending preview never exceeds the configured UTF-8 byte target', () => {
   const out = []
   const buffer = new LiveBuffer((update) => out.push(update), 20, 9)
+  buffer.push(frame(0))
+  assert.equal(out.shift().live.last_seq, 0)
   buffer.push(frame(1, 'ééé')) // 6 bytes
   buffer.push(frame(2, 'é')) // 8 bytes, still inside
   assert.equal(out.length, 0)

@@ -13,6 +13,26 @@ import (
 
 var latencyBuckets = []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000}
 
+// AccessStageMetricsVersion versions the units and bounds of the Access
+// observation-stage aggregates. The stage vocabulary is fixed; adding a stage
+// or changing a bucket requires a new version so local trends stay comparable.
+const AccessStageMetricsVersion = "1"
+
+// accessStageBuckets bound Access-owned stage durations in milliseconds. They
+// cover sub-millisecond admission through a slow multi-second object transfer.
+var accessStageBuckets = []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000}
+
+// accessStages is the fixed stage vocabulary. No request, device, object or
+// connection identifier is ever a label.
+var accessStages = []string{
+	"query_admit", "query_forward", "query_reply", "query_expire",
+	"command_admit", "command_receipt", "command_recover", "command_terminal",
+	"relay_stage", "relay_upload", "relay_finish", "relay_fetch", "relay_verify",
+	"notice_subscribe", "notice_ready", "notice_disconnect",
+}
+
+var accessOutcomes = []string{"ok", "error", "expired", "late", "timeout", "failed", "replaced"}
+
 // Metrics is the complete first-version metric set. Labels never contain
 // host, device, session, request or trace identifiers.
 type Metrics struct {
@@ -44,6 +64,12 @@ type Metrics struct {
 	AdmissionLoadErrors      prometheus.Counter
 	AdmissionDenied          prometheus.Counter
 	AdmissionReconcileErrors prometheus.Counter
+
+	// ControlLastSuccess is the Unix time of the last accepted Central control
+	// message. Zero means Central has never confirmed this node.
+	ControlLastSuccess prometheus.Gauge
+	RouteAttach        *prometheus.CounterVec
+	RouteClose         *prometheus.CounterVec
 
 	// CleanupBatches counts bounded retention batches by operation. A full
 	// batch leaves work behind, which CleanupBacklog reports so an operator can
@@ -83,6 +109,15 @@ type Metrics struct {
 	NoticePending        prometheus.Gauge
 	NoticeOldestAge      prometheus.Gauge
 	NoticePublishRetries prometheus.Counter
+
+	// Access observation-stage aggregates. These are ordinary process-lifetime
+	// counters and histograms available in every bench observation mode; they
+	// describe the aggregate population, not matched per-operation events.
+	// They reset when the Access process restarts.
+	AccessStageDuration *prometheus.HistogramVec
+	AccessStageTotal    *prometheus.CounterVec
+	AccessStageBytes    *prometheus.CounterVec
+	AccessStageInfo     *prometheus.GaugeVec
 }
 
 // NewMetrics creates a registry with the Access metric set registered.
@@ -186,6 +221,18 @@ func NewMetrics() *Metrics {
 			Name: "grant_admission_reconcile_errors_total",
 			Help: "Grant reconciliation passes that could not read durable state.",
 		}),
+		ControlLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "access_control_last_success_unix_seconds",
+			Help: "Unix time of the last accepted Central node control message; zero means never.",
+		}),
+		RouteAttach: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "access_route_attach_total",
+			Help: "Host route attachment attempts by accepted outcome.",
+		}, []string{"outcome"}),
+		RouteClose: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "access_route_close_total",
+			Help: "Graceful Host route close attempts by accepted outcome.",
+		}, []string{"outcome"}),
 		CleanupBatches: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "cleanup_batches_total",
 			Help: "Bounded retention batches by cleanup operation.",
@@ -294,7 +341,25 @@ func NewMetrics() *Metrics {
 			Name: "request_notice_publish_retries_total",
 			Help: "Request state notice publications that failed and will retry.",
 		}),
+		AccessStageDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "access_stage_duration_ms",
+			Help:    "Access-owned query, durable command, relay and broker-notice stage duration in milliseconds; version 1, population access-process-lifetime, aggregate mode.",
+			Buckets: accessStageBuckets,
+		}, []string{"stage"}),
+		AccessStageTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "access_stage_total",
+			Help: "Access-owned observation-stage dispositions by fixed stage and outcome; version 1.",
+		}, []string{"stage", "outcome"}),
+		AccessStageBytes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "access_stage_bytes_total",
+			Help: "Bytes observed at Access-owned stages by fixed stage; version 1, aggregate mode.",
+		}, []string{"stage"}),
+		AccessStageInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "access_stage_metrics_info",
+			Help: "Declares the observation mode, population, unit and version of the Access stage aggregates.",
+		}, []string{"version", "unit", "population", "observation_mode"}),
 	}
+	m.AccessStageInfo.WithLabelValues(AccessStageMetricsVersion, "ms", "access-process-lifetime", "aggregate").Set(1)
 	registry.MustRegister(
 		m.HostResults,
 		m.HTTPRequestDuration,
@@ -320,6 +385,9 @@ func NewMetrics() *Metrics {
 		m.AdmissionLoadErrors,
 		m.AdmissionDenied,
 		m.AdmissionReconcileErrors,
+		m.ControlLastSuccess,
+		m.RouteAttach,
+		m.RouteClose,
 		m.CleanupBatches,
 		m.CleanupRows,
 		m.CleanupBacklogTotal,
@@ -347,6 +415,10 @@ func NewMetrics() *Metrics {
 		m.NoticePending,
 		m.NoticeOldestAge,
 		m.NoticePublishRetries,
+		m.AccessStageDuration,
+		m.AccessStageTotal,
+		m.AccessStageBytes,
+		m.AccessStageInfo,
 	)
 	return m
 }
@@ -718,4 +790,59 @@ func (m *Metrics) NoticePublishRetry() {
 		return
 	}
 	m.NoticePublishRetries.Inc()
+}
+
+// ObserveAccessStage records one Access-owned stage duration and disposition.
+// stage and outcome are clamped to the fixed vocabularies so cardinality stays
+// bounded as requests, devices and objects grow. Durations describe the
+// aggregate process-lifetime population; per-operation attribution requires
+// trace-mode events.
+func (m *Metrics) ObserveAccessStage(stage string, duration time.Duration, outcome string) {
+	if m == nil || m.AccessStageDuration == nil || m.AccessStageTotal == nil {
+		return
+	}
+	stage = normalizeAccessStage(stage)
+	outcome = normalizeAccessOutcome(outcome)
+	milliseconds := float64(duration) / float64(time.Millisecond)
+	if milliseconds < 0 {
+		milliseconds = 0
+	}
+	m.AccessStageDuration.WithLabelValues(stage).Observe(milliseconds)
+	m.AccessStageTotal.WithLabelValues(stage, outcome).Inc()
+}
+
+// ObserveAccessStageDisposition counts a stage disposition without a duration.
+// It is used for expiry and connection notices where an interval has no
+// meaningful owning start.
+func (m *Metrics) ObserveAccessStageDisposition(stage, outcome string) {
+	if m == nil || m.AccessStageTotal == nil {
+		return
+	}
+	m.AccessStageTotal.WithLabelValues(normalizeAccessStage(stage), normalizeAccessOutcome(outcome)).Inc()
+}
+
+// ObserveAccessStageBytes counts bytes observed at one Access stage.
+func (m *Metrics) ObserveAccessStageBytes(stage string, bytes int64) {
+	if m == nil || m.AccessStageBytes == nil || bytes <= 0 {
+		return
+	}
+	m.AccessStageBytes.WithLabelValues(normalizeAccessStage(stage)).Add(float64(bytes))
+}
+
+func normalizeAccessStage(stage string) string {
+	for _, known := range accessStages {
+		if stage == known {
+			return stage
+		}
+	}
+	return "query_admit"
+}
+
+func normalizeAccessOutcome(outcome string) string {
+	for _, known := range accessOutcomes {
+		if outcome == known {
+			return outcome
+		}
+	}
+	return "error"
 }

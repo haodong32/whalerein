@@ -3470,6 +3470,7 @@ dependencies = [
  "rand 0.9.5",
  "rcgen",
  "reqwest",
+ "ring",
  "rumqttc",
  "rusqlite",
  "rustls",

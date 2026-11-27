@@ -49,6 +49,7 @@ const BINDING_KEYS = new Set([
   'operationId',
   'accessOrigin',
   'region',
+  'routeGeneration',
 ])
 const PENDING_KEYS = new Set(['paused', 'removal', 'removalUrl', 'intentId', 'operationId', 'phase', 'uncertain'])
 const PENDING_PHASES = new Set(['approval', 'enrollment', 'credential', 'removal'])
@@ -166,6 +167,9 @@ function validateBindings(bindings) {
     if (value !== undefined && (typeof value !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(value))) {
       fail('registry_corrupt', `profile binding ${key} is invalid`)
     }
+  }
+  if (bindings.routeGeneration !== undefined && (typeof bindings.routeGeneration !== 'string' || !/^[0-9]{1,20}$/.test(bindings.routeGeneration))) {
+    fail('registry_corrupt', 'profile binding route generation is invalid')
   }
   if (bindings.accessOrigin !== undefined) {
     try {

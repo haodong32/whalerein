@@ -77,13 +77,14 @@ type Service struct {
 	masker  *diagnostics.Masker
 	logger  *slog.Logger
 
-	mu            sync.RWMutex
-	denies        map[Key]struct{}
-	deviceDenies  map[string]struct{}
-	keyFences     map[Key]uint64
-	deviceFences  map[string]uint64
-	grantRevokes  map[Key]int
-	loadSemaphore chan struct{}
+	mu             sync.RWMutex
+	denies         map[Key]struct{}
+	deviceDenies   map[string]struct{}
+	keyFences      map[Key]uint64
+	deviceFences   map[string]uint64
+	grantRevokes   map[Key]int
+	reconcileEpoch uint64
+	loadSemaphore  chan struct{}
 }
 
 // New constructs an admission service.
@@ -250,9 +251,9 @@ func (s *Service) Warm(ctx context.Context) error {
 	return s.Reconcile(ctx)
 }
 
-// Reconcile rebuilds cached grant state from PostgreSQL. Active grants clear
-// scoped denials; revoked grants keep them, so obsolete authority cannot be
-// restored by a restart or a missed update.
+// Reconcile rebuilds cached grant state from PostgreSQL. Revoked grants install
+// scoped denials; a local denial or device fence is never cleared here because
+// it may fence a durable write that is still in flight.
 func (s *Service) Reconcile(ctx context.Context) error {
 	items, err := s.store.ListAdmissionGrants(ctx)
 	if err != nil {
@@ -268,19 +269,24 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		active[key] = grant
 	}
 	s.mu.Lock()
+	s.reconcileEpoch++
 	for key, grant := range active {
-		if grant.Active {
-			delete(s.denies, key)
-		} else {
+		if !grant.Active {
 			s.denies[key] = struct{}{}
 		}
 	}
-	s.deviceDenies = map[string]struct{}{}
+	// A local denial or device fence is installed before the durable write.
+	// Reconcile must not clear it while that write may still be in flight;
+	// only Allow (after a confirmed pairing) or CompleteDeviceRevoke may.
 	s.mu.Unlock()
 
 	s.cache.InvalidateAll()
 	for key, grant := range active {
-		s.cache.Set(key, grant)
+		// Inactive grants are denied through the non-evictable denial map. Do
+		// not let them consume the bounded hot-grant cache.
+		if grant.Active {
+			s.cache.Set(key, grant)
+		}
 	}
 	s.logger.Debug("grant admission reconciled", "grants", len(active))
 	return nil
@@ -296,6 +302,7 @@ func (s *Service) Allow(ctx context.Context, hostID, deviceID string) error {
 	s.mu.RLock()
 	keyFence := s.keyFences[key]
 	deviceFence := s.deviceFences[key.DeviceID]
+	reconcileEpoch := s.reconcileEpoch
 	_, deviceRevoking := s.deviceDenies[key.DeviceID]
 	revoking := s.grantRevokes[key] > 0 || deviceRevoking
 	s.mu.RUnlock()
@@ -313,8 +320,9 @@ func (s *Service) Allow(ctx context.Context, hostID, deviceID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.keyFences[key] != keyFence || s.deviceFences[key.DeviceID] != deviceFence {
-		return errors.New("admission: pairing completion raced a revocation")
+	if s.keyFences[key] != keyFence || s.deviceFences[key.DeviceID] != deviceFence ||
+		s.reconcileEpoch != reconcileEpoch {
+		return errors.New("admission: pairing completion raced a revocation or reconcile")
 	}
 	delete(s.denies, key)
 	s.cache.Set(key, grant)

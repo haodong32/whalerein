@@ -20,23 +20,30 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/whalerein/whalerein/access/internal/admission"
 	"github.com/whalerein/whalerein/access/internal/auth"
+	"github.com/whalerein/whalerein/access/internal/authority"
 	"github.com/whalerein/whalerein/access/internal/broker"
 	"github.com/whalerein/whalerein/access/internal/clientaddr"
+
 	"github.com/whalerein/whalerein/access/internal/config"
+	"github.com/whalerein/whalerein/access/internal/control"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
 	"github.com/whalerein/whalerein/access/internal/events"
 	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/httpapi"
 	"github.com/whalerein/whalerein/access/internal/line"
+	latencyobs "github.com/whalerein/whalerein/access/internal/observation"
 	"github.com/whalerein/whalerein/access/internal/pairing"
 	"github.com/whalerein/whalerein/access/internal/payload"
 	"github.com/whalerein/whalerein/access/internal/query"
 	"github.com/whalerein/whalerein/access/internal/relay"
 	"github.com/whalerein/whalerein/access/internal/requests"
+	"github.com/whalerein/whalerein/access/internal/route"
 	"github.com/whalerein/whalerein/access/internal/serverready"
 	"github.com/whalerein/whalerein/access/internal/store"
+	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
 
 const version = "0.1.0"
@@ -129,7 +136,7 @@ func runWith(ctx context.Context, args []string, stdout, stderr io.Writer, ops s
 	}
 	logger := diagnostics.NewLogger(cfg.Log.Level, clientaddr.NewRedactor(stderr, referencer))
 	if opts.migrateOnly {
-		db, err := ops.open(ctx, cfg.DatabaseURL)
+		db, err := ops.open(ctx, cfg.DatabasePath)
 		if err != nil {
 			logger.Error("migration failed", "error", err.Error())
 			return 1
@@ -199,9 +206,20 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger) erro
 }
 
 // runServerWithStore permits deterministic startup failure and cleanup checks.
-func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Logger, ops startupStoreOps) error {
+func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Logger, ops startupStoreOps) (runErr error) {
 	metrics := diagnostics.NewMetrics()
 	masker := diagnostics.NewMasker()
+	// One bounded outlet per Access process, shared by every module below. Off
+	// and aggregate mode return a nil sink and create no writer.
+	sink, err := latencyobs.Open(latencyobs.Config{})
+	if err != nil {
+		return fmt.Errorf("latency observation outlet: %w", err)
+	}
+	defer func() {
+		if err := sink.Close(); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("latency observation shutdown: %w", err))
+		}
+	}()
 	resolver, err := clientaddr.NewResolver(cfg.HTTP.ClientAddress.TrustedProxies)
 	if err != nil {
 		return fmt.Errorf("client address configuration: %w", err)
@@ -233,13 +251,45 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		"result_limit_bytes", transport.ResultLimitBytes,
 		"http_max_body_bytes", transport.HTTPBodyBytes)
 
-	db, err := ops.open(ctx, cfg.DatabaseURL)
+	db, err := ops.open(ctx, cfg.DatabasePath)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer ops.close(db)
 	if err := ops.migrate(ctx, db); err != nil {
 		return fmt.Errorf("migrate store: %w", err)
+	}
+	var routeService *route.Service
+	if metrics != nil && metrics.Registry != nil {
+		metrics.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "access_sqlite_busy_errors",
+			Help: "Retryable SQLite contention errors observed by this node.",
+		}, func() float64 { return float64(db.BusyErrors()) }))
+		metrics.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "access_route_pending",
+			Help: "Route attach/close operations waiting for Central acknowledgement.",
+		}, func() float64 { return pendingRoutes(routeService) }))
+		metrics.Registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "access_device_session_earliest_expiry_unix_seconds",
+			Help: "Earliest live managed App-session deadline; zero means none.",
+		}, func() float64 { return earliestSessionExpiryUnix(db) }))
+	}
+
+	// The control client owns no local authority. It only reports metadata
+	// after the local schema exists, so its sequence is durable across a
+	// normal process restart.
+	var controlClient *control.Client
+	if cfg.External.ControlURL != "" {
+		controlClient, err = control.NewWithSequence(control.Config{
+			BaseURL: cfg.External.ControlURL, Token: cfg.External.NodeToken,
+			NodeID: cfg.External.NodeID, Incarnation: cfg.External.Incarnation,
+			RegionID: cfg.External.Region, HTTPSURL: cfg.PublicURL,
+			MQTTURL: cfg.External.MQTTURL, Capacity: uint32(cfg.External.NodeCapacity),
+			OnSuccess: func(at time.Time) { metrics.ControlLastSuccess.Set(float64(at.Unix())) },
+		}, logger, db.NextNodeSequence)
+		if err != nil {
+			return fmt.Errorf("central node client: %w", err)
+		}
 	}
 
 	storageService, err := payload.New(payload.Dependencies{
@@ -283,6 +333,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Metrics:     metrics,
 		Masker:      masker,
 		Logger:      logger,
+		Observation: sink,
 	})
 	if err != nil {
 		return err
@@ -322,7 +373,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 
 	authDeps := auth.Dependencies{
-		Store:     db,
+		Store:     db.Control(),
 		Admission: admissionService,
 		Enforcer:  lineManager,
 		Observer:  lineManager,
@@ -344,7 +395,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		},
 	}
 	if cfg.Mode == "external" {
-		authDeps.Sessions = db
+		authDeps.Sessions = db.Control()
 	}
 	authService, err := auth.New(authDeps)
 	if err != nil {
@@ -352,9 +403,11 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 
 	relayService, err := relay.New(relay.Dependencies{
-		Auth:     authService,
-		Store:    db,
-		Payloads: storageService,
+		Auth:        authService,
+		Store:       db,
+		Payloads:    storageService,
+		Metrics:     metrics,
+		Observation: sink,
 		Config: relay.Config{
 			Enabled:          cfg.Storage.Enabled,
 			NodeID:           cfg.Storage.NodeID,
@@ -373,10 +426,12 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	// finish through the node-local payload service. The broker blocks a
 	// reference publish until Stage returns a readable object.
 	stager, err := relay.NewStager(db, storageService, relay.StagerConfig{
-		Enabled:   cfg.Storage.Enabled,
-		NodeID:    cfg.Storage.NodeID,
-		OwnerID:   cfg.Storage.OwnerID,
-		Retention: cfg.Storage.Retention.D(),
+		Enabled:     cfg.Storage.Enabled,
+		NodeID:      cfg.Storage.NodeID,
+		OwnerID:     cfg.Storage.OwnerID,
+		Retention:   cfg.Storage.Retention.D(),
+		Metrics:     metrics,
+		Observation: sink,
 	})
 	if err != nil {
 		return fmt.Errorf("payload stager: %w", err)
@@ -391,6 +446,8 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Config: query.Config{
 			MaxTTL: cfg.Requests.MaxTTL.D(),
 		},
+		Metrics:     metrics,
+		Observation: sink,
 	})
 	if err != nil {
 		return fmt.Errorf("query lane: %w", err)
@@ -420,9 +477,10 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			NoticeInterval:           cfg.Requests.ForwardInterval.D(),
 			NoticeBatch:              cfg.Requests.BatchSize,
 		},
-		Metrics: metrics,
-		Masker:  masker,
-		Logger:  logger,
+		Metrics:     metrics,
+		Masker:      masker,
+		Logger:      logger,
+		Observation: sink,
 	}
 	if cfg.Mode == "external" {
 		requestDeps.Sessions = db
@@ -440,7 +498,7 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	}
 
 	pairingService, err := pairing.New(pairing.Dependencies{
-		Store:     db,
+		Store:     db.Control(),
 		Policy:    lineManager,
 		Transport: service,
 		Presence:  service,
@@ -481,6 +539,8 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			return err
 		}
 		externalService = external.New(trust, db, cfg.External.MQTTURL,
+			external.WithNodeIdentity(cfg.External.NodeID, cfg.External.Incarnation),
+			authorityOptions(trust),
 			external.WithHostEnforcer(authService),
 			external.WithDeviceGrants(pairingService, db, authService),
 			external.WithHostClients(db, service, presence),
@@ -491,12 +551,24 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	// HostReady is the only readiness source that advances an external
 	// enrollment. A probe principal cannot publish a Result, so it never
 	// reaches this handler, and the auth replay keeps its existing behavior.
-	service.SetReadyHandler(func(ctx context.Context, hostID string) error {
-		revocationErr := authService.ReplayPendingRevocations(ctx, hostID)
-		if externalService == nil {
-			return revocationErr
-		}
-		return errors.Join(revocationErr, externalService.HandleHostReady(ctx, hostID))
+	routeService = &route.Service{
+		Enrollments: db, Control: controlClient,
+		NodeID: cfg.External.NodeID, Incarnation: cfg.External.Incarnation,
+		Observe: func(operation string, ok bool) { observeRoute(metrics, operation, ok) },
+		Pending: db,
+	}
+	if err := routeService.Restore(ctx); err != nil {
+		logger.Warn("restore pending route operations failed", "error", err.Error())
+	}
+	service.SetReadyHandler(func(ctx context.Context, hostID string, ready *whalereinv1.HostReady) error {
+		return processHostReady(ctx, hostID, ready, routeService,
+			authService.ReplayPendingRevocations,
+			func(ctx context.Context, hostID string) error {
+				if externalService == nil {
+					return nil
+				}
+				return externalService.HandleHostReady(ctx, hostID)
+			})
 	})
 
 	dependencies := httpapi.Dependencies{
@@ -571,6 +643,13 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			return runLine(runCtx, lineManager, cfg, logger)
 		},
 		func(runCtx context.Context) {
+			startControlReporter(runCtx, controlClient)
+			go routeService.ReconcileLoop(runCtx, 10*time.Second)
+			var publisher authority.Publisher
+			if externalService != nil {
+				publisher = externalService
+			}
+			startAuthorityWorker(runCtx, controlClient, db, routeService, publisher, cfg, logger)
 			if storageService.Enabled() {
 				go relay.RunPayloadStorage(runCtx, storageService, stager, cfg.Storage.CleanupInterval.D(), logger)
 			}
@@ -590,6 +669,76 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 			}()
 			ops.cleanup(runCtx, db, cfg.Cleanup.Interval.D(), cfg.Cleanup.PairingTokenRetention.D(), logger, metrics)
 		}, logger, 10*time.Second)
+}
+
+func authorityOptions(trust external.Trust) external.Option {
+	if len(trust.Keys) == 0 {
+		return external.WithAuthorityPublicKey(nil)
+	}
+	return external.WithAuthorityPublicKey(trust.Keys[0].PublicKey)
+}
+
+func startAuthorityWorker(ctx context.Context, client *control.Client, db *store.Store,
+	routes *route.Service, publisher authority.Publisher, cfg config.Config, logger *slog.Logger) {
+	if client == nil || cfg.External.SessionEnvironment == "" {
+		return
+	}
+	worker := &authority.Worker{
+		Scopes: db, Routes: routes, Control: client, Publisher: publisher,
+		NodeID: cfg.External.NodeID, Incarnation: cfg.External.Incarnation,
+		Environment: cfg.External.SessionEnvironment, Logger: logger,
+	}
+	go worker.Run(ctx)
+}
+
+func pendingRoutes(service *route.Service) float64 {
+	if service == nil {
+		return 0
+	}
+	return float64(service.PendingCount())
+}
+
+func earliestSessionExpiryUnix(db *store.Store) float64 {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	expires, ok, err := db.EarliestSessionExpiry(ctx)
+	if err != nil || !ok {
+		return 0
+	}
+	return float64(expires.Unix())
+}
+
+func observeRoute(metrics *diagnostics.Metrics, operation string, ok bool) {
+	outcome := "failure"
+	if ok {
+		outcome = "success"
+	}
+	if operation == "close" {
+		metrics.RouteClose.WithLabelValues(outcome).Inc()
+		return
+	}
+	metrics.RouteAttach.WithLabelValues(outcome).Inc()
+}
+
+// processHostReady runs readiness side effects in a fixed order. A graceful
+// close is terminal for the route and does not advance enrollment readiness.
+func processHostReady(ctx context.Context, hostID string, ready *whalereinv1.HostReady, routes *route.Service,
+	replayRevocations func(context.Context, string) error, handleEnrollment func(context.Context, string) error) error {
+	if ready.GetRouteClosing() {
+		return routes.Close(ctx, hostID, ready)
+	}
+	revocationErr := replayRevocations(ctx, hostID)
+	routeErr := routes.Attach(ctx, hostID, ready)
+	enrollmentErr := handleEnrollment(ctx, hostID)
+	return errors.Join(revocationErr, enrollmentErr, routeErr)
+}
+
+// startControlReporter starts the node heartbeat when Central is configured.
+func startControlReporter(ctx context.Context, client *control.Client) {
+	if client == nil {
+		return
+	}
+	go client.Run(ctx, control.DefaultInterval)
 }
 
 // runServices owns server and worker shutdown after resources are initialized.

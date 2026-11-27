@@ -93,7 +93,7 @@ func (e regionalGrantEnforcement) EnforceRevocationScope(ctx context.Context, sc
 // credentials before Host confirmation and after a scoped revocation.
 func TestCloudDevicePairingActivationRecoveryAndRevocation(t *testing.T) {
 	ctx := context.Background()
-	database, _ := storetest.New(t)
+	database, _ := storetest.NewSQLite(t)
 	provider := newProvider(t)
 	peer := &regionalPairingPeer{
 		hostKey: bytes.Repeat([]byte{1}, 32), deviceKey: bytes.Repeat([]byte{2}, 32),

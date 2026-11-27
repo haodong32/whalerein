@@ -9,6 +9,7 @@ import { SourceAdapter } from 'whalerein-host/contracts/source.js'
 import { DshConversation } from './conversation.js'
 import { attachmentOccurrence } from './projection.js'
 import { AdapterError, DefinitiveExecutionError, PluginError } from 'whalerein-host/errors.js'
+import { batchToken, emitFact, emitFactAt } from 'whalerein-host/observation/index.js'
 
 export * from './native.js'
 export { summaryToProto } from 'whalerein-host/contracts/serialization.js'
@@ -27,6 +28,98 @@ function approvalMarker(approvals) {
   ]))
 }
 
+function utf8Bytes(value) {
+  return typeof value === 'string' ? Buffer.byteLength(value, 'utf8') : 0
+}
+
+function messageTextBytes(data) {
+  if (Array.isArray(data?.message?.content)) {
+    let bytes = 0
+    for (const block of data.message.content) {
+      if (block?.type === 'text') bytes += utf8Bytes(block.text)
+    }
+    return bytes
+  }
+  // Older native event shapes carry one visible text field directly.
+  return utf8Bytes(data?.text)
+}
+
+/**
+ * Typed, content-free fields for one native DSH boundary. Only identities
+ * (tokenized by the outlet) and byte/sequence sizes cross the seam; text and
+ * provider data stay in the adapter.
+ */
+export function dshLatencyFields(event, native) {
+  if (!event || typeof event.sessionId !== 'string' || event.sessionId === '') return null
+  if (native === 'assistant-preview') {
+    const data = event.data ?? {}
+    if (typeof data.stream_id !== 'string' || data.stream_id === '') return null
+    const seq = Number.isSafeInteger(data.revision) && data.revision >= 0 ? data.revision : 0
+    return {
+      stream: data.stream_id,
+      attempt: typeof data.reply_id === 'string' && data.reply_id !== '' ? data.reply_id : data.stream_id,
+      block: typeof data.block_id === 'string' ? data.block_id : '',
+      seq_start: seq,
+      seq_end: seq,
+      bytes: typeof data.text === 'string' ? utf8Bytes(data.text) : utf8Bytes(data.block_text),
+    }
+  }
+  if (native === 'assistant-message') {
+    const data = event.data ?? {}
+    const seq = Number.isSafeInteger(event.dshSeq) && event.dshSeq >= 0 ? event.dshSeq : 0
+    const reply = typeof data.reply_id === 'string' && data.reply_id !== '' ? data.reply_id : String(seq)
+    return {
+      stream: `${event.sessionId}:${reply}`,
+      attempt: reply,
+      block: 'message',
+      seq_start: seq,
+      seq_end: seq,
+      bytes: messageTextBytes(data),
+    }
+  }
+  return null
+}
+
+/**
+ * Add the one batch token an adapter callback and its handoff share. The raw
+ * identity is `<stream>:<seq_start>:<seq_end>`; the outlet only exposes the
+ * tokenizer, so the composite is hashed here and never leaves this function.
+ */
+function withBatchToken(observation, fields) {
+  if (!fields) return null
+  return {
+    ...fields,
+    batch: batchToken(observation, fields.stream, fields.seq_start, fields.seq_end),
+  }
+}
+
+/**
+ * Observed sequence range of one normalized preview update.
+ *
+ * The native revision counts every native frame, while the Host's sequence
+ * advances only for published previews and once per split part. Only the
+ * normalized range can join the adapter facts to the Host queue, so the
+ * preview callback reports it instead of the raw revision.
+ */
+function previewLatencyFields(update, native) {
+  const live = update?.live
+  if (!native || !live) return null
+  const stream = live.attempt?.attempt_id
+  if (typeof stream !== 'string' || stream === '') return null
+  // A split part carries its own text; a replacement carries the full block.
+  const bytes = typeof live.delta?.text === 'string'
+    ? utf8Bytes(live.delta.text)
+    : (typeof live.reset?.text === 'string' ? utf8Bytes(live.reset.text) : native.bytes)
+  return {
+    stream,
+    attempt: native.attempt,
+    block: typeof live.block_id === 'string' ? live.block_id : '',
+    seq_start: live.first_seq,
+    seq_end: live.last_seq,
+    bytes,
+  }
+}
+
 export class DshAdapter extends SourceAdapter {
   #watchers = new Map()
   #committed = []
@@ -39,14 +132,26 @@ export class DshAdapter extends SourceAdapter {
    * @param {object} [options.logger]
    * @param {string} [options.hostId]
    */
-  constructor({ now = Date.now, logger = null, hostId = '' } = {}) {
+  constructor({ now = Date.now, logger = null, hostId = '', observation = null } = {}) {
     super()
     this.now = now
     this.logger = logger
     this.hostId = typeof hostId === 'string' ? hostId : ''
+    // One process outlet shared with the Host; this adapter only adds its own
+    // producer view. No observation module is imported by the Host.
+    this.observation = observation
     this.opened = false
     this.deliveryModes = ['START_IF_IDLE']
     this.conversation = new DshConversation(this)
+  }
+
+  /** Capture a boundary timestamp without letting a rejected clock break DSH. */
+  observationNow() {
+    try {
+      return typeof this.observation?.nowNs === 'function' ? this.observation.nowNs() : null
+    } catch {
+      return null
+    }
   }
 
   async open({ metadata } = {}) {
@@ -180,13 +285,60 @@ export class DshAdapter extends SourceAdapter {
     for (const update of this.conversation.interrupt(sessionId, options)) this.#publish(sessionId, update)
   }
 
-  observeNative(event) {
+  observeNative(event, boundaryAt = null) {
     if(!this.opened)return
-    if(event.ephemeral){this.#publish(event.sessionId,this.conversation.notification(event));return}
+    const native = event?.ephemeral
+      ? 'assistant-preview'
+      : (event?.type === 'assistant/message' && event?.kind === 'output' ? 'assistant-message' : null)
+    // The callback stamp is taken at the native boundary (the adapter passes
+    // its own reading) and the handoff only after normalization returns. A
+    // rejected clock leaves the callback stage explicitly unobserved.
+    const callbackAt = boundaryAt ?? this.observationNow()
+    if(event.ephemeral){
+      const nativeFields = native ? dshLatencyFields(event, native) : null
+      const normalized = this.conversation.notification(event)
+      const updates = normalized == null ? [] : (Array.isArray(normalized) ? normalized : [normalized])
+      if (updates.length === 0) {
+        // The native callback is still evidence even when normalization
+        // suppresses the update. It has no normalized interval, so it carries
+        // no batch: a native revision is not a Host sequence and matching one
+        // would fabricate a join to an unrelated published preview.
+        if (nativeFields && callbackAt !== null) {
+          emitFactAt(this.observation, callbackAt, 'dsh_callback', {
+            ...nativeFields, native, disposition: 'suppressed',
+          })
+        }
+        return
+      }
+      for (const update of updates) {
+        const latency = withBatchToken(this.observation, previewLatencyFields(update, nativeFields))
+        const disposition = updates.length > 1 ? 'split' : 'published'
+        if (latency && callbackAt !== null) {
+          emitFactAt(this.observation, callbackAt, 'dsh_callback', {
+            ...latency, native, disposition,
+          })
+        }
+        // Handoff always precedes the update it announces, so a published
+        // preview can never be observed without its ordered adapter handoff.
+        if (latency) emitFact(this.observation, 'dsh_handoff', { ...latency, disposition })
+        this.#publish(event.sessionId, update)
+      }
+      return
+    }
+    const latency = native ? withBatchToken(this.observation, dshLatencyFields(event, native)) : null
+    if (latency && callbackAt !== null) {
+      emitFactAt(this.observation, callbackAt, 'dsh_callback', {
+        ...latency, native, disposition: 'published',
+      })
+    }
     // DSH emits native settlement immediately after its durable append. Defer
     // the ordered commit projection one microtask so the native sequence can
     // bind a mid-generation Attempt even when its start predated plugin load.
     if(this.#committed.length>=1000){this.#committed=[];this.#publish(event.sessionId,{session:{session_id:event.sessionId},reset:{reason:'source_observer_overflow'}})}
+    // The committed handoff is stamped before the ordered projection is
+    // queued, so callback <= handoff <= every later Host enqueue holds even
+    // when the microtask runs after more native events.
+    if (latency) emitFact(this.observation, 'dsh_handoff', { ...latency, disposition: 'published' })
     this.#committed.push(event)
     if(!this.#scheduled){
       this.#scheduled=true

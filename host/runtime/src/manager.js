@@ -1372,10 +1372,17 @@ export class ConnectionManager {
       throw this.#failFast('conflict', 'the issued credential belongs to another Host identity')
     }
     const config = this.#managedConfig(record, prepared, credential)
+    const routeGeneration = await this.#nextRouteGeneration(record)
     const rawAccess = this.#options.mqtt({
       url: credential.mqttUrl,
       hostId: prepared.hostId,
       token: credential.password,
+      routeNodeId: credential.nodeId ?? '',
+      routeIncarnation: credential.incarnation ?? '',
+      routeService: record.service?.id ?? '',
+      routeEnvironment: record.service?.environment ?? record.environment ?? '',
+      routeGeneration,
+      routeNoisePublicKey: prepared.identity.noisePublicKey,
       authorizationPublicKey: prepared.identity.signingPublicKey,
       // The managed route is the only place that knows the Access origin and
       // the signing key, and the Host-authority relay needs both: without them
@@ -1591,6 +1598,18 @@ export class ConnectionManager {
     throw new PluginError('unavailable', 'Host readiness was not observed')
   }
 
+  async #nextRouteGeneration(record) {
+    const current = Number(record.bindings?.routeGeneration ?? '0')
+    // Never wrap or reset a route generation: a lower value would let a retired
+    // route look fresh. A corrupt/huge binding is a hard startup failure.
+    if (!Number.isSafeInteger(current) || current < 0 || current >= Number.MAX_SAFE_INTEGER) {
+      throw this.#failFast('registry_corrupt', 'route generation is outside the safe range')
+    }
+    const next = current + 1
+    await this.#registry.setBindings(record.id, { routeGeneration: String(next) })
+    return next
+  }
+
   #managedConfig(record, prepared, credential) {
     const base = { ...this.#options.runtimeConfig }
     return {
@@ -1607,6 +1626,12 @@ export class ConnectionManager {
       reconnectMaxMs: base.reconnectMaxMs ?? 30_000,
       logLevel: base.logLevel ?? 'info',
       accessUrl: credential.accessOrigin,
+      authorityPublicKey: credential.authorityPublicKey ?? '',
+      // Until the Device proof-key registration handshake ships, the Host
+      // verifies/installs permits but keeps Access admission as the dispatch
+      // gate. Flipping this without that handshake would fail every managed
+      // command closed.
+      requireAuthority: false,
     }
   }
 

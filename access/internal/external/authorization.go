@@ -91,6 +91,7 @@ func CanonicalInput(auth *whalereinv1.ExternalAuthorization) string {
 		"|" + strconv.FormatInt(auth.GetIssuedAtUnixMs(), 10),
 		"|" + strconv.FormatInt(auth.GetExpiresAtUnixMs(), 10),
 		"|" + base64.RawURLEncoding.EncodeToString(auth.GetNonce()),
+		"|" + base64.RawURLEncoding.EncodeToString(auth.GetSessionProofPublicKey()),
 	}
 	return strings.Join(lines, "\n")
 }

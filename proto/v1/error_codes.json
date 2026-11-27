@@ -168,6 +168,27 @@
       "exitCode": 8,
       "action": "retry",
       "meaning": "The Host replaced the channel that owned the observation; establish a new channel and retry."
+    },
+    {
+      "name": "route_stale",
+      "number": 23,
+      "exitCode": 8,
+      "action": "refresh",
+      "meaning": "The serving route is closed or superseded; refresh the directory and retry on the current node."
+    },
+    {
+      "name": "policy_denied",
+      "number": 24,
+      "exitCode": 4,
+      "action": "reauth",
+      "meaning": "Current managed policy denies this exact scope; do not retry on another node."
+    },
+    {
+      "name": "node_unavailable",
+      "number": 25,
+      "exitCode": 5,
+      "action": "retry",
+      "meaning": "The authenticated node is not accepting new placements or has no current Host authority."
     }
   ]
 }

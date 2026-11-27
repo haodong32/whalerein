@@ -691,6 +691,7 @@ export class SecurityManager {
       enrollmentGeneration,
       c2h: derived.c2h,
       h2c: derived.h2c,
+      handshakeHash: pending.noise.handshakeHash,
       createdAt: now,
       lastUsedAt: now,
       inFlight: 0,
@@ -701,6 +702,12 @@ export class SecurityManager {
     this.#channels.set(channelId, channel)
     this.logger?.info('channel_established', { device: deviceId, channel: channelId })
     return new Uint8Array(0)
+  }
+
+  /** Noise transcript hash for the exact live channel, if it exists. */
+  channelTranscript(channelId, deviceId) {
+    const channel = this.#resolveChannel(channelId, deviceId)
+    return channel?.handshakeHash ?? null
   }
 
   #resolveChannel(channelId, deviceId) {

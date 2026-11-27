@@ -55,6 +55,12 @@ enum RequestKind {
   // Access -> Host receive advertisement for the Host -> Access hop. `body` is
   // a ReceiveAdvertisement. Internal: a Device request can never submit it.
   REQUEST_KIND_ACCESS_READY = 8;
+  // Access -> Host Central-signed App-session permit. `body` is a
+  // ScopedAuthority. The Host verifies it independently before installing it.
+  REQUEST_KIND_AUTHORITY = 9;
+  // Device -> Host proof of possession for the App-session key, bound to the
+  // exact Noise transcript. Access relays it but cannot verify the signature.
+  REQUEST_KIND_SESSION_PROOF = 10;
 }
 
 enum ErrorCode {
@@ -84,6 +90,16 @@ enum ErrorCode {
   pairing_committed_unavailable = 21;
   // Access committed this exact FINISH, but Host confirmation is unavailable.
   pairing_committed_unconfirmed = 22;
+  // The Host's serving route is closed or has been superseded by a newer
+  // generation. This is a routing outcome, not a policy denial: the Device may
+  // refresh the directory and retry on the current node.
+  route_stale = 23;
+  // Current managed policy refuses this exact scope. A Device must not retry
+  // the request on another node; the denial is terminal for the scope.
+  policy_denied = 24;
+  // The authenticated node is not accepting new placements or has no current
+  // authority for the Host.
+  node_unavailable = 25;
   // The authenticated Host replaced the channel that owned this observation.
   channel_replaced = 220;
 }
@@ -379,6 +395,12 @@ message HostRequest {
   // admission. It is matched separately from the grant revision so a re-added
   // Host or a re-paired client cannot attach to an older query.
   uint64 enrollment_generation = 19;
+  // Managed App session that admitted the request. Access fills it from the
+  // durable request row; Host uses it to look up the installed authority.
+  string device_session_id = 20;
+  // The session has an App-session proof key, so Host must require an installed
+  // authority before dispatch. Access derives it from device_sessions.
+  bool proof_expected = 21;
 }
 
 message HostResult {
@@ -594,6 +616,21 @@ message HostReady {
   // Required relay epoch; must equal RELAY_EPOCH_V5 (5). Access refuses to
   // mark an older or unknown epoch Host ready.
   uint32 relay_version = 6;
+  // Host route proof. Access forwards this tuple to Central after verifying it
+  // observed the authenticated Host transport. Central binds the signature to
+  // the serving node and incarnation filled by Access.
+  uint64 route_generation = 7;
+  string route_challenge = 8;
+  int64 route_signed_at_unix_ms = 9;
+  bytes route_signature = 10;
+  string route_service = 11;
+  string route_environment = 12;
+  bytes route_signing_public_key = 13;
+  bytes route_noise_public_key = 14;
+  // Graceful shutdown marker. Access closes the exact open tuple; a transient
+  // disconnect leaves it open for the same process to reattach.
+  bool route_closing = 15;
+
 }
 
 // Host-scoped grant revocation. The host id and device id come from the URL.
@@ -1451,6 +1488,248 @@ message UpdatePendingQueue {
 }
 
 // ---------------------------------------------------------------------------
+// Independent Access nodes (contract v1)
+//
+// These messages describe the authenticated control plane between Central and
+// one Access node, and the route view Central gives endpoints. They never carry
+// conversation content, request bodies or temporary ciphertext. A node
+// heartbeat reports metadata only; a Host route is the single placement fact.
+// ---------------------------------------------------------------------------
+
+enum RouteState {
+  ROUTE_STATE_UNSPECIFIED = 0;
+  ROUTE_OPEN = 1;
+  ROUTE_CLOSED = 2;
+}
+
+// An Access node incarnation. A replacement disk or a restored process gets a
+// fresh incarnation bounded to its registered node credential; a retired
+// incarnation can never report itself live again.
+message NodeIdentity {
+  string node_id = 1;
+  string incarnation = 2;
+  string region_id = 3;
+  string https_url = 4;
+  string mqtt_url = 5;
+  // Advertised capacity in whole Host slots. Zero means no new placements.
+  uint32 capacity = 6;
+  int64 registered_at_unix_ms = 7;
+}
+
+// Access -> Central every ten seconds on the authenticated node connection.
+message NodeReport {
+  string node_id = 1;
+  string incarnation = 2;
+  // Strictly increasing per incarnation. A duplicate or stale sequence is
+  // ignored for health and never refreshes last observed.
+  uint64 sequence = 3;
+  bool ready = 4;
+  uint32 capacity = 5;
+  uint32 host_count = 6;
+  // Policy revisions installed from Central. Content-free.
+  repeated string applied_policy_revisions = 7;
+  int64 observed_at_unix_ms = 8;
+}
+
+message NodeReportAck {
+  // Central receipt time. Health is derived from this time, never the node
+  // supplied observation time.
+  int64 received_at_unix_ms = 1;
+  bool placement_eligible = 2;
+  string rejection_reason = 3;
+}
+
+// Host -> Access -> Central. The Host signs service, environment, Host, node,
+// incarnation, generation, a fresh attach challenge and its pinned keys.
+message HostRouteAttach {
+  string host_id = 1;
+  string workspace_id = 2;
+  string service = 3;
+  string environment = 4;
+  string node_id = 5;
+  string incarnation = 6;
+  uint64 generation = 7;
+  string challenge = 8;
+  int64 signed_at_unix_ms = 9;
+  bytes host_signature = 10;
+  bytes host_signing_public_key = 11;
+  bytes host_noise_public_key = 12;
+  // True only when the node observed an authenticated Host transport.
+  bool node_observed = 13;
+  string node_incarnation = 14;
+}
+
+message HostRoute {
+  string host_id = 1;
+  string workspace_id = 2;
+  string node_id = 3;
+  string incarnation = 4;
+  uint64 generation = 5;
+  RouteState state = 6;
+  string challenge = 7;
+  int64 updated_at_unix_ms = 8;
+}
+
+enum RouteOutcome {
+  ROUTE_OUTCOME_UNSPECIFIED = 0;
+  ROUTE_COMMITTED = 1;
+  ROUTE_IDEMPOTENT = 2;
+  ROUTE_STALE = 3;
+  ROUTE_CONFLICT = 4;
+  ROUTE_REFUSED = 5;
+}
+
+message HostRouteAttachReceipt {
+  RouteOutcome outcome = 1;
+  HostRoute route = 2;
+  ErrorCode error_code = 3;
+  string reason = 4;
+}
+
+// A proved close. A close for a generation at or above the stored high-water
+// mark is persisted as closed even when its attach has not arrived. A lower
+// generation is stale and cannot mutate the row. `host_signature` is required
+// for a generation above the high-water mark; an equal admitted tuple may be
+// closed by the named node alone.
+message HostRouteClose {
+  string host_id = 1;
+  string node_id = 2;
+  string incarnation = 3;
+  uint64 generation = 4;
+  int64 signed_at_unix_ms = 5;
+  bytes host_signature = 6;
+  bytes host_signing_public_key = 7;
+  string challenge = 8;
+  string service = 9;
+  string environment = 10;
+}
+
+message HostRouteCloseReceipt {
+  RouteOutcome outcome = 1;
+  HostRoute route = 2;
+  ErrorCode error_code = 3;
+  string reason = 4;
+}
+
+// Access -> Central inventory after reconnect or restart. Central compares the
+// reported tuples with its durable routes and returns the authoritative state.
+// Inventory can close a matching route; it can never create or reopen one.
+message NodeInventory {
+  string node_id = 1;
+  string incarnation = 2;
+  uint64 sequence = 3;
+  repeated HostRoute routes = 4;
+}
+
+// Operator-visible drain state for one serving incarnation. A drained node is
+// never advertised for new placements; established routes remain readable.
+message NodeDrain {
+  string node_id = 1;
+  string incarnation = 2;
+  bool drained = 3;
+}
+
+message NodeInventoryAck {
+  repeated HostRoute routes = 1;
+  uint64 inventory_sequence = 2;
+}
+
+// Central -> endpoint directory answer. A Device follows its Host's node; a
+// Host asks for eligible placement candidates. Freshness is Central receipt
+// time, and only an open route is advertised.
+message RouteDiscovery {
+  string host_id = 1;
+  HostRoute route = 2;
+  string https_url = 3;
+  string mqtt_url = 4;
+  bool fresh = 5;
+  int64 observed_at_unix_ms = 6;
+  // Reasons are stable machine values, never content.
+  string unavailable_reason = 7;
+}
+
+// Central-signed authority for one managed scope. The lifetime is at most
+// sixty seconds from Central confirmation. The same message authorizes a
+// command, a result read, an attachment read and a live observation, because
+// every protected path checks the same immutable scope and absolute deadline.
+message ScopedAuthority {
+  string auth_version = 1;
+  string authority_id = 2;
+  string issuer = 3;
+  string audience = 4;
+  string environment = 5;
+  string workspace_id = 6;
+  string host_id = 7;
+  string device_id = 8;
+  string session_id = 9;
+  uint64 grant_generation = 10;
+  uint64 host_grant_generation = 11;
+  string serving_node_id = 12;
+  uint64 route_generation = 13;
+  // App-session proof key bound at session creation. It is immutable for the
+  // session and never replaced by a renewal.
+  bytes session_proof_public_key = 14;
+  string policy_revision = 15;
+  int64 issued_at_unix_ms = 16;
+  int64 expires_at_unix_ms = 17;
+  string key_id = 18;
+  bytes signature = 19;
+}
+
+// Access -> Central renewal request. Access batches this with its heartbeat.
+message AuthorityRenewalRequest {
+  string host_id = 1;
+  string device_id = 2;
+  string session_id = 3;
+  uint64 grant_generation = 4;
+  uint64 route_generation = 5;
+  string node_id = 6;
+  string incarnation = 7;
+  repeated string current_authority_ids = 8;
+  string environment = 9;
+  // The App-session proof public key Access holds. Central refuses a
+  // replacement; the binding is immutable for the session.
+  bytes session_proof_public_key = 10;
+  uint64 host_grant_generation = 11;
+}
+
+message AuthorityRenewalResponse {
+  ScopedAuthority authority = 1;
+  // The greatest absolute deadline Central has ever committed for this exact
+  // scope. It never decreases across nodes, routes or restarts while the
+  // scope is outstanding.
+  int64 maximum_expires_at_unix_ms = 2;
+  ErrorCode error_code = 3;
+  string reason = 4;
+}
+
+message AuthorityAcknowledgement {
+  string node_id = 1;
+  string incarnation = 2;
+  repeated string authority_ids = 3;
+  string applied_policy_revision = 4;
+  int64 applied_at_unix_ms = 5;
+}
+
+enum RevocationState {
+  REVOCATION_STATE_UNSPECIFIED = 0;
+  REVOCATION_PENDING_ENFORCEMENT = 1;
+  REVOCATION_EFFECTIVE = 2;
+}
+
+// Content-free enforcement report. Acknowledgements record delivery progress
+// only; `effective` is derived from the frozen maximum affected deadline, not
+// from an acknowledgement.
+message RevocationStatus {
+  string scope_type = 1;
+  string scope_id = 2;
+  uint64 revision = 3;
+  int64 frozen_expires_at_unix_ms = 4;
+  RevocationState state = 5;
+  int64 recorded_at_unix_ms = 6;
+}
+
+// ---------------------------------------------------------------------------
 // External account mode (contract v1, ratified 2026-11-14)
 //
 // Standalone mode never sends these messages. An endpoint carries a portable
@@ -1481,6 +1760,9 @@ message ExternalAuthorization {
   bytes nonce = 18;
   string key_id = 19;
   bytes signature = 20;
+  // App-session proof public key bound at Cloud session creation. Access stores
+  // it for authority requests; Host compares it with the permit.
+  bytes session_proof_public_key = 21;
 }
 
 // The Host proves possession of the approved signing key by signing the
@@ -1500,6 +1782,13 @@ message HostCredential {
   string mqtt_url = 2;
   string username = 3;
   string password = 4;
+  // The serving node identity. The Host signs its route attachment with these
+  // values so Central can bind the proof to the actual node connection.
+  string node_id = 5;
+  string incarnation = 6;
+  // Issuer key for Central-signed App-session permits. The Host verifies every
+  // delivered ScopedAuthority independently with this key.
+  bytes authority_public_key = 7;
 }
 
 enum EnrollmentState {
@@ -1568,4 +1857,18 @@ message OperationStatus {
 // Host -> Access result of REQUEST_KIND_HOST_CLIENTS. No Session content or IDs.
 message HostClients {
   repeated string observing_device_ids = 1;
+}
+
+
+// Device -> Host proof of possession for the App-session proof key. The
+// signature covers session/host/device/channel/transcript/issued/expires.
+message SessionProof {
+  string session_id = 1;
+  string host_id = 2;
+  string device_id = 3;
+  string channel_id = 4;
+  bytes transcript_hash = 5;
+  int64 issued_at_unix_ms = 6;
+  int64 expires_at_unix_ms = 7;
+  bytes signature = 8;
 }

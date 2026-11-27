@@ -109,20 +109,28 @@ const (
 	// Access -> Host receive advertisement for the Host -> Access hop. `body` is
 	// a ReceiveAdvertisement. Internal: a Device request can never submit it.
 	RequestKind_REQUEST_KIND_ACCESS_READY RequestKind = 8
+	// Access -> Host Central-signed App-session permit. `body` is a
+	// ScopedAuthority. The Host verifies it independently before installing it.
+	RequestKind_REQUEST_KIND_AUTHORITY RequestKind = 9
+	// Device -> Host proof of possession for the App-session key, bound to the
+	// exact Noise transcript. Access relays it but cannot verify the signature.
+	RequestKind_REQUEST_KIND_SESSION_PROOF RequestKind = 10
 )
 
 // Enum value maps for RequestKind.
 var (
 	RequestKind_name = map[int32]string{
-		0: "REQUEST_KIND_UNSPECIFIED",
-		1: "REQUEST_KIND_HANDSHAKE",
-		2: "REQUEST_KIND_QUERY",
-		3: "REQUEST_KIND_COMMAND",
-		4: "REQUEST_KIND_PAIRING_CLAIM",
-		5: "REQUEST_KIND_PAIRING_AUTHORIZE",
-		6: "REQUEST_KIND_REVOCATION",
-		7: "REQUEST_KIND_HOST_CLIENTS",
-		8: "REQUEST_KIND_ACCESS_READY",
+		0:  "REQUEST_KIND_UNSPECIFIED",
+		1:  "REQUEST_KIND_HANDSHAKE",
+		2:  "REQUEST_KIND_QUERY",
+		3:  "REQUEST_KIND_COMMAND",
+		4:  "REQUEST_KIND_PAIRING_CLAIM",
+		5:  "REQUEST_KIND_PAIRING_AUTHORIZE",
+		6:  "REQUEST_KIND_REVOCATION",
+		7:  "REQUEST_KIND_HOST_CLIENTS",
+		8:  "REQUEST_KIND_ACCESS_READY",
+		9:  "REQUEST_KIND_AUTHORITY",
+		10: "REQUEST_KIND_SESSION_PROOF",
 	}
 	RequestKind_value = map[string]int32{
 		"REQUEST_KIND_UNSPECIFIED":       0,
@@ -134,6 +142,8 @@ var (
 		"REQUEST_KIND_REVOCATION":        6,
 		"REQUEST_KIND_HOST_CLIENTS":      7,
 		"REQUEST_KIND_ACCESS_READY":      8,
+		"REQUEST_KIND_AUTHORITY":         9,
+		"REQUEST_KIND_SESSION_PROOF":     10,
 	}
 )
 
@@ -193,6 +203,16 @@ const (
 	ErrorCode_pairing_committed_unavailable ErrorCode = 21
 	// Access committed this exact FINISH, but Host confirmation is unavailable.
 	ErrorCode_pairing_committed_unconfirmed ErrorCode = 22
+	// The Host's serving route is closed or has been superseded by a newer
+	// generation. This is a routing outcome, not a policy denial: the Device may
+	// refresh the directory and retry on the current node.
+	ErrorCode_route_stale ErrorCode = 23
+	// Current managed policy refuses this exact scope. A Device must not retry
+	// the request on another node; the denial is terminal for the scope.
+	ErrorCode_policy_denied ErrorCode = 24
+	// The authenticated node is not accepting new placements or has no current
+	// authority for the Host.
+	ErrorCode_node_unavailable ErrorCode = 25
 	// The authenticated Host replaced the channel that owned this observation.
 	ErrorCode_channel_replaced ErrorCode = 220
 )
@@ -223,6 +243,9 @@ var (
 		20:  "pairing_fenced",
 		21:  "pairing_committed_unavailable",
 		22:  "pairing_committed_unconfirmed",
+		23:  "route_stale",
+		24:  "policy_denied",
+		25:  "node_unavailable",
 		220: "channel_replaced",
 	}
 	ErrorCode_value = map[string]int32{
@@ -249,6 +272,9 @@ var (
 		"pairing_fenced":                20,
 		"pairing_committed_unavailable": 21,
 		"pairing_committed_unconfirmed": 22,
+		"route_stale":                   23,
+		"policy_denied":                 24,
+		"node_unavailable":              25,
 		"channel_replaced":              220,
 	}
 )
@@ -1694,6 +1720,162 @@ func (QueueAction) EnumDescriptor() ([]byte, []int) {
 	return file_whalerein_proto_rawDescGZIP(), []int{27}
 }
 
+type RouteState int32
+
+const (
+	RouteState_ROUTE_STATE_UNSPECIFIED RouteState = 0
+	RouteState_ROUTE_OPEN              RouteState = 1
+	RouteState_ROUTE_CLOSED            RouteState = 2
+)
+
+// Enum value maps for RouteState.
+var (
+	RouteState_name = map[int32]string{
+		0: "ROUTE_STATE_UNSPECIFIED",
+		1: "ROUTE_OPEN",
+		2: "ROUTE_CLOSED",
+	}
+	RouteState_value = map[string]int32{
+		"ROUTE_STATE_UNSPECIFIED": 0,
+		"ROUTE_OPEN":              1,
+		"ROUTE_CLOSED":            2,
+	}
+)
+
+func (x RouteState) Enum() *RouteState {
+	p := new(RouteState)
+	*p = x
+	return p
+}
+
+func (x RouteState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RouteState) Descriptor() protoreflect.EnumDescriptor {
+	return file_whalerein_proto_enumTypes[28].Descriptor()
+}
+
+func (RouteState) Type() protoreflect.EnumType {
+	return &file_whalerein_proto_enumTypes[28]
+}
+
+func (x RouteState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RouteState.Descriptor instead.
+func (RouteState) EnumDescriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{28}
+}
+
+type RouteOutcome int32
+
+const (
+	RouteOutcome_ROUTE_OUTCOME_UNSPECIFIED RouteOutcome = 0
+	RouteOutcome_ROUTE_COMMITTED           RouteOutcome = 1
+	RouteOutcome_ROUTE_IDEMPOTENT          RouteOutcome = 2
+	RouteOutcome_ROUTE_STALE               RouteOutcome = 3
+	RouteOutcome_ROUTE_CONFLICT            RouteOutcome = 4
+	RouteOutcome_ROUTE_REFUSED             RouteOutcome = 5
+)
+
+// Enum value maps for RouteOutcome.
+var (
+	RouteOutcome_name = map[int32]string{
+		0: "ROUTE_OUTCOME_UNSPECIFIED",
+		1: "ROUTE_COMMITTED",
+		2: "ROUTE_IDEMPOTENT",
+		3: "ROUTE_STALE",
+		4: "ROUTE_CONFLICT",
+		5: "ROUTE_REFUSED",
+	}
+	RouteOutcome_value = map[string]int32{
+		"ROUTE_OUTCOME_UNSPECIFIED": 0,
+		"ROUTE_COMMITTED":           1,
+		"ROUTE_IDEMPOTENT":          2,
+		"ROUTE_STALE":               3,
+		"ROUTE_CONFLICT":            4,
+		"ROUTE_REFUSED":             5,
+	}
+)
+
+func (x RouteOutcome) Enum() *RouteOutcome {
+	p := new(RouteOutcome)
+	*p = x
+	return p
+}
+
+func (x RouteOutcome) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RouteOutcome) Descriptor() protoreflect.EnumDescriptor {
+	return file_whalerein_proto_enumTypes[29].Descriptor()
+}
+
+func (RouteOutcome) Type() protoreflect.EnumType {
+	return &file_whalerein_proto_enumTypes[29]
+}
+
+func (x RouteOutcome) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RouteOutcome.Descriptor instead.
+func (RouteOutcome) EnumDescriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{29}
+}
+
+type RevocationState int32
+
+const (
+	RevocationState_REVOCATION_STATE_UNSPECIFIED   RevocationState = 0
+	RevocationState_REVOCATION_PENDING_ENFORCEMENT RevocationState = 1
+	RevocationState_REVOCATION_EFFECTIVE           RevocationState = 2
+)
+
+// Enum value maps for RevocationState.
+var (
+	RevocationState_name = map[int32]string{
+		0: "REVOCATION_STATE_UNSPECIFIED",
+		1: "REVOCATION_PENDING_ENFORCEMENT",
+		2: "REVOCATION_EFFECTIVE",
+	}
+	RevocationState_value = map[string]int32{
+		"REVOCATION_STATE_UNSPECIFIED":   0,
+		"REVOCATION_PENDING_ENFORCEMENT": 1,
+		"REVOCATION_EFFECTIVE":           2,
+	}
+)
+
+func (x RevocationState) Enum() *RevocationState {
+	p := new(RevocationState)
+	*p = x
+	return p
+}
+
+func (x RevocationState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RevocationState) Descriptor() protoreflect.EnumDescriptor {
+	return file_whalerein_proto_enumTypes[30].Descriptor()
+}
+
+func (RevocationState) Type() protoreflect.EnumType {
+	return &file_whalerein_proto_enumTypes[30]
+}
+
+func (x RevocationState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RevocationState.Descriptor instead.
+func (RevocationState) EnumDescriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{30}
+}
+
 type EnrollmentState int32
 
 const (
@@ -1731,11 +1913,11 @@ func (x EnrollmentState) String() string {
 }
 
 func (EnrollmentState) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[28].Descriptor()
+	return file_whalerein_proto_enumTypes[31].Descriptor()
 }
 
 func (EnrollmentState) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[28]
+	return &file_whalerein_proto_enumTypes[31]
 }
 
 func (x EnrollmentState) Number() protoreflect.EnumNumber {
@@ -1744,7 +1926,7 @@ func (x EnrollmentState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use EnrollmentState.Descriptor instead.
 func (EnrollmentState) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{28}
+	return file_whalerein_proto_rawDescGZIP(), []int{31}
 }
 
 type OperationState int32
@@ -1786,11 +1968,11 @@ func (x OperationState) String() string {
 }
 
 func (OperationState) Descriptor() protoreflect.EnumDescriptor {
-	return file_whalerein_proto_enumTypes[29].Descriptor()
+	return file_whalerein_proto_enumTypes[32].Descriptor()
 }
 
 func (OperationState) Type() protoreflect.EnumType {
-	return &file_whalerein_proto_enumTypes[29]
+	return &file_whalerein_proto_enumTypes[32]
 }
 
 func (x OperationState) Number() protoreflect.EnumNumber {
@@ -1799,7 +1981,7 @@ func (x OperationState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use OperationState.Descriptor instead.
 func (OperationState) EnumDescriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{29}
+	return file_whalerein_proto_rawDescGZIP(), []int{32}
 }
 
 // One validated set of encoded receive limits. All byte counts are encoded
@@ -2686,8 +2868,14 @@ type HostRequest struct {
 	// admission. It is matched separately from the grant revision so a re-added
 	// Host or a re-paired client cannot attach to an older query.
 	EnrollmentGeneration uint64 `protobuf:"varint,19,opt,name=enrollment_generation,json=enrollmentGeneration,proto3" json:"enrollment_generation,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Managed App session that admitted the request. Access fills it from the
+	// durable request row; Host uses it to look up the installed authority.
+	DeviceSessionId string `protobuf:"bytes,20,opt,name=device_session_id,json=deviceSessionId,proto3" json:"device_session_id,omitempty"`
+	// The session has an App-session proof key, so Host must require an installed
+	// authority before dispatch. Access derives it from device_sessions.
+	ProofExpected bool `protobuf:"varint,21,opt,name=proof_expected,json=proofExpected,proto3" json:"proof_expected,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HostRequest) Reset() {
@@ -2837,6 +3025,20 @@ func (x *HostRequest) GetEnrollmentGeneration() uint64 {
 		return x.EnrollmentGeneration
 	}
 	return 0
+}
+
+func (x *HostRequest) GetDeviceSessionId() string {
+	if x != nil {
+		return x.DeviceSessionId
+	}
+	return ""
+}
+
+func (x *HostRequest) GetProofExpected() bool {
+	if x != nil {
+		return x.ProofExpected
+	}
+	return false
 }
 
 type HostResult struct {
@@ -4233,7 +4435,21 @@ type HostReady struct {
 	Receive *ReceiveAdvertisement `protobuf:"bytes,5,opt,name=receive,proto3" json:"receive,omitempty"`
 	// Required relay epoch; must equal RELAY_EPOCH_V5 (5). Access refuses to
 	// mark an older or unknown epoch Host ready.
-	RelayVersion  uint32 `protobuf:"varint,6,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
+	RelayVersion uint32 `protobuf:"varint,6,opt,name=relay_version,json=relayVersion,proto3" json:"relay_version,omitempty"`
+	// Host route proof. Access forwards this tuple to Central after verifying it
+	// observed the authenticated Host transport. Central binds the signature to
+	// the serving node and incarnation filled by Access.
+	RouteGeneration       uint64 `protobuf:"varint,7,opt,name=route_generation,json=routeGeneration,proto3" json:"route_generation,omitempty"`
+	RouteChallenge        string `protobuf:"bytes,8,opt,name=route_challenge,json=routeChallenge,proto3" json:"route_challenge,omitempty"`
+	RouteSignedAtUnixMs   int64  `protobuf:"varint,9,opt,name=route_signed_at_unix_ms,json=routeSignedAtUnixMs,proto3" json:"route_signed_at_unix_ms,omitempty"`
+	RouteSignature        []byte `protobuf:"bytes,10,opt,name=route_signature,json=routeSignature,proto3" json:"route_signature,omitempty"`
+	RouteService          string `protobuf:"bytes,11,opt,name=route_service,json=routeService,proto3" json:"route_service,omitempty"`
+	RouteEnvironment      string `protobuf:"bytes,12,opt,name=route_environment,json=routeEnvironment,proto3" json:"route_environment,omitempty"`
+	RouteSigningPublicKey []byte `protobuf:"bytes,13,opt,name=route_signing_public_key,json=routeSigningPublicKey,proto3" json:"route_signing_public_key,omitempty"`
+	RouteNoisePublicKey   []byte `protobuf:"bytes,14,opt,name=route_noise_public_key,json=routeNoisePublicKey,proto3" json:"route_noise_public_key,omitempty"`
+	// Graceful shutdown marker. Access closes the exact open tuple; a transient
+	// disconnect leaves it open for the same process to reattach.
+	RouteClosing  bool `protobuf:"varint,15,opt,name=route_closing,json=routeClosing,proto3" json:"route_closing,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4301,6 +4517,69 @@ func (x *HostReady) GetRelayVersion() uint32 {
 		return x.RelayVersion
 	}
 	return 0
+}
+
+func (x *HostReady) GetRouteGeneration() uint64 {
+	if x != nil {
+		return x.RouteGeneration
+	}
+	return 0
+}
+
+func (x *HostReady) GetRouteChallenge() string {
+	if x != nil {
+		return x.RouteChallenge
+	}
+	return ""
+}
+
+func (x *HostReady) GetRouteSignedAtUnixMs() int64 {
+	if x != nil {
+		return x.RouteSignedAtUnixMs
+	}
+	return 0
+}
+
+func (x *HostReady) GetRouteSignature() []byte {
+	if x != nil {
+		return x.RouteSignature
+	}
+	return nil
+}
+
+func (x *HostReady) GetRouteService() string {
+	if x != nil {
+		return x.RouteService
+	}
+	return ""
+}
+
+func (x *HostReady) GetRouteEnvironment() string {
+	if x != nil {
+		return x.RouteEnvironment
+	}
+	return ""
+}
+
+func (x *HostReady) GetRouteSigningPublicKey() []byte {
+	if x != nil {
+		return x.RouteSigningPublicKey
+	}
+	return nil
+}
+
+func (x *HostReady) GetRouteNoisePublicKey() []byte {
+	if x != nil {
+		return x.RouteNoisePublicKey
+	}
+	return nil
+}
+
+func (x *HostReady) GetRouteClosing() bool {
+	if x != nil {
+		return x.RouteClosing
+	}
+	return false
 }
 
 // Host-scoped grant revocation. The host id and device id come from the URL.
@@ -12957,6 +13236,1612 @@ func (x *UpdatePendingQueue) GetText() string {
 	return ""
 }
 
+// An Access node incarnation. A replacement disk or a restored process gets a
+// fresh incarnation bounded to its registered node credential; a retired
+// incarnation can never report itself live again.
+type NodeIdentity struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	NodeId      string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Incarnation string                 `protobuf:"bytes,2,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	RegionId    string                 `protobuf:"bytes,3,opt,name=region_id,json=regionId,proto3" json:"region_id,omitempty"`
+	HttpsUrl    string                 `protobuf:"bytes,4,opt,name=https_url,json=httpsUrl,proto3" json:"https_url,omitempty"`
+	MqttUrl     string                 `protobuf:"bytes,5,opt,name=mqtt_url,json=mqttUrl,proto3" json:"mqtt_url,omitempty"`
+	// Advertised capacity in whole Host slots. Zero means no new placements.
+	Capacity           uint32 `protobuf:"varint,6,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	RegisteredAtUnixMs int64  `protobuf:"varint,7,opt,name=registered_at_unix_ms,json=registeredAtUnixMs,proto3" json:"registered_at_unix_ms,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *NodeIdentity) Reset() {
+	*x = NodeIdentity{}
+	mi := &file_whalerein_proto_msgTypes[140]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeIdentity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeIdentity) ProtoMessage() {}
+
+func (x *NodeIdentity) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[140]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeIdentity.ProtoReflect.Descriptor instead.
+func (*NodeIdentity) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{140}
+}
+
+func (x *NodeIdentity) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *NodeIdentity) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *NodeIdentity) GetRegionId() string {
+	if x != nil {
+		return x.RegionId
+	}
+	return ""
+}
+
+func (x *NodeIdentity) GetHttpsUrl() string {
+	if x != nil {
+		return x.HttpsUrl
+	}
+	return ""
+}
+
+func (x *NodeIdentity) GetMqttUrl() string {
+	if x != nil {
+		return x.MqttUrl
+	}
+	return ""
+}
+
+func (x *NodeIdentity) GetCapacity() uint32 {
+	if x != nil {
+		return x.Capacity
+	}
+	return 0
+}
+
+func (x *NodeIdentity) GetRegisteredAtUnixMs() int64 {
+	if x != nil {
+		return x.RegisteredAtUnixMs
+	}
+	return 0
+}
+
+// Access -> Central every ten seconds on the authenticated node connection.
+type NodeReport struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	NodeId      string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Incarnation string                 `protobuf:"bytes,2,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	// Strictly increasing per incarnation. A duplicate or stale sequence is
+	// ignored for health and never refreshes last observed.
+	Sequence  uint64 `protobuf:"varint,3,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Ready     bool   `protobuf:"varint,4,opt,name=ready,proto3" json:"ready,omitempty"`
+	Capacity  uint32 `protobuf:"varint,5,opt,name=capacity,proto3" json:"capacity,omitempty"`
+	HostCount uint32 `protobuf:"varint,6,opt,name=host_count,json=hostCount,proto3" json:"host_count,omitempty"`
+	// Policy revisions installed from Central. Content-free.
+	AppliedPolicyRevisions []string `protobuf:"bytes,7,rep,name=applied_policy_revisions,json=appliedPolicyRevisions,proto3" json:"applied_policy_revisions,omitempty"`
+	ObservedAtUnixMs       int64    `protobuf:"varint,8,opt,name=observed_at_unix_ms,json=observedAtUnixMs,proto3" json:"observed_at_unix_ms,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *NodeReport) Reset() {
+	*x = NodeReport{}
+	mi := &file_whalerein_proto_msgTypes[141]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeReport) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeReport) ProtoMessage() {}
+
+func (x *NodeReport) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[141]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeReport.ProtoReflect.Descriptor instead.
+func (*NodeReport) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{141}
+}
+
+func (x *NodeReport) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *NodeReport) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *NodeReport) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *NodeReport) GetReady() bool {
+	if x != nil {
+		return x.Ready
+	}
+	return false
+}
+
+func (x *NodeReport) GetCapacity() uint32 {
+	if x != nil {
+		return x.Capacity
+	}
+	return 0
+}
+
+func (x *NodeReport) GetHostCount() uint32 {
+	if x != nil {
+		return x.HostCount
+	}
+	return 0
+}
+
+func (x *NodeReport) GetAppliedPolicyRevisions() []string {
+	if x != nil {
+		return x.AppliedPolicyRevisions
+	}
+	return nil
+}
+
+func (x *NodeReport) GetObservedAtUnixMs() int64 {
+	if x != nil {
+		return x.ObservedAtUnixMs
+	}
+	return 0
+}
+
+type NodeReportAck struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Central receipt time. Health is derived from this time, never the node
+	// supplied observation time.
+	ReceivedAtUnixMs  int64  `protobuf:"varint,1,opt,name=received_at_unix_ms,json=receivedAtUnixMs,proto3" json:"received_at_unix_ms,omitempty"`
+	PlacementEligible bool   `protobuf:"varint,2,opt,name=placement_eligible,json=placementEligible,proto3" json:"placement_eligible,omitempty"`
+	RejectionReason   string `protobuf:"bytes,3,opt,name=rejection_reason,json=rejectionReason,proto3" json:"rejection_reason,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *NodeReportAck) Reset() {
+	*x = NodeReportAck{}
+	mi := &file_whalerein_proto_msgTypes[142]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeReportAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeReportAck) ProtoMessage() {}
+
+func (x *NodeReportAck) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[142]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeReportAck.ProtoReflect.Descriptor instead.
+func (*NodeReportAck) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{142}
+}
+
+func (x *NodeReportAck) GetReceivedAtUnixMs() int64 {
+	if x != nil {
+		return x.ReceivedAtUnixMs
+	}
+	return 0
+}
+
+func (x *NodeReportAck) GetPlacementEligible() bool {
+	if x != nil {
+		return x.PlacementEligible
+	}
+	return false
+}
+
+func (x *NodeReportAck) GetRejectionReason() string {
+	if x != nil {
+		return x.RejectionReason
+	}
+	return ""
+}
+
+// Host -> Access -> Central. The Host signs service, environment, Host, node,
+// incarnation, generation, a fresh attach challenge and its pinned keys.
+type HostRouteAttach struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	HostId               string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	WorkspaceId          string                 `protobuf:"bytes,2,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	Service              string                 `protobuf:"bytes,3,opt,name=service,proto3" json:"service,omitempty"`
+	Environment          string                 `protobuf:"bytes,4,opt,name=environment,proto3" json:"environment,omitempty"`
+	NodeId               string                 `protobuf:"bytes,5,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Incarnation          string                 `protobuf:"bytes,6,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	Generation           uint64                 `protobuf:"varint,7,opt,name=generation,proto3" json:"generation,omitempty"`
+	Challenge            string                 `protobuf:"bytes,8,opt,name=challenge,proto3" json:"challenge,omitempty"`
+	SignedAtUnixMs       int64                  `protobuf:"varint,9,opt,name=signed_at_unix_ms,json=signedAtUnixMs,proto3" json:"signed_at_unix_ms,omitempty"`
+	HostSignature        []byte                 `protobuf:"bytes,10,opt,name=host_signature,json=hostSignature,proto3" json:"host_signature,omitempty"`
+	HostSigningPublicKey []byte                 `protobuf:"bytes,11,opt,name=host_signing_public_key,json=hostSigningPublicKey,proto3" json:"host_signing_public_key,omitempty"`
+	HostNoisePublicKey   []byte                 `protobuf:"bytes,12,opt,name=host_noise_public_key,json=hostNoisePublicKey,proto3" json:"host_noise_public_key,omitempty"`
+	// True only when the node observed an authenticated Host transport.
+	NodeObserved    bool   `protobuf:"varint,13,opt,name=node_observed,json=nodeObserved,proto3" json:"node_observed,omitempty"`
+	NodeIncarnation string `protobuf:"bytes,14,opt,name=node_incarnation,json=nodeIncarnation,proto3" json:"node_incarnation,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *HostRouteAttach) Reset() {
+	*x = HostRouteAttach{}
+	mi := &file_whalerein_proto_msgTypes[143]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostRouteAttach) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostRouteAttach) ProtoMessage() {}
+
+func (x *HostRouteAttach) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[143]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostRouteAttach.ProtoReflect.Descriptor instead.
+func (*HostRouteAttach) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{143}
+}
+
+func (x *HostRouteAttach) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *HostRouteAttach) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *HostRouteAttach) GetService() string {
+	if x != nil {
+		return x.Service
+	}
+	return ""
+}
+
+func (x *HostRouteAttach) GetEnvironment() string {
+	if x != nil {
+		return x.Environment
+	}
+	return ""
+}
+
+func (x *HostRouteAttach) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *HostRouteAttach) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *HostRouteAttach) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *HostRouteAttach) GetChallenge() string {
+	if x != nil {
+		return x.Challenge
+	}
+	return ""
+}
+
+func (x *HostRouteAttach) GetSignedAtUnixMs() int64 {
+	if x != nil {
+		return x.SignedAtUnixMs
+	}
+	return 0
+}
+
+func (x *HostRouteAttach) GetHostSignature() []byte {
+	if x != nil {
+		return x.HostSignature
+	}
+	return nil
+}
+
+func (x *HostRouteAttach) GetHostSigningPublicKey() []byte {
+	if x != nil {
+		return x.HostSigningPublicKey
+	}
+	return nil
+}
+
+func (x *HostRouteAttach) GetHostNoisePublicKey() []byte {
+	if x != nil {
+		return x.HostNoisePublicKey
+	}
+	return nil
+}
+
+func (x *HostRouteAttach) GetNodeObserved() bool {
+	if x != nil {
+		return x.NodeObserved
+	}
+	return false
+}
+
+func (x *HostRouteAttach) GetNodeIncarnation() string {
+	if x != nil {
+		return x.NodeIncarnation
+	}
+	return ""
+}
+
+type HostRoute struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	HostId          string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	WorkspaceId     string                 `protobuf:"bytes,2,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	NodeId          string                 `protobuf:"bytes,3,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Incarnation     string                 `protobuf:"bytes,4,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	Generation      uint64                 `protobuf:"varint,5,opt,name=generation,proto3" json:"generation,omitempty"`
+	State           RouteState             `protobuf:"varint,6,opt,name=state,proto3,enum=whalerein.v1.RouteState" json:"state,omitempty"`
+	Challenge       string                 `protobuf:"bytes,7,opt,name=challenge,proto3" json:"challenge,omitempty"`
+	UpdatedAtUnixMs int64                  `protobuf:"varint,8,opt,name=updated_at_unix_ms,json=updatedAtUnixMs,proto3" json:"updated_at_unix_ms,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *HostRoute) Reset() {
+	*x = HostRoute{}
+	mi := &file_whalerein_proto_msgTypes[144]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostRoute) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostRoute) ProtoMessage() {}
+
+func (x *HostRoute) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[144]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostRoute.ProtoReflect.Descriptor instead.
+func (*HostRoute) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{144}
+}
+
+func (x *HostRoute) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *HostRoute) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *HostRoute) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *HostRoute) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *HostRoute) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *HostRoute) GetState() RouteState {
+	if x != nil {
+		return x.State
+	}
+	return RouteState_ROUTE_STATE_UNSPECIFIED
+}
+
+func (x *HostRoute) GetChallenge() string {
+	if x != nil {
+		return x.Challenge
+	}
+	return ""
+}
+
+func (x *HostRoute) GetUpdatedAtUnixMs() int64 {
+	if x != nil {
+		return x.UpdatedAtUnixMs
+	}
+	return 0
+}
+
+type HostRouteAttachReceipt struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Outcome       RouteOutcome           `protobuf:"varint,1,opt,name=outcome,proto3,enum=whalerein.v1.RouteOutcome" json:"outcome,omitempty"`
+	Route         *HostRoute             `protobuf:"bytes,2,opt,name=route,proto3" json:"route,omitempty"`
+	ErrorCode     ErrorCode              `protobuf:"varint,3,opt,name=error_code,json=errorCode,proto3,enum=whalerein.v1.ErrorCode" json:"error_code,omitempty"`
+	Reason        string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HostRouteAttachReceipt) Reset() {
+	*x = HostRouteAttachReceipt{}
+	mi := &file_whalerein_proto_msgTypes[145]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostRouteAttachReceipt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostRouteAttachReceipt) ProtoMessage() {}
+
+func (x *HostRouteAttachReceipt) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[145]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostRouteAttachReceipt.ProtoReflect.Descriptor instead.
+func (*HostRouteAttachReceipt) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{145}
+}
+
+func (x *HostRouteAttachReceipt) GetOutcome() RouteOutcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return RouteOutcome_ROUTE_OUTCOME_UNSPECIFIED
+}
+
+func (x *HostRouteAttachReceipt) GetRoute() *HostRoute {
+	if x != nil {
+		return x.Route
+	}
+	return nil
+}
+
+func (x *HostRouteAttachReceipt) GetErrorCode() ErrorCode {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ErrorCode_error_code_unspecified
+}
+
+func (x *HostRouteAttachReceipt) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// A proved close. A close for a generation at or above the stored high-water
+// mark is persisted as closed even when its attach has not arrived. A lower
+// generation is stale and cannot mutate the row. `host_signature` is required
+// for a generation above the high-water mark; an equal admitted tuple may be
+// closed by the named node alone.
+type HostRouteClose struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	HostId               string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	NodeId               string                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Incarnation          string                 `protobuf:"bytes,3,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	Generation           uint64                 `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`
+	SignedAtUnixMs       int64                  `protobuf:"varint,5,opt,name=signed_at_unix_ms,json=signedAtUnixMs,proto3" json:"signed_at_unix_ms,omitempty"`
+	HostSignature        []byte                 `protobuf:"bytes,6,opt,name=host_signature,json=hostSignature,proto3" json:"host_signature,omitempty"`
+	HostSigningPublicKey []byte                 `protobuf:"bytes,7,opt,name=host_signing_public_key,json=hostSigningPublicKey,proto3" json:"host_signing_public_key,omitempty"`
+	Challenge            string                 `protobuf:"bytes,8,opt,name=challenge,proto3" json:"challenge,omitempty"`
+	Service              string                 `protobuf:"bytes,9,opt,name=service,proto3" json:"service,omitempty"`
+	Environment          string                 `protobuf:"bytes,10,opt,name=environment,proto3" json:"environment,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *HostRouteClose) Reset() {
+	*x = HostRouteClose{}
+	mi := &file_whalerein_proto_msgTypes[146]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostRouteClose) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostRouteClose) ProtoMessage() {}
+
+func (x *HostRouteClose) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[146]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostRouteClose.ProtoReflect.Descriptor instead.
+func (*HostRouteClose) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{146}
+}
+
+func (x *HostRouteClose) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *HostRouteClose) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *HostRouteClose) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *HostRouteClose) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *HostRouteClose) GetSignedAtUnixMs() int64 {
+	if x != nil {
+		return x.SignedAtUnixMs
+	}
+	return 0
+}
+
+func (x *HostRouteClose) GetHostSignature() []byte {
+	if x != nil {
+		return x.HostSignature
+	}
+	return nil
+}
+
+func (x *HostRouteClose) GetHostSigningPublicKey() []byte {
+	if x != nil {
+		return x.HostSigningPublicKey
+	}
+	return nil
+}
+
+func (x *HostRouteClose) GetChallenge() string {
+	if x != nil {
+		return x.Challenge
+	}
+	return ""
+}
+
+func (x *HostRouteClose) GetService() string {
+	if x != nil {
+		return x.Service
+	}
+	return ""
+}
+
+func (x *HostRouteClose) GetEnvironment() string {
+	if x != nil {
+		return x.Environment
+	}
+	return ""
+}
+
+type HostRouteCloseReceipt struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Outcome       RouteOutcome           `protobuf:"varint,1,opt,name=outcome,proto3,enum=whalerein.v1.RouteOutcome" json:"outcome,omitempty"`
+	Route         *HostRoute             `protobuf:"bytes,2,opt,name=route,proto3" json:"route,omitempty"`
+	ErrorCode     ErrorCode              `protobuf:"varint,3,opt,name=error_code,json=errorCode,proto3,enum=whalerein.v1.ErrorCode" json:"error_code,omitempty"`
+	Reason        string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HostRouteCloseReceipt) Reset() {
+	*x = HostRouteCloseReceipt{}
+	mi := &file_whalerein_proto_msgTypes[147]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostRouteCloseReceipt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostRouteCloseReceipt) ProtoMessage() {}
+
+func (x *HostRouteCloseReceipt) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[147]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostRouteCloseReceipt.ProtoReflect.Descriptor instead.
+func (*HostRouteCloseReceipt) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{147}
+}
+
+func (x *HostRouteCloseReceipt) GetOutcome() RouteOutcome {
+	if x != nil {
+		return x.Outcome
+	}
+	return RouteOutcome_ROUTE_OUTCOME_UNSPECIFIED
+}
+
+func (x *HostRouteCloseReceipt) GetRoute() *HostRoute {
+	if x != nil {
+		return x.Route
+	}
+	return nil
+}
+
+func (x *HostRouteCloseReceipt) GetErrorCode() ErrorCode {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ErrorCode_error_code_unspecified
+}
+
+func (x *HostRouteCloseReceipt) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// Access -> Central inventory after reconnect or restart. Central compares the
+// reported tuples with its durable routes and returns the authoritative state.
+// Inventory can close a matching route; it can never create or reopen one.
+type NodeInventory struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Incarnation   string                 `protobuf:"bytes,2,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	Sequence      uint64                 `protobuf:"varint,3,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	Routes        []*HostRoute           `protobuf:"bytes,4,rep,name=routes,proto3" json:"routes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeInventory) Reset() {
+	*x = NodeInventory{}
+	mi := &file_whalerein_proto_msgTypes[148]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeInventory) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeInventory) ProtoMessage() {}
+
+func (x *NodeInventory) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[148]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeInventory.ProtoReflect.Descriptor instead.
+func (*NodeInventory) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{148}
+}
+
+func (x *NodeInventory) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *NodeInventory) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *NodeInventory) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *NodeInventory) GetRoutes() []*HostRoute {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
+// Operator-visible drain state for one serving incarnation. A drained node is
+// never advertised for new placements; established routes remain readable.
+type NodeDrain struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Incarnation   string                 `protobuf:"bytes,2,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	Drained       bool                   `protobuf:"varint,3,opt,name=drained,proto3" json:"drained,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeDrain) Reset() {
+	*x = NodeDrain{}
+	mi := &file_whalerein_proto_msgTypes[149]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeDrain) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeDrain) ProtoMessage() {}
+
+func (x *NodeDrain) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[149]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeDrain.ProtoReflect.Descriptor instead.
+func (*NodeDrain) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{149}
+}
+
+func (x *NodeDrain) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *NodeDrain) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *NodeDrain) GetDrained() bool {
+	if x != nil {
+		return x.Drained
+	}
+	return false
+}
+
+type NodeInventoryAck struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Routes            []*HostRoute           `protobuf:"bytes,1,rep,name=routes,proto3" json:"routes,omitempty"`
+	InventorySequence uint64                 `protobuf:"varint,2,opt,name=inventory_sequence,json=inventorySequence,proto3" json:"inventory_sequence,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *NodeInventoryAck) Reset() {
+	*x = NodeInventoryAck{}
+	mi := &file_whalerein_proto_msgTypes[150]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeInventoryAck) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeInventoryAck) ProtoMessage() {}
+
+func (x *NodeInventoryAck) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[150]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeInventoryAck.ProtoReflect.Descriptor instead.
+func (*NodeInventoryAck) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{150}
+}
+
+func (x *NodeInventoryAck) GetRoutes() []*HostRoute {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
+func (x *NodeInventoryAck) GetInventorySequence() uint64 {
+	if x != nil {
+		return x.InventorySequence
+	}
+	return 0
+}
+
+// Central -> endpoint directory answer. A Device follows its Host's node; a
+// Host asks for eligible placement candidates. Freshness is Central receipt
+// time, and only an open route is advertised.
+type RouteDiscovery struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	HostId           string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	Route            *HostRoute             `protobuf:"bytes,2,opt,name=route,proto3" json:"route,omitempty"`
+	HttpsUrl         string                 `protobuf:"bytes,3,opt,name=https_url,json=httpsUrl,proto3" json:"https_url,omitempty"`
+	MqttUrl          string                 `protobuf:"bytes,4,opt,name=mqtt_url,json=mqttUrl,proto3" json:"mqtt_url,omitempty"`
+	Fresh            bool                   `protobuf:"varint,5,opt,name=fresh,proto3" json:"fresh,omitempty"`
+	ObservedAtUnixMs int64                  `protobuf:"varint,6,opt,name=observed_at_unix_ms,json=observedAtUnixMs,proto3" json:"observed_at_unix_ms,omitempty"`
+	// Reasons are stable machine values, never content.
+	UnavailableReason string `protobuf:"bytes,7,opt,name=unavailable_reason,json=unavailableReason,proto3" json:"unavailable_reason,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *RouteDiscovery) Reset() {
+	*x = RouteDiscovery{}
+	mi := &file_whalerein_proto_msgTypes[151]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RouteDiscovery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RouteDiscovery) ProtoMessage() {}
+
+func (x *RouteDiscovery) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[151]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RouteDiscovery.ProtoReflect.Descriptor instead.
+func (*RouteDiscovery) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{151}
+}
+
+func (x *RouteDiscovery) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *RouteDiscovery) GetRoute() *HostRoute {
+	if x != nil {
+		return x.Route
+	}
+	return nil
+}
+
+func (x *RouteDiscovery) GetHttpsUrl() string {
+	if x != nil {
+		return x.HttpsUrl
+	}
+	return ""
+}
+
+func (x *RouteDiscovery) GetMqttUrl() string {
+	if x != nil {
+		return x.MqttUrl
+	}
+	return ""
+}
+
+func (x *RouteDiscovery) GetFresh() bool {
+	if x != nil {
+		return x.Fresh
+	}
+	return false
+}
+
+func (x *RouteDiscovery) GetObservedAtUnixMs() int64 {
+	if x != nil {
+		return x.ObservedAtUnixMs
+	}
+	return 0
+}
+
+func (x *RouteDiscovery) GetUnavailableReason() string {
+	if x != nil {
+		return x.UnavailableReason
+	}
+	return ""
+}
+
+// Central-signed authority for one managed scope. The lifetime is at most
+// sixty seconds from Central confirmation. The same message authorizes a
+// command, a result read, an attachment read and a live observation, because
+// every protected path checks the same immutable scope and absolute deadline.
+type ScopedAuthority struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	AuthVersion         string                 `protobuf:"bytes,1,opt,name=auth_version,json=authVersion,proto3" json:"auth_version,omitempty"`
+	AuthorityId         string                 `protobuf:"bytes,2,opt,name=authority_id,json=authorityId,proto3" json:"authority_id,omitempty"`
+	Issuer              string                 `protobuf:"bytes,3,opt,name=issuer,proto3" json:"issuer,omitempty"`
+	Audience            string                 `protobuf:"bytes,4,opt,name=audience,proto3" json:"audience,omitempty"`
+	Environment         string                 `protobuf:"bytes,5,opt,name=environment,proto3" json:"environment,omitempty"`
+	WorkspaceId         string                 `protobuf:"bytes,6,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	HostId              string                 `protobuf:"bytes,7,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	DeviceId            string                 `protobuf:"bytes,8,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	SessionId           string                 `protobuf:"bytes,9,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	GrantGeneration     uint64                 `protobuf:"varint,10,opt,name=grant_generation,json=grantGeneration,proto3" json:"grant_generation,omitempty"`
+	HostGrantGeneration uint64                 `protobuf:"varint,11,opt,name=host_grant_generation,json=hostGrantGeneration,proto3" json:"host_grant_generation,omitempty"`
+	ServingNodeId       string                 `protobuf:"bytes,12,opt,name=serving_node_id,json=servingNodeId,proto3" json:"serving_node_id,omitempty"`
+	RouteGeneration     uint64                 `protobuf:"varint,13,opt,name=route_generation,json=routeGeneration,proto3" json:"route_generation,omitempty"`
+	// App-session proof key bound at session creation. It is immutable for the
+	// session and never replaced by a renewal.
+	SessionProofPublicKey []byte `protobuf:"bytes,14,opt,name=session_proof_public_key,json=sessionProofPublicKey,proto3" json:"session_proof_public_key,omitempty"`
+	PolicyRevision        string `protobuf:"bytes,15,opt,name=policy_revision,json=policyRevision,proto3" json:"policy_revision,omitempty"`
+	IssuedAtUnixMs        int64  `protobuf:"varint,16,opt,name=issued_at_unix_ms,json=issuedAtUnixMs,proto3" json:"issued_at_unix_ms,omitempty"`
+	ExpiresAtUnixMs       int64  `protobuf:"varint,17,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"`
+	KeyId                 string `protobuf:"bytes,18,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	Signature             []byte `protobuf:"bytes,19,opt,name=signature,proto3" json:"signature,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *ScopedAuthority) Reset() {
+	*x = ScopedAuthority{}
+	mi := &file_whalerein_proto_msgTypes[152]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScopedAuthority) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScopedAuthority) ProtoMessage() {}
+
+func (x *ScopedAuthority) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[152]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScopedAuthority.ProtoReflect.Descriptor instead.
+func (*ScopedAuthority) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{152}
+}
+
+func (x *ScopedAuthority) GetAuthVersion() string {
+	if x != nil {
+		return x.AuthVersion
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetAuthorityId() string {
+	if x != nil {
+		return x.AuthorityId
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetIssuer() string {
+	if x != nil {
+		return x.Issuer
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetAudience() string {
+	if x != nil {
+		return x.Audience
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetEnvironment() string {
+	if x != nil {
+		return x.Environment
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetDeviceId() string {
+	if x != nil {
+		return x.DeviceId
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetGrantGeneration() uint64 {
+	if x != nil {
+		return x.GrantGeneration
+	}
+	return 0
+}
+
+func (x *ScopedAuthority) GetHostGrantGeneration() uint64 {
+	if x != nil {
+		return x.HostGrantGeneration
+	}
+	return 0
+}
+
+func (x *ScopedAuthority) GetServingNodeId() string {
+	if x != nil {
+		return x.ServingNodeId
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetRouteGeneration() uint64 {
+	if x != nil {
+		return x.RouteGeneration
+	}
+	return 0
+}
+
+func (x *ScopedAuthority) GetSessionProofPublicKey() []byte {
+	if x != nil {
+		return x.SessionProofPublicKey
+	}
+	return nil
+}
+
+func (x *ScopedAuthority) GetPolicyRevision() string {
+	if x != nil {
+		return x.PolicyRevision
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetIssuedAtUnixMs() int64 {
+	if x != nil {
+		return x.IssuedAtUnixMs
+	}
+	return 0
+}
+
+func (x *ScopedAuthority) GetExpiresAtUnixMs() int64 {
+	if x != nil {
+		return x.ExpiresAtUnixMs
+	}
+	return 0
+}
+
+func (x *ScopedAuthority) GetKeyId() string {
+	if x != nil {
+		return x.KeyId
+	}
+	return ""
+}
+
+func (x *ScopedAuthority) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+// Access -> Central renewal request. Access batches this with its heartbeat.
+type AuthorityRenewalRequest struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	HostId              string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	DeviceId            string                 `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	SessionId           string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	GrantGeneration     uint64                 `protobuf:"varint,4,opt,name=grant_generation,json=grantGeneration,proto3" json:"grant_generation,omitempty"`
+	RouteGeneration     uint64                 `protobuf:"varint,5,opt,name=route_generation,json=routeGeneration,proto3" json:"route_generation,omitempty"`
+	NodeId              string                 `protobuf:"bytes,6,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Incarnation         string                 `protobuf:"bytes,7,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	CurrentAuthorityIds []string               `protobuf:"bytes,8,rep,name=current_authority_ids,json=currentAuthorityIds,proto3" json:"current_authority_ids,omitempty"`
+	Environment         string                 `protobuf:"bytes,9,opt,name=environment,proto3" json:"environment,omitempty"`
+	// The App-session proof public key Access holds. Central refuses a
+	// replacement; the binding is immutable for the session.
+	SessionProofPublicKey []byte `protobuf:"bytes,10,opt,name=session_proof_public_key,json=sessionProofPublicKey,proto3" json:"session_proof_public_key,omitempty"`
+	HostGrantGeneration   uint64 `protobuf:"varint,11,opt,name=host_grant_generation,json=hostGrantGeneration,proto3" json:"host_grant_generation,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *AuthorityRenewalRequest) Reset() {
+	*x = AuthorityRenewalRequest{}
+	mi := &file_whalerein_proto_msgTypes[153]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuthorityRenewalRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuthorityRenewalRequest) ProtoMessage() {}
+
+func (x *AuthorityRenewalRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[153]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuthorityRenewalRequest.ProtoReflect.Descriptor instead.
+func (*AuthorityRenewalRequest) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{153}
+}
+
+func (x *AuthorityRenewalRequest) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *AuthorityRenewalRequest) GetDeviceId() string {
+	if x != nil {
+		return x.DeviceId
+	}
+	return ""
+}
+
+func (x *AuthorityRenewalRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *AuthorityRenewalRequest) GetGrantGeneration() uint64 {
+	if x != nil {
+		return x.GrantGeneration
+	}
+	return 0
+}
+
+func (x *AuthorityRenewalRequest) GetRouteGeneration() uint64 {
+	if x != nil {
+		return x.RouteGeneration
+	}
+	return 0
+}
+
+func (x *AuthorityRenewalRequest) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *AuthorityRenewalRequest) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *AuthorityRenewalRequest) GetCurrentAuthorityIds() []string {
+	if x != nil {
+		return x.CurrentAuthorityIds
+	}
+	return nil
+}
+
+func (x *AuthorityRenewalRequest) GetEnvironment() string {
+	if x != nil {
+		return x.Environment
+	}
+	return ""
+}
+
+func (x *AuthorityRenewalRequest) GetSessionProofPublicKey() []byte {
+	if x != nil {
+		return x.SessionProofPublicKey
+	}
+	return nil
+}
+
+func (x *AuthorityRenewalRequest) GetHostGrantGeneration() uint64 {
+	if x != nil {
+		return x.HostGrantGeneration
+	}
+	return 0
+}
+
+type AuthorityRenewalResponse struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Authority *ScopedAuthority       `protobuf:"bytes,1,opt,name=authority,proto3" json:"authority,omitempty"`
+	// The greatest absolute deadline Central has ever committed for this exact
+	// scope. It never decreases across nodes, routes or restarts while the
+	// scope is outstanding.
+	MaximumExpiresAtUnixMs int64     `protobuf:"varint,2,opt,name=maximum_expires_at_unix_ms,json=maximumExpiresAtUnixMs,proto3" json:"maximum_expires_at_unix_ms,omitempty"`
+	ErrorCode              ErrorCode `protobuf:"varint,3,opt,name=error_code,json=errorCode,proto3,enum=whalerein.v1.ErrorCode" json:"error_code,omitempty"`
+	Reason                 string    `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *AuthorityRenewalResponse) Reset() {
+	*x = AuthorityRenewalResponse{}
+	mi := &file_whalerein_proto_msgTypes[154]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuthorityRenewalResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuthorityRenewalResponse) ProtoMessage() {}
+
+func (x *AuthorityRenewalResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[154]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuthorityRenewalResponse.ProtoReflect.Descriptor instead.
+func (*AuthorityRenewalResponse) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{154}
+}
+
+func (x *AuthorityRenewalResponse) GetAuthority() *ScopedAuthority {
+	if x != nil {
+		return x.Authority
+	}
+	return nil
+}
+
+func (x *AuthorityRenewalResponse) GetMaximumExpiresAtUnixMs() int64 {
+	if x != nil {
+		return x.MaximumExpiresAtUnixMs
+	}
+	return 0
+}
+
+func (x *AuthorityRenewalResponse) GetErrorCode() ErrorCode {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ErrorCode_error_code_unspecified
+}
+
+func (x *AuthorityRenewalResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+type AuthorityAcknowledgement struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	NodeId                string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Incarnation           string                 `protobuf:"bytes,2,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	AuthorityIds          []string               `protobuf:"bytes,3,rep,name=authority_ids,json=authorityIds,proto3" json:"authority_ids,omitempty"`
+	AppliedPolicyRevision string                 `protobuf:"bytes,4,opt,name=applied_policy_revision,json=appliedPolicyRevision,proto3" json:"applied_policy_revision,omitempty"`
+	AppliedAtUnixMs       int64                  `protobuf:"varint,5,opt,name=applied_at_unix_ms,json=appliedAtUnixMs,proto3" json:"applied_at_unix_ms,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *AuthorityAcknowledgement) Reset() {
+	*x = AuthorityAcknowledgement{}
+	mi := &file_whalerein_proto_msgTypes[155]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AuthorityAcknowledgement) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AuthorityAcknowledgement) ProtoMessage() {}
+
+func (x *AuthorityAcknowledgement) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[155]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AuthorityAcknowledgement.ProtoReflect.Descriptor instead.
+func (*AuthorityAcknowledgement) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{155}
+}
+
+func (x *AuthorityAcknowledgement) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *AuthorityAcknowledgement) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *AuthorityAcknowledgement) GetAuthorityIds() []string {
+	if x != nil {
+		return x.AuthorityIds
+	}
+	return nil
+}
+
+func (x *AuthorityAcknowledgement) GetAppliedPolicyRevision() string {
+	if x != nil {
+		return x.AppliedPolicyRevision
+	}
+	return ""
+}
+
+func (x *AuthorityAcknowledgement) GetAppliedAtUnixMs() int64 {
+	if x != nil {
+		return x.AppliedAtUnixMs
+	}
+	return 0
+}
+
+// Content-free enforcement report. Acknowledgements record delivery progress
+// only; `effective` is derived from the frozen maximum affected deadline, not
+// from an acknowledgement.
+type RevocationStatus struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	ScopeType             string                 `protobuf:"bytes,1,opt,name=scope_type,json=scopeType,proto3" json:"scope_type,omitempty"`
+	ScopeId               string                 `protobuf:"bytes,2,opt,name=scope_id,json=scopeId,proto3" json:"scope_id,omitempty"`
+	Revision              uint64                 `protobuf:"varint,3,opt,name=revision,proto3" json:"revision,omitempty"`
+	FrozenExpiresAtUnixMs int64                  `protobuf:"varint,4,opt,name=frozen_expires_at_unix_ms,json=frozenExpiresAtUnixMs,proto3" json:"frozen_expires_at_unix_ms,omitempty"`
+	State                 RevocationState        `protobuf:"varint,5,opt,name=state,proto3,enum=whalerein.v1.RevocationState" json:"state,omitempty"`
+	RecordedAtUnixMs      int64                  `protobuf:"varint,6,opt,name=recorded_at_unix_ms,json=recordedAtUnixMs,proto3" json:"recorded_at_unix_ms,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *RevocationStatus) Reset() {
+	*x = RevocationStatus{}
+	mi := &file_whalerein_proto_msgTypes[156]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevocationStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevocationStatus) ProtoMessage() {}
+
+func (x *RevocationStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[156]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevocationStatus.ProtoReflect.Descriptor instead.
+func (*RevocationStatus) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{156}
+}
+
+func (x *RevocationStatus) GetScopeType() string {
+	if x != nil {
+		return x.ScopeType
+	}
+	return ""
+}
+
+func (x *RevocationStatus) GetScopeId() string {
+	if x != nil {
+		return x.ScopeId
+	}
+	return ""
+}
+
+func (x *RevocationStatus) GetRevision() uint64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *RevocationStatus) GetFrozenExpiresAtUnixMs() int64 {
+	if x != nil {
+		return x.FrozenExpiresAtUnixMs
+	}
+	return 0
+}
+
+func (x *RevocationStatus) GetState() RevocationState {
+	if x != nil {
+		return x.State
+	}
+	return RevocationState_REVOCATION_STATE_UNSPECIFIED
+}
+
+func (x *RevocationStatus) GetRecordedAtUnixMs() int64 {
+	if x != nil {
+		return x.RecordedAtUnixMs
+	}
+	return 0
+}
+
 // A short-lived, purpose-bound authorization. The signature is Ed25519 over
 // the canonical text form; no JSON is signed.
 type ExternalAuthorization struct {
@@ -12981,13 +14866,16 @@ type ExternalAuthorization struct {
 	Nonce              []byte                 `protobuf:"bytes,18,opt,name=nonce,proto3" json:"nonce,omitempty"`
 	KeyId              string                 `protobuf:"bytes,19,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
 	Signature          []byte                 `protobuf:"bytes,20,opt,name=signature,proto3" json:"signature,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// App-session proof public key bound at Cloud session creation. Access stores
+	// it for authority requests; Host compares it with the permit.
+	SessionProofPublicKey []byte `protobuf:"bytes,21,opt,name=session_proof_public_key,json=sessionProofPublicKey,proto3" json:"session_proof_public_key,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *ExternalAuthorization) Reset() {
 	*x = ExternalAuthorization{}
-	mi := &file_whalerein_proto_msgTypes[140]
+	mi := &file_whalerein_proto_msgTypes[157]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -12999,7 +14887,7 @@ func (x *ExternalAuthorization) String() string {
 func (*ExternalAuthorization) ProtoMessage() {}
 
 func (x *ExternalAuthorization) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[140]
+	mi := &file_whalerein_proto_msgTypes[157]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13012,7 +14900,7 @@ func (x *ExternalAuthorization) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExternalAuthorization.ProtoReflect.Descriptor instead.
 func (*ExternalAuthorization) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{140}
+	return file_whalerein_proto_rawDescGZIP(), []int{157}
 }
 
 func (x *ExternalAuthorization) GetAuthVersion() string {
@@ -13155,6 +15043,13 @@ func (x *ExternalAuthorization) GetSignature() []byte {
 	return nil
 }
 
+func (x *ExternalAuthorization) GetSessionProofPublicKey() []byte {
+	if x != nil {
+		return x.SessionProofPublicKey
+	}
+	return nil
+}
+
 // The Host proves possession of the approved signing key by signing the
 // enrollment proof input; Access compares the proven key with the assertion.
 type HostEnrollmentRequest struct {
@@ -13171,7 +15066,7 @@ type HostEnrollmentRequest struct {
 
 func (x *HostEnrollmentRequest) Reset() {
 	*x = HostEnrollmentRequest{}
-	mi := &file_whalerein_proto_msgTypes[141]
+	mi := &file_whalerein_proto_msgTypes[158]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13183,7 +15078,7 @@ func (x *HostEnrollmentRequest) String() string {
 func (*HostEnrollmentRequest) ProtoMessage() {}
 
 func (x *HostEnrollmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[141]
+	mi := &file_whalerein_proto_msgTypes[158]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13196,7 +15091,7 @@ func (x *HostEnrollmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostEnrollmentRequest.ProtoReflect.Descriptor instead.
 func (*HostEnrollmentRequest) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{141}
+	return file_whalerein_proto_rawDescGZIP(), []int{158}
 }
 
 func (x *HostEnrollmentRequest) GetAuthorization() *ExternalAuthorization {
@@ -13243,18 +15138,25 @@ func (x *HostEnrollmentRequest) GetProofSignature() []byte {
 
 // Broker credentials are issued once, on the call that commits the enrollment.
 type HostCredential struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	HostId        string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
-	MqttUrl       string                 `protobuf:"bytes,2,opt,name=mqtt_url,json=mqttUrl,proto3" json:"mqtt_url,omitempty"`
-	Username      string                 `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"`
-	Password      string                 `protobuf:"bytes,4,opt,name=password,proto3" json:"password,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	HostId   string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	MqttUrl  string                 `protobuf:"bytes,2,opt,name=mqtt_url,json=mqttUrl,proto3" json:"mqtt_url,omitempty"`
+	Username string                 `protobuf:"bytes,3,opt,name=username,proto3" json:"username,omitempty"`
+	Password string                 `protobuf:"bytes,4,opt,name=password,proto3" json:"password,omitempty"`
+	// The serving node identity. The Host signs its route attachment with these
+	// values so Central can bind the proof to the actual node connection.
+	NodeId      string `protobuf:"bytes,5,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Incarnation string `protobuf:"bytes,6,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	// Issuer key for Central-signed App-session permits. The Host verifies every
+	// delivered ScopedAuthority independently with this key.
+	AuthorityPublicKey []byte `protobuf:"bytes,7,opt,name=authority_public_key,json=authorityPublicKey,proto3" json:"authority_public_key,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *HostCredential) Reset() {
 	*x = HostCredential{}
-	mi := &file_whalerein_proto_msgTypes[142]
+	mi := &file_whalerein_proto_msgTypes[159]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13266,7 +15168,7 @@ func (x *HostCredential) String() string {
 func (*HostCredential) ProtoMessage() {}
 
 func (x *HostCredential) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[142]
+	mi := &file_whalerein_proto_msgTypes[159]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13279,7 +15181,7 @@ func (x *HostCredential) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostCredential.ProtoReflect.Descriptor instead.
 func (*HostCredential) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{142}
+	return file_whalerein_proto_rawDescGZIP(), []int{159}
 }
 
 func (x *HostCredential) GetHostId() string {
@@ -13310,6 +15212,27 @@ func (x *HostCredential) GetPassword() string {
 	return ""
 }
 
+func (x *HostCredential) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *HostCredential) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *HostCredential) GetAuthorityPublicKey() []byte {
+	if x != nil {
+		return x.AuthorityPublicKey
+	}
+	return nil
+}
+
 type HostEnrollmentStatus struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	HostId               string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
@@ -13334,7 +15257,7 @@ type HostEnrollmentStatus struct {
 
 func (x *HostEnrollmentStatus) Reset() {
 	*x = HostEnrollmentStatus{}
-	mi := &file_whalerein_proto_msgTypes[143]
+	mi := &file_whalerein_proto_msgTypes[160]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13346,7 +15269,7 @@ func (x *HostEnrollmentStatus) String() string {
 func (*HostEnrollmentStatus) ProtoMessage() {}
 
 func (x *HostEnrollmentStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[143]
+	mi := &file_whalerein_proto_msgTypes[160]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13359,7 +15282,7 @@ func (x *HostEnrollmentStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostEnrollmentStatus.ProtoReflect.Descriptor instead.
 func (*HostEnrollmentStatus) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{143}
+	return file_whalerein_proto_rawDescGZIP(), []int{160}
 }
 
 func (x *HostEnrollmentStatus) GetHostId() string {
@@ -13457,7 +15380,7 @@ type HostEnrollmentResponse struct {
 
 func (x *HostEnrollmentResponse) Reset() {
 	*x = HostEnrollmentResponse{}
-	mi := &file_whalerein_proto_msgTypes[144]
+	mi := &file_whalerein_proto_msgTypes[161]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13469,7 +15392,7 @@ func (x *HostEnrollmentResponse) String() string {
 func (*HostEnrollmentResponse) ProtoMessage() {}
 
 func (x *HostEnrollmentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[144]
+	mi := &file_whalerein_proto_msgTypes[161]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13482,7 +15405,7 @@ func (x *HostEnrollmentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostEnrollmentResponse.ProtoReflect.Descriptor instead.
 func (*HostEnrollmentResponse) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{144}
+	return file_whalerein_proto_rawDescGZIP(), []int{161}
 }
 
 func (x *HostEnrollmentResponse) GetStatus() *HostEnrollmentStatus {
@@ -13526,7 +15449,7 @@ type OperationStatus struct {
 
 func (x *OperationStatus) Reset() {
 	*x = OperationStatus{}
-	mi := &file_whalerein_proto_msgTypes[145]
+	mi := &file_whalerein_proto_msgTypes[162]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13538,7 +15461,7 @@ func (x *OperationStatus) String() string {
 func (*OperationStatus) ProtoMessage() {}
 
 func (x *OperationStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[145]
+	mi := &file_whalerein_proto_msgTypes[162]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13551,7 +15474,7 @@ func (x *OperationStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OperationStatus.ProtoReflect.Descriptor instead.
 func (*OperationStatus) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{145}
+	return file_whalerein_proto_rawDescGZIP(), []int{162}
 }
 
 func (x *OperationStatus) GetOperationId() string {
@@ -13669,7 +15592,7 @@ type HostClients struct {
 
 func (x *HostClients) Reset() {
 	*x = HostClients{}
-	mi := &file_whalerein_proto_msgTypes[146]
+	mi := &file_whalerein_proto_msgTypes[163]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13681,7 +15604,7 @@ func (x *HostClients) String() string {
 func (*HostClients) ProtoMessage() {}
 
 func (x *HostClients) ProtoReflect() protoreflect.Message {
-	mi := &file_whalerein_proto_msgTypes[146]
+	mi := &file_whalerein_proto_msgTypes[163]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13694,12 +15617,114 @@ func (x *HostClients) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HostClients.ProtoReflect.Descriptor instead.
 func (*HostClients) Descriptor() ([]byte, []int) {
-	return file_whalerein_proto_rawDescGZIP(), []int{146}
+	return file_whalerein_proto_rawDescGZIP(), []int{163}
 }
 
 func (x *HostClients) GetObservingDeviceIds() []string {
 	if x != nil {
 		return x.ObservingDeviceIds
+	}
+	return nil
+}
+
+// Device -> Host proof of possession for the App-session proof key. The
+// signature covers session/host/device/channel/transcript/issued/expires.
+type SessionProof struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	SessionId       string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	HostId          string                 `protobuf:"bytes,2,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	DeviceId        string                 `protobuf:"bytes,3,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	ChannelId       string                 `protobuf:"bytes,4,opt,name=channel_id,json=channelId,proto3" json:"channel_id,omitempty"`
+	TranscriptHash  []byte                 `protobuf:"bytes,5,opt,name=transcript_hash,json=transcriptHash,proto3" json:"transcript_hash,omitempty"`
+	IssuedAtUnixMs  int64                  `protobuf:"varint,6,opt,name=issued_at_unix_ms,json=issuedAtUnixMs,proto3" json:"issued_at_unix_ms,omitempty"`
+	ExpiresAtUnixMs int64                  `protobuf:"varint,7,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"`
+	Signature       []byte                 `protobuf:"bytes,8,opt,name=signature,proto3" json:"signature,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SessionProof) Reset() {
+	*x = SessionProof{}
+	mi := &file_whalerein_proto_msgTypes[164]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionProof) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionProof) ProtoMessage() {}
+
+func (x *SessionProof) ProtoReflect() protoreflect.Message {
+	mi := &file_whalerein_proto_msgTypes[164]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionProof.ProtoReflect.Descriptor instead.
+func (*SessionProof) Descriptor() ([]byte, []int) {
+	return file_whalerein_proto_rawDescGZIP(), []int{164}
+}
+
+func (x *SessionProof) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionProof) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *SessionProof) GetDeviceId() string {
+	if x != nil {
+		return x.DeviceId
+	}
+	return ""
+}
+
+func (x *SessionProof) GetChannelId() string {
+	if x != nil {
+		return x.ChannelId
+	}
+	return ""
+}
+
+func (x *SessionProof) GetTranscriptHash() []byte {
+	if x != nil {
+		return x.TranscriptHash
+	}
+	return nil
+}
+
+func (x *SessionProof) GetIssuedAtUnixMs() int64 {
+	if x != nil {
+		return x.IssuedAtUnixMs
+	}
+	return 0
+}
+
+func (x *SessionProof) GetExpiresAtUnixMs() int64 {
+	if x != nil {
+		return x.ExpiresAtUnixMs
+	}
+	return 0
+}
+
+func (x *SessionProof) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
 	}
 	return nil
 }
@@ -13777,7 +15802,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x15enrollment_generation\x18\x04 \x01(\x04R\x14enrollmentGeneration\"x\n" +
 	"\rCapabilitySet\x12<\n" +
 	"\fcapabilities\x18\x01 \x03(\x0e2\x18.whalerein.v1.CapabilityR\fcapabilities\x12)\n" +
-	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"\xf5\x05\n" +
+	"\x10protocol_version\x18\x02 \x01(\rR\x0fprotocolVersion\"\xc8\x06\n" +
 	"\vHostRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x17\n" +
@@ -13799,7 +15824,9 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x0ebody_reference\x18\x10 \x01(\v2\x1e.whalerein.v1.PayloadReferenceR\rbodyReference\x12%\n" +
 	"\x0econnection_ref\x18\x11 \x01(\tR\rconnectionRef\x12)\n" +
 	"\x10grant_generation\x18\x12 \x01(\x04R\x0fgrantGeneration\x123\n" +
-	"\x15enrollment_generation\x18\x13 \x01(\x04R\x14enrollmentGenerationJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eR\x18client_transport_versionR\x17relay_transport_version\"\xdf\x04\n" +
+	"\x15enrollment_generation\x18\x13 \x01(\x04R\x14enrollmentGeneration\x12*\n" +
+	"\x11device_session_id\x18\x14 \x01(\tR\x0fdeviceSessionId\x12%\n" +
+	"\x0eproof_expected\x18\x15 \x01(\bR\rproofExpectedJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eR\x18client_transport_versionR\x17relay_transport_version\"\xdf\x04\n" +
 	"\n" +
 	"HostResult\x12\x1d\n" +
 	"\n" +
@@ -13941,13 +15968,23 @@ const file_whalerein_proto_rawDesc = "" +
 	"\rRevocationAck\x12\x1b\n" +
 	"\treplay_id\x18\x01 \x01(\tR\breplayId\x12\x1d\n" +
 	"\n" +
-	"device_ids\x18\x02 \x03(\tR\tdeviceIds\"\x8b\x02\n" +
+	"device_ids\x18\x02 \x03(\tR\tdeviceIds\"\xa3\x05\n" +
 	"\tHostReady\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12/\n" +
 	"\x14connected_at_unix_ms\x18\x02 \x01(\x03R\x11connectedAtUnixMs\x128\n" +
 	"\x18authorization_public_key\x18\x03 \x01(\fR\x16authorizationPublicKey\x12<\n" +
 	"\areceive\x18\x05 \x01(\v2\".whalerein.v1.ReceiveAdvertisementR\areceive\x12#\n" +
-	"\rrelay_version\x18\x06 \x01(\rR\frelayVersionJ\x04\b\x04\x10\x05R\x11transport_version\"^\n" +
+	"\rrelay_version\x18\x06 \x01(\rR\frelayVersion\x12)\n" +
+	"\x10route_generation\x18\a \x01(\x04R\x0frouteGeneration\x12'\n" +
+	"\x0froute_challenge\x18\b \x01(\tR\x0erouteChallenge\x124\n" +
+	"\x17route_signed_at_unix_ms\x18\t \x01(\x03R\x13routeSignedAtUnixMs\x12'\n" +
+	"\x0froute_signature\x18\n" +
+	" \x01(\fR\x0erouteSignature\x12#\n" +
+	"\rroute_service\x18\v \x01(\tR\frouteService\x12+\n" +
+	"\x11route_environment\x18\f \x01(\tR\x10routeEnvironment\x127\n" +
+	"\x18route_signing_public_key\x18\r \x01(\fR\x15routeSigningPublicKey\x123\n" +
+	"\x16route_noise_public_key\x18\x0e \x01(\fR\x13routeNoisePublicKey\x12#\n" +
+	"\rroute_closing\x18\x0f \x01(\bR\frouteClosingJ\x04\b\x04\x10\x05R\x11transport_version\"^\n" +
 	"\x13HostGrantRevocation\x12)\n" +
 	"\x11signed_at_unix_ms\x18\x01 \x01(\x03R\x0esignedAtUnixMs\x12\x1c\n" +
 	"\tsignature\x18\x02 \x01(\fR\tsignature\"e\n" +
@@ -14657,7 +16694,161 @@ const file_whalerein_proto_rawDesc = "" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x17\n" +
 	"\aitem_id\x18\x02 \x01(\tR\x06itemId\x121\n" +
 	"\x06action\x18\x03 \x01(\x0e2\x19.whalerein.v1.QueueActionR\x06action\x12\x12\n" +
-	"\x04text\x18\x04 \x01(\tR\x04text\"\xc9\x05\n" +
+	"\x04text\x18\x04 \x01(\tR\x04text\"\xed\x01\n" +
+	"\fNodeIdentity\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12 \n" +
+	"\vincarnation\x18\x02 \x01(\tR\vincarnation\x12\x1b\n" +
+	"\tregion_id\x18\x03 \x01(\tR\bregionId\x12\x1b\n" +
+	"\thttps_url\x18\x04 \x01(\tR\bhttpsUrl\x12\x19\n" +
+	"\bmqtt_url\x18\x05 \x01(\tR\amqttUrl\x12\x1a\n" +
+	"\bcapacity\x18\x06 \x01(\rR\bcapacity\x121\n" +
+	"\x15registered_at_unix_ms\x18\a \x01(\x03R\x12registeredAtUnixMs\"\x9d\x02\n" +
+	"\n" +
+	"NodeReport\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12 \n" +
+	"\vincarnation\x18\x02 \x01(\tR\vincarnation\x12\x1a\n" +
+	"\bsequence\x18\x03 \x01(\x04R\bsequence\x12\x14\n" +
+	"\x05ready\x18\x04 \x01(\bR\x05ready\x12\x1a\n" +
+	"\bcapacity\x18\x05 \x01(\rR\bcapacity\x12\x1d\n" +
+	"\n" +
+	"host_count\x18\x06 \x01(\rR\thostCount\x128\n" +
+	"\x18applied_policy_revisions\x18\a \x03(\tR\x16appliedPolicyRevisions\x12-\n" +
+	"\x13observed_at_unix_ms\x18\b \x01(\x03R\x10observedAtUnixMs\"\x98\x01\n" +
+	"\rNodeReportAck\x12-\n" +
+	"\x13received_at_unix_ms\x18\x01 \x01(\x03R\x10receivedAtUnixMs\x12-\n" +
+	"\x12placement_eligible\x18\x02 \x01(\bR\x11placementEligible\x12)\n" +
+	"\x10rejection_reason\x18\x03 \x01(\tR\x0frejectionReason\"\x8e\x04\n" +
+	"\x0fHostRouteAttach\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12!\n" +
+	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12\x18\n" +
+	"\aservice\x18\x03 \x01(\tR\aservice\x12 \n" +
+	"\venvironment\x18\x04 \x01(\tR\venvironment\x12\x17\n" +
+	"\anode_id\x18\x05 \x01(\tR\x06nodeId\x12 \n" +
+	"\vincarnation\x18\x06 \x01(\tR\vincarnation\x12\x1e\n" +
+	"\n" +
+	"generation\x18\a \x01(\x04R\n" +
+	"generation\x12\x1c\n" +
+	"\tchallenge\x18\b \x01(\tR\tchallenge\x12)\n" +
+	"\x11signed_at_unix_ms\x18\t \x01(\x03R\x0esignedAtUnixMs\x12%\n" +
+	"\x0ehost_signature\x18\n" +
+	" \x01(\fR\rhostSignature\x125\n" +
+	"\x17host_signing_public_key\x18\v \x01(\fR\x14hostSigningPublicKey\x121\n" +
+	"\x15host_noise_public_key\x18\f \x01(\fR\x12hostNoisePublicKey\x12#\n" +
+	"\rnode_observed\x18\r \x01(\bR\fnodeObserved\x12)\n" +
+	"\x10node_incarnation\x18\x0e \x01(\tR\x0fnodeIncarnation\"\x9d\x02\n" +
+	"\tHostRoute\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12!\n" +
+	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12\x17\n" +
+	"\anode_id\x18\x03 \x01(\tR\x06nodeId\x12 \n" +
+	"\vincarnation\x18\x04 \x01(\tR\vincarnation\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x05 \x01(\x04R\n" +
+	"generation\x12.\n" +
+	"\x05state\x18\x06 \x01(\x0e2\x18.whalerein.v1.RouteStateR\x05state\x12\x1c\n" +
+	"\tchallenge\x18\a \x01(\tR\tchallenge\x12+\n" +
+	"\x12updated_at_unix_ms\x18\b \x01(\x03R\x0fupdatedAtUnixMs\"\xcd\x01\n" +
+	"\x16HostRouteAttachReceipt\x124\n" +
+	"\aoutcome\x18\x01 \x01(\x0e2\x1a.whalerein.v1.RouteOutcomeR\aoutcome\x12-\n" +
+	"\x05route\x18\x02 \x01(\v2\x17.whalerein.v1.HostRouteR\x05route\x126\n" +
+	"\n" +
+	"error_code\x18\x03 \x01(\x0e2\x17.whalerein.v1.ErrorCodeR\terrorCode\x12\x16\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xe7\x02\n" +
+	"\x0eHostRouteClose\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x17\n" +
+	"\anode_id\x18\x02 \x01(\tR\x06nodeId\x12 \n" +
+	"\vincarnation\x18\x03 \x01(\tR\vincarnation\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x04 \x01(\x04R\n" +
+	"generation\x12)\n" +
+	"\x11signed_at_unix_ms\x18\x05 \x01(\x03R\x0esignedAtUnixMs\x12%\n" +
+	"\x0ehost_signature\x18\x06 \x01(\fR\rhostSignature\x125\n" +
+	"\x17host_signing_public_key\x18\a \x01(\fR\x14hostSigningPublicKey\x12\x1c\n" +
+	"\tchallenge\x18\b \x01(\tR\tchallenge\x12\x18\n" +
+	"\aservice\x18\t \x01(\tR\aservice\x12 \n" +
+	"\venvironment\x18\n" +
+	" \x01(\tR\venvironment\"\xcc\x01\n" +
+	"\x15HostRouteCloseReceipt\x124\n" +
+	"\aoutcome\x18\x01 \x01(\x0e2\x1a.whalerein.v1.RouteOutcomeR\aoutcome\x12-\n" +
+	"\x05route\x18\x02 \x01(\v2\x17.whalerein.v1.HostRouteR\x05route\x126\n" +
+	"\n" +
+	"error_code\x18\x03 \x01(\x0e2\x17.whalerein.v1.ErrorCodeR\terrorCode\x12\x16\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\x97\x01\n" +
+	"\rNodeInventory\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12 \n" +
+	"\vincarnation\x18\x02 \x01(\tR\vincarnation\x12\x1a\n" +
+	"\bsequence\x18\x03 \x01(\x04R\bsequence\x12/\n" +
+	"\x06routes\x18\x04 \x03(\v2\x17.whalerein.v1.HostRouteR\x06routes\"`\n" +
+	"\tNodeDrain\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12 \n" +
+	"\vincarnation\x18\x02 \x01(\tR\vincarnation\x12\x18\n" +
+	"\adrained\x18\x03 \x01(\bR\adrained\"r\n" +
+	"\x10NodeInventoryAck\x12/\n" +
+	"\x06routes\x18\x01 \x03(\v2\x17.whalerein.v1.HostRouteR\x06routes\x12-\n" +
+	"\x12inventory_sequence\x18\x02 \x01(\x04R\x11inventorySequence\"\x84\x02\n" +
+	"\x0eRouteDiscovery\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12-\n" +
+	"\x05route\x18\x02 \x01(\v2\x17.whalerein.v1.HostRouteR\x05route\x12\x1b\n" +
+	"\thttps_url\x18\x03 \x01(\tR\bhttpsUrl\x12\x19\n" +
+	"\bmqtt_url\x18\x04 \x01(\tR\amqttUrl\x12\x14\n" +
+	"\x05fresh\x18\x05 \x01(\bR\x05fresh\x12-\n" +
+	"\x13observed_at_unix_ms\x18\x06 \x01(\x03R\x10observedAtUnixMs\x12-\n" +
+	"\x12unavailable_reason\x18\a \x01(\tR\x11unavailableReason\"\xc6\x05\n" +
+	"\x0fScopedAuthority\x12!\n" +
+	"\fauth_version\x18\x01 \x01(\tR\vauthVersion\x12!\n" +
+	"\fauthority_id\x18\x02 \x01(\tR\vauthorityId\x12\x16\n" +
+	"\x06issuer\x18\x03 \x01(\tR\x06issuer\x12\x1a\n" +
+	"\baudience\x18\x04 \x01(\tR\baudience\x12 \n" +
+	"\venvironment\x18\x05 \x01(\tR\venvironment\x12!\n" +
+	"\fworkspace_id\x18\x06 \x01(\tR\vworkspaceId\x12\x17\n" +
+	"\ahost_id\x18\a \x01(\tR\x06hostId\x12\x1b\n" +
+	"\tdevice_id\x18\b \x01(\tR\bdeviceId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\t \x01(\tR\tsessionId\x12)\n" +
+	"\x10grant_generation\x18\n" +
+	" \x01(\x04R\x0fgrantGeneration\x122\n" +
+	"\x15host_grant_generation\x18\v \x01(\x04R\x13hostGrantGeneration\x12&\n" +
+	"\x0fserving_node_id\x18\f \x01(\tR\rservingNodeId\x12)\n" +
+	"\x10route_generation\x18\r \x01(\x04R\x0frouteGeneration\x127\n" +
+	"\x18session_proof_public_key\x18\x0e \x01(\fR\x15sessionProofPublicKey\x12'\n" +
+	"\x0fpolicy_revision\x18\x0f \x01(\tR\x0epolicyRevision\x12)\n" +
+	"\x11issued_at_unix_ms\x18\x10 \x01(\x03R\x0eissuedAtUnixMs\x12+\n" +
+	"\x12expires_at_unix_ms\x18\x11 \x01(\x03R\x0fexpiresAtUnixMs\x12\x15\n" +
+	"\x06key_id\x18\x12 \x01(\tR\x05keyId\x12\x1c\n" +
+	"\tsignature\x18\x13 \x01(\fR\tsignature\"\xc2\x03\n" +
+	"\x17AuthorityRenewalRequest\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x1b\n" +
+	"\tdevice_id\x18\x02 \x01(\tR\bdeviceId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\x12)\n" +
+	"\x10grant_generation\x18\x04 \x01(\x04R\x0fgrantGeneration\x12)\n" +
+	"\x10route_generation\x18\x05 \x01(\x04R\x0frouteGeneration\x12\x17\n" +
+	"\anode_id\x18\x06 \x01(\tR\x06nodeId\x12 \n" +
+	"\vincarnation\x18\a \x01(\tR\vincarnation\x122\n" +
+	"\x15current_authority_ids\x18\b \x03(\tR\x13currentAuthorityIds\x12 \n" +
+	"\venvironment\x18\t \x01(\tR\venvironment\x127\n" +
+	"\x18session_proof_public_key\x18\n" +
+	" \x01(\fR\x15sessionProofPublicKey\x122\n" +
+	"\x15host_grant_generation\x18\v \x01(\x04R\x13hostGrantGeneration\"\xe3\x01\n" +
+	"\x18AuthorityRenewalResponse\x12;\n" +
+	"\tauthority\x18\x01 \x01(\v2\x1d.whalerein.v1.ScopedAuthorityR\tauthority\x12:\n" +
+	"\x1amaximum_expires_at_unix_ms\x18\x02 \x01(\x03R\x16maximumExpiresAtUnixMs\x126\n" +
+	"\n" +
+	"error_code\x18\x03 \x01(\x0e2\x17.whalerein.v1.ErrorCodeR\terrorCode\x12\x16\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xdf\x01\n" +
+	"\x18AuthorityAcknowledgement\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12 \n" +
+	"\vincarnation\x18\x02 \x01(\tR\vincarnation\x12#\n" +
+	"\rauthority_ids\x18\x03 \x03(\tR\fauthorityIds\x126\n" +
+	"\x17applied_policy_revision\x18\x04 \x01(\tR\x15appliedPolicyRevision\x12+\n" +
+	"\x12applied_at_unix_ms\x18\x05 \x01(\x03R\x0fappliedAtUnixMs\"\x86\x02\n" +
+	"\x10RevocationStatus\x12\x1d\n" +
+	"\n" +
+	"scope_type\x18\x01 \x01(\tR\tscopeType\x12\x19\n" +
+	"\bscope_id\x18\x02 \x01(\tR\ascopeId\x12\x1a\n" +
+	"\brevision\x18\x03 \x01(\x04R\brevision\x128\n" +
+	"\x19frozen_expires_at_unix_ms\x18\x04 \x01(\x03R\x15frozenExpiresAtUnixMs\x123\n" +
+	"\x05state\x18\x05 \x01(\x0e2\x1d.whalerein.v1.RevocationStateR\x05state\x12-\n" +
+	"\x13recorded_at_unix_ms\x18\x06 \x01(\x03R\x10recordedAtUnixMs\"\x82\x06\n" +
 	"\x15ExternalAuthorization\x12!\n" +
 	"\fauth_version\x18\x01 \x01(\tR\vauthVersion\x12)\n" +
 	"\x10authorization_id\x18\x02 \x01(\tR\x0fauthorizationId\x12\x16\n" +
@@ -14679,19 +16870,23 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x12expires_at_unix_ms\x18\x11 \x01(\x03R\x0fexpiresAtUnixMs\x12\x14\n" +
 	"\x05nonce\x18\x12 \x01(\fR\x05nonce\x12\x15\n" +
 	"\x06key_id\x18\x13 \x01(\tR\x05keyId\x12\x1c\n" +
-	"\tsignature\x18\x14 \x01(\fR\tsignature\"\xb1\x02\n" +
+	"\tsignature\x18\x14 \x01(\fR\tsignature\x127\n" +
+	"\x18session_proof_public_key\x18\x15 \x01(\fR\x15sessionProofPublicKey\"\xb1\x02\n" +
 	"\x15HostEnrollmentRequest\x12I\n" +
 	"\rauthorization\x18\x01 \x01(\v2#.whalerein.v1.ExternalAuthorizationR\rauthorization\x12!\n" +
 	"\foperation_id\x18\x02 \x01(\tR\voperationId\x12\x17\n" +
 	"\ahost_id\x18\x03 \x01(\tR\x06hostId\x125\n" +
 	"\x17host_signing_public_key\x18\x04 \x01(\fR\x14hostSigningPublicKey\x121\n" +
 	"\x15host_noise_public_key\x18\x05 \x01(\fR\x12hostNoisePublicKey\x12'\n" +
-	"\x0fproof_signature\x18\x06 \x01(\fR\x0eproofSignature\"|\n" +
+	"\x0fproof_signature\x18\x06 \x01(\fR\x0eproofSignature\"\xe9\x01\n" +
 	"\x0eHostCredential\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x19\n" +
 	"\bmqtt_url\x18\x02 \x01(\tR\amqttUrl\x12\x1a\n" +
 	"\busername\x18\x03 \x01(\tR\busername\x12\x1a\n" +
-	"\bpassword\x18\x04 \x01(\tR\bpassword\"\xd6\x04\n" +
+	"\bpassword\x18\x04 \x01(\tR\bpassword\x12\x17\n" +
+	"\anode_id\x18\x05 \x01(\tR\x06nodeId\x12 \n" +
+	"\vincarnation\x18\x06 \x01(\tR\vincarnation\x120\n" +
+	"\x14authority_public_key\x18\a \x01(\fR\x12authorityPublicKey\"\xd6\x04\n" +
 	"\x14HostEnrollmentStatus\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12!\n" +
 	"\fworkspace_id\x18\x02 \x01(\tR\vworkspaceId\x12/\n" +
@@ -14729,7 +16924,18 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x11credential_issued\x18\x0e \x01(\bR\x10credentialIssued\x126\n" +
 	"\x17credential_operation_id\x18\x0f \x01(\tR\x15credentialOperationId\"?\n" +
 	"\vHostClients\x120\n" +
-	"\x14observing_device_ids\x18\x01 \x03(\tR\x12observingDeviceIds*\x96\x01\n" +
+	"\x14observing_device_ids\x18\x01 \x03(\tR\x12observingDeviceIds\"\xa1\x02\n" +
+	"\fSessionProof\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x17\n" +
+	"\ahost_id\x18\x02 \x01(\tR\x06hostId\x12\x1b\n" +
+	"\tdevice_id\x18\x03 \x01(\tR\bdeviceId\x12\x1d\n" +
+	"\n" +
+	"channel_id\x18\x04 \x01(\tR\tchannelId\x12'\n" +
+	"\x0ftranscript_hash\x18\x05 \x01(\fR\x0etranscriptHash\x12)\n" +
+	"\x11issued_at_unix_ms\x18\x06 \x01(\x03R\x0eissuedAtUnixMs\x12+\n" +
+	"\x12expires_at_unix_ms\x18\a \x01(\x03R\x0fexpiresAtUnixMs\x12\x1c\n" +
+	"\tsignature\x18\b \x01(\fR\tsignature*\x96\x01\n" +
 	"\fOnlineStatus\x12\x1d\n" +
 	"\x19online_status_unspecified\x10\x00\x12\f\n" +
 	"\breceived\x10\x01\x12\x10\n" +
@@ -14739,7 +16945,7 @@ const file_whalerein_proto_rawDesc = "" +
 	"\tsucceeded\x10\x05\x12\n" +
 	"\n" +
 	"\x06failed\x10\x06\x12\v\n" +
-	"\aunknown\x10\a*\x98\x02\n" +
+	"\aunknown\x10\a*\xd4\x02\n" +
 	"\vRequestKind\x12\x1c\n" +
 	"\x18REQUEST_KIND_UNSPECIFIED\x10\x00\x12\x1a\n" +
 	"\x16REQUEST_KIND_HANDSHAKE\x10\x01\x12\x16\n" +
@@ -14749,7 +16955,10 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x1eREQUEST_KIND_PAIRING_AUTHORIZE\x10\x05\x12\x1b\n" +
 	"\x17REQUEST_KIND_REVOCATION\x10\x06\x12\x1d\n" +
 	"\x19REQUEST_KIND_HOST_CLIENTS\x10\a\x12\x1d\n" +
-	"\x19REQUEST_KIND_ACCESS_READY\x10\b*\xbb\x04\n" +
+	"\x19REQUEST_KIND_ACCESS_READY\x10\b\x12\x1a\n" +
+	"\x16REQUEST_KIND_AUTHORITY\x10\t\x12\x1e\n" +
+	"\x1aREQUEST_KIND_SESSION_PROOF\x10\n" +
+	"*\xf5\x04\n" +
 	"\tErrorCode\x12\x1a\n" +
 	"\x16error_code_unspecified\x10\x00\x12\x14\n" +
 	"\x10invalid_argument\x10\x01\x12\x10\n" +
@@ -14774,7 +16983,10 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x11payload_too_large\x10\x13\x12\x12\n" +
 	"\x0epairing_fenced\x10\x14\x12!\n" +
 	"\x1dpairing_committed_unavailable\x10\x15\x12!\n" +
-	"\x1dpairing_committed_unconfirmed\x10\x16\x12\x15\n" +
+	"\x1dpairing_committed_unconfirmed\x10\x16\x12\x0f\n" +
+	"\vroute_stale\x10\x17\x12\x11\n" +
+	"\rpolicy_denied\x10\x18\x12\x14\n" +
+	"\x10node_unavailable\x10\x19\x12\x15\n" +
 	"\x10channel_replaced\x10\xdc\x01*\x86\x01\n" +
 	"\n" +
 	"Capability\x12\x1a\n" +
@@ -14928,7 +17140,24 @@ const file_whalerein_proto_rawDesc = "" +
 	"\x04EDIT\x10\x01\x12\n" +
 	"\n" +
 	"\x06REMOVE\x10\x02\x12\v\n" +
-	"\aPROMOTE\x10\x03*z\n" +
+	"\aPROMOTE\x10\x03*K\n" +
+	"\n" +
+	"RouteState\x12\x1b\n" +
+	"\x17ROUTE_STATE_UNSPECIFIED\x10\x00\x12\x0e\n" +
+	"\n" +
+	"ROUTE_OPEN\x10\x01\x12\x10\n" +
+	"\fROUTE_CLOSED\x10\x02*\x90\x01\n" +
+	"\fRouteOutcome\x12\x1d\n" +
+	"\x19ROUTE_OUTCOME_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fROUTE_COMMITTED\x10\x01\x12\x14\n" +
+	"\x10ROUTE_IDEMPOTENT\x10\x02\x12\x0f\n" +
+	"\vROUTE_STALE\x10\x03\x12\x12\n" +
+	"\x0eROUTE_CONFLICT\x10\x04\x12\x11\n" +
+	"\rROUTE_REFUSED\x10\x05*q\n" +
+	"\x0fRevocationState\x12 \n" +
+	"\x1cREVOCATION_STATE_UNSPECIFIED\x10\x00\x12\"\n" +
+	"\x1eREVOCATION_PENDING_ENFORCEMENT\x10\x01\x12\x18\n" +
+	"\x14REVOCATION_EFFECTIVE\x10\x02*z\n" +
 	"\x0fEnrollmentState\x12 \n" +
 	"\x1cENROLLMENT_STATE_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12enrollment_pending\x10\x01\x12\x14\n" +
@@ -14953,8 +17182,8 @@ func file_whalerein_proto_rawDescGZIP() []byte {
 	return file_whalerein_proto_rawDescData
 }
 
-var file_whalerein_proto_enumTypes = make([]protoimpl.EnumInfo, 30)
-var file_whalerein_proto_msgTypes = make([]protoimpl.MessageInfo, 149)
+var file_whalerein_proto_enumTypes = make([]protoimpl.EnumInfo, 33)
+var file_whalerein_proto_msgTypes = make([]protoimpl.MessageInfo, 167)
 var file_whalerein_proto_goTypes = []any{
 	(OnlineStatus)(0),                 // 0: whalerein.v1.OnlineStatus
 	(RequestKind)(0),                  // 1: whalerein.v1.RequestKind
@@ -14984,368 +17213,402 @@ var file_whalerein_proto_goTypes = []any{
 	(InputKind)(0),                    // 25: whalerein.v1.InputKind
 	(QueuePlacement)(0),               // 26: whalerein.v1.QueuePlacement
 	(QueueAction)(0),                  // 27: whalerein.v1.QueueAction
-	(EnrollmentState)(0),              // 28: whalerein.v1.EnrollmentState
-	(OperationState)(0),               // 29: whalerein.v1.OperationState
-	(*TransportBudget)(nil),           // 30: whalerein.v1.TransportBudget
-	(*ReceiveAdvertisement)(nil),      // 31: whalerein.v1.ReceiveAdvertisement
-	(*PayloadReference)(nil),          // 32: whalerein.v1.PayloadReference
-	(*RelayObjectReserveRequest)(nil), // 33: whalerein.v1.RelayObjectReserveRequest
-	(*RelayObjectReservation)(nil),    // 34: whalerein.v1.RelayObjectReservation
-	(*RelayObjectFinishRequest)(nil),  // 35: whalerein.v1.RelayObjectFinishRequest
-	(*RelayObject)(nil),               // 36: whalerein.v1.RelayObject
-	(*RelayObjectDeleteResult)(nil),   // 37: whalerein.v1.RelayObjectDeleteResult
-	(*RequestTransportMetadata)(nil),  // 38: whalerein.v1.RequestTransportMetadata
-	(*CapabilitySet)(nil),             // 39: whalerein.v1.CapabilitySet
-	(*HostRequest)(nil),               // 40: whalerein.v1.HostRequest
-	(*HostResult)(nil),                // 41: whalerein.v1.HostResult
-	(*ErrorResponse)(nil),             // 42: whalerein.v1.ErrorResponse
-	(*RequestReceipt)(nil),            // 43: whalerein.v1.RequestReceipt
-	(*RequestState)(nil),              // 44: whalerein.v1.RequestState
-	(*RequestStateNotice)(nil),        // 45: whalerein.v1.RequestStateNotice
-	(*HostInfo)(nil),                  // 46: whalerein.v1.HostInfo
-	(*HostList)(nil),                  // 47: whalerein.v1.HostList
-	(*PairingInvitationRequest)(nil),  // 48: whalerein.v1.PairingInvitationRequest
-	(*PairingInvitation)(nil),         // 49: whalerein.v1.PairingInvitation
-	(*PairingClaimRequest)(nil),       // 50: whalerein.v1.PairingClaimRequest
-	(*PairingClaimResponse)(nil),      // 51: whalerein.v1.PairingClaimResponse
-	(*PairingClaim)(nil),              // 52: whalerein.v1.PairingClaim
-	(*PairingClaimResult)(nil),        // 53: whalerein.v1.PairingClaimResult
-	(*RevocationNotice)(nil),          // 54: whalerein.v1.RevocationNotice
-	(*RevocationAck)(nil),             // 55: whalerein.v1.RevocationAck
-	(*HostReady)(nil),                 // 56: whalerein.v1.HostReady
-	(*HostGrantRevocation)(nil),       // 57: whalerein.v1.HostGrantRevocation
-	(*EncryptedFrame)(nil),            // 58: whalerein.v1.EncryptedFrame
-	(*ChannelHello)(nil),              // 59: whalerein.v1.ChannelHello
-	(*ChannelReady)(nil),              // 60: whalerein.v1.ChannelReady
-	(*PairingHello)(nil),              // 61: whalerein.v1.PairingHello
-	(*PairingHelloReply)(nil),         // 62: whalerein.v1.PairingHelloReply
-	(*PairingFinish)(nil),             // 63: whalerein.v1.PairingFinish
-	(*RequestPayload)(nil),            // 64: whalerein.v1.RequestPayload
-	(*ResponsePayload)(nil),           // 65: whalerein.v1.ResponsePayload
-	(*GetHostCapabilities)(nil),       // 66: whalerein.v1.GetHostCapabilities
-	(*HostCapabilities)(nil),          // 67: whalerein.v1.HostCapabilities
-	(*ListModels)(nil),                // 68: whalerein.v1.ListModels
-	(*ReadSessionModel)(nil),          // 69: whalerein.v1.ReadSessionModel
-	(*ModelChoice)(nil),               // 70: whalerein.v1.ModelChoice
-	(*ModelEffort)(nil),               // 71: whalerein.v1.ModelEffort
-	(*ModelEntry)(nil),                // 72: whalerein.v1.ModelEntry
-	(*ModelProvider)(nil),             // 73: whalerein.v1.ModelProvider
-	(*ModelProviderFailure)(nil),      // 74: whalerein.v1.ModelProviderFailure
-	(*ModelCatalog)(nil),              // 75: whalerein.v1.ModelCatalog
-	(*SessionModel)(nil),              // 76: whalerein.v1.SessionModel
-	(*SelectSessionModel)(nil),        // 77: whalerein.v1.SelectSessionModel
-	(*ModelSelectionReceipt)(nil),     // 78: whalerein.v1.ModelSelectionReceipt
-	(*ForkSession)(nil),               // 79: whalerein.v1.ForkSession
-	(*CreateSession)(nil),             // 80: whalerein.v1.CreateSession
-	(*LifecycleReceipt)(nil),          // 81: whalerein.v1.LifecycleReceipt
-	(*ListSessions)(nil),              // 82: whalerein.v1.ListSessions
-	(*QuestionOption)(nil),            // 83: whalerein.v1.QuestionOption
-	(*QuestionLocalizedText)(nil),     // 84: whalerein.v1.QuestionLocalizedText
-	(*QuestionSubject)(nil),           // 85: whalerein.v1.QuestionSubject
-	(*QuestionDisplay)(nil),           // 86: whalerein.v1.QuestionDisplay
-	(*QuestionIntent)(nil),            // 87: whalerein.v1.QuestionIntent
-	(*QuestionItem)(nil),              // 88: whalerein.v1.QuestionItem
-	(*QuestionAnswerItem)(nil),        // 89: whalerein.v1.QuestionAnswerItem
-	(*QuestionStamp)(nil),             // 90: whalerein.v1.QuestionStamp
-	(*QuestionDescriptor)(nil),        // 91: whalerein.v1.QuestionDescriptor
-	(*QuestionBatch)(nil),             // 92: whalerein.v1.QuestionBatch
-	(*ListQuestions)(nil),             // 93: whalerein.v1.ListQuestions
-	(*GetQuestion)(nil),               // 94: whalerein.v1.GetQuestion
-	(*QuestionPage)(nil),              // 95: whalerein.v1.QuestionPage
-	(*AnswerQuestion)(nil),            // 96: whalerein.v1.AnswerQuestion
-	(*QuestionReceipt)(nil),           // 97: whalerein.v1.QuestionReceipt
-	(*CancelQuestionAnswer)(nil),      // 98: whalerein.v1.CancelQuestionAnswer
-	(*QuestionCancelReceipt)(nil),     // 99: whalerein.v1.QuestionCancelReceipt
-	(*GetSession)(nil),                // 100: whalerein.v1.GetSession
-	(*GetApproval)(nil),               // 101: whalerein.v1.GetApproval
-	(*ListApprovals)(nil),             // 102: whalerein.v1.ListApprovals
-	(*ApprovalList)(nil),              // 103: whalerein.v1.ApprovalList
-	(*GetCommandResult)(nil),          // 104: whalerein.v1.GetCommandResult
-	(*SendMessage)(nil),               // 105: whalerein.v1.SendMessage
-	(*Interrupt)(nil),                 // 106: whalerein.v1.Interrupt
-	(*ResolveApproval)(nil),           // 107: whalerein.v1.ResolveApproval
-	(*Ping)(nil),                      // 108: whalerein.v1.Ping
-	(*Pong)(nil),                      // 109: whalerein.v1.Pong
-	(*SessionSummary)(nil),            // 110: whalerein.v1.SessionSummary
-	(*SessionList)(nil),               // 111: whalerein.v1.SessionList
-	(*CommandAccepted)(nil),           // 112: whalerein.v1.CommandAccepted
-	(*CommandResult)(nil),             // 113: whalerein.v1.CommandResult
-	(*Approval)(nil),                  // 114: whalerein.v1.Approval
-	(*EventEnvelope)(nil),             // 115: whalerein.v1.EventEnvelope
-	(*EventPayload)(nil),              // 116: whalerein.v1.EventPayload
-	(*WatchClosed)(nil),               // 117: whalerein.v1.WatchClosed
-	(*SessionKey)(nil),                // 118: whalerein.v1.SessionKey
-	(*SourceCapabilities)(nil),        // 119: whalerein.v1.SourceCapabilities
-	(*AttemptRef)(nil),                // 120: whalerein.v1.AttemptRef
-	(*TextContent)(nil),               // 121: whalerein.v1.TextContent
-	(*ReasoningContent)(nil),          // 122: whalerein.v1.ReasoningContent
-	(*LiveBlockDelta)(nil),            // 123: whalerein.v1.LiveBlockDelta
-	(*LiveBlockReset)(nil),            // 124: whalerein.v1.LiveBlockReset
-	(*ToolResultPart)(nil),            // 125: whalerein.v1.ToolResultPart
-	(*ToolActivity)(nil),              // 126: whalerein.v1.ToolActivity
-	(*NoticeContent)(nil),             // 127: whalerein.v1.NoticeContent
-	(*AttachmentContent)(nil),         // 128: whalerein.v1.AttachmentContent
-	(*ContentBlock)(nil),              // 129: whalerein.v1.ContentBlock
-	(*ConversationMessage)(nil),       // 130: whalerein.v1.ConversationMessage
-	(*MessageUpsert)(nil),             // 131: whalerein.v1.MessageUpsert
-	(*HistoryBatch)(nil),              // 132: whalerein.v1.HistoryBatch
-	(*HistoryPageSelection)(nil),      // 133: whalerein.v1.HistoryPageSelection
-	(*CommittedMessageRef)(nil),       // 134: whalerein.v1.CommittedMessageRef
-	(*HistoryRead)(nil),               // 135: whalerein.v1.HistoryRead
-	(*HistoryPage)(nil),               // 136: whalerein.v1.HistoryPage
-	(*AttachmentPolicy)(nil),          // 137: whalerein.v1.AttachmentPolicy
-	(*AttachmentMetadata)(nil),        // 138: whalerein.v1.AttachmentMetadata
-	(*OpenAttachment)(nil),            // 139: whalerein.v1.OpenAttachment
-	(*OpenAttachmentResult)(nil),      // 140: whalerein.v1.OpenAttachmentResult
-	(*PullAttachment)(nil),            // 141: whalerein.v1.PullAttachment
-	(*AttachmentPart)(nil),            // 142: whalerein.v1.AttachmentPart
-	(*CloseAttachment)(nil),           // 143: whalerein.v1.CloseAttachment
-	(*CloseAttachmentResult)(nil),     // 144: whalerein.v1.CloseAttachmentResult
-	(*ReadMessageReply)(nil),          // 145: whalerein.v1.ReadMessageReply
-	(*MessageReply)(nil),              // 146: whalerein.v1.MessageReply
-	(*AttemptStarted)(nil),            // 147: whalerein.v1.AttemptStarted
-	(*AttemptEnded)(nil),              // 148: whalerein.v1.AttemptEnded
-	(*LiveFrame)(nil),                 // 149: whalerein.v1.LiveFrame
-	(*SessionState)(nil),              // 150: whalerein.v1.SessionState
-	(*HistoryReset)(nil),              // 151: whalerein.v1.HistoryReset
-	(*SessionUpdate)(nil),             // 152: whalerein.v1.SessionUpdate
-	(*ObservationInterests)(nil),      // 153: whalerein.v1.ObservationInterests
-	(*WatchSession)(nil),              // 154: whalerein.v1.WatchSession
-	(*WatchReady)(nil),                // 155: whalerein.v1.WatchReady
-	(*CheckVersions)(nil),             // 156: whalerein.v1.CheckVersions
-	(*VersionCheck)(nil),              // 157: whalerein.v1.VersionCheck
-	(*VersionChecks)(nil),             // 158: whalerein.v1.VersionChecks
-	(*UnwatchSession)(nil),            // 159: whalerein.v1.UnwatchSession
-	(*WaitSession)(nil),               // 160: whalerein.v1.WaitSession
-	(*CancelSessionWait)(nil),         // 161: whalerein.v1.CancelSessionWait
-	(*ReadWaitState)(nil),             // 162: whalerein.v1.ReadWaitState
-	(*SessionWaitState)(nil),          // 163: whalerein.v1.SessionWaitState
-	(*SessionWaitResult)(nil),         // 164: whalerein.v1.SessionWaitResult
-	(*SessionWaitStateResult)(nil),    // 165: whalerein.v1.SessionWaitStateResult
-	(*ReadPendingQueue)(nil),          // 166: whalerein.v1.ReadPendingQueue
-	(*PendingQueueItem)(nil),          // 167: whalerein.v1.PendingQueueItem
-	(*PendingQueue)(nil),              // 168: whalerein.v1.PendingQueue
-	(*UpdatePendingQueue)(nil),        // 169: whalerein.v1.UpdatePendingQueue
-	(*ExternalAuthorization)(nil),     // 170: whalerein.v1.ExternalAuthorization
-	(*HostEnrollmentRequest)(nil),     // 171: whalerein.v1.HostEnrollmentRequest
-	(*HostCredential)(nil),            // 172: whalerein.v1.HostCredential
-	(*HostEnrollmentStatus)(nil),      // 173: whalerein.v1.HostEnrollmentStatus
-	(*HostEnrollmentResponse)(nil),    // 174: whalerein.v1.HostEnrollmentResponse
-	(*OperationStatus)(nil),           // 175: whalerein.v1.OperationStatus
-	(*HostClients)(nil),               // 176: whalerein.v1.HostClients
-	nil,                               // 177: whalerein.v1.RevocationNotice.GrantGenerationsEntry
-	nil,                               // 178: whalerein.v1.QuestionLocalizedText.TranslationsEntry
+	(RouteState)(0),                   // 28: whalerein.v1.RouteState
+	(RouteOutcome)(0),                 // 29: whalerein.v1.RouteOutcome
+	(RevocationState)(0),              // 30: whalerein.v1.RevocationState
+	(EnrollmentState)(0),              // 31: whalerein.v1.EnrollmentState
+	(OperationState)(0),               // 32: whalerein.v1.OperationState
+	(*TransportBudget)(nil),           // 33: whalerein.v1.TransportBudget
+	(*ReceiveAdvertisement)(nil),      // 34: whalerein.v1.ReceiveAdvertisement
+	(*PayloadReference)(nil),          // 35: whalerein.v1.PayloadReference
+	(*RelayObjectReserveRequest)(nil), // 36: whalerein.v1.RelayObjectReserveRequest
+	(*RelayObjectReservation)(nil),    // 37: whalerein.v1.RelayObjectReservation
+	(*RelayObjectFinishRequest)(nil),  // 38: whalerein.v1.RelayObjectFinishRequest
+	(*RelayObject)(nil),               // 39: whalerein.v1.RelayObject
+	(*RelayObjectDeleteResult)(nil),   // 40: whalerein.v1.RelayObjectDeleteResult
+	(*RequestTransportMetadata)(nil),  // 41: whalerein.v1.RequestTransportMetadata
+	(*CapabilitySet)(nil),             // 42: whalerein.v1.CapabilitySet
+	(*HostRequest)(nil),               // 43: whalerein.v1.HostRequest
+	(*HostResult)(nil),                // 44: whalerein.v1.HostResult
+	(*ErrorResponse)(nil),             // 45: whalerein.v1.ErrorResponse
+	(*RequestReceipt)(nil),            // 46: whalerein.v1.RequestReceipt
+	(*RequestState)(nil),              // 47: whalerein.v1.RequestState
+	(*RequestStateNotice)(nil),        // 48: whalerein.v1.RequestStateNotice
+	(*HostInfo)(nil),                  // 49: whalerein.v1.HostInfo
+	(*HostList)(nil),                  // 50: whalerein.v1.HostList
+	(*PairingInvitationRequest)(nil),  // 51: whalerein.v1.PairingInvitationRequest
+	(*PairingInvitation)(nil),         // 52: whalerein.v1.PairingInvitation
+	(*PairingClaimRequest)(nil),       // 53: whalerein.v1.PairingClaimRequest
+	(*PairingClaimResponse)(nil),      // 54: whalerein.v1.PairingClaimResponse
+	(*PairingClaim)(nil),              // 55: whalerein.v1.PairingClaim
+	(*PairingClaimResult)(nil),        // 56: whalerein.v1.PairingClaimResult
+	(*RevocationNotice)(nil),          // 57: whalerein.v1.RevocationNotice
+	(*RevocationAck)(nil),             // 58: whalerein.v1.RevocationAck
+	(*HostReady)(nil),                 // 59: whalerein.v1.HostReady
+	(*HostGrantRevocation)(nil),       // 60: whalerein.v1.HostGrantRevocation
+	(*EncryptedFrame)(nil),            // 61: whalerein.v1.EncryptedFrame
+	(*ChannelHello)(nil),              // 62: whalerein.v1.ChannelHello
+	(*ChannelReady)(nil),              // 63: whalerein.v1.ChannelReady
+	(*PairingHello)(nil),              // 64: whalerein.v1.PairingHello
+	(*PairingHelloReply)(nil),         // 65: whalerein.v1.PairingHelloReply
+	(*PairingFinish)(nil),             // 66: whalerein.v1.PairingFinish
+	(*RequestPayload)(nil),            // 67: whalerein.v1.RequestPayload
+	(*ResponsePayload)(nil),           // 68: whalerein.v1.ResponsePayload
+	(*GetHostCapabilities)(nil),       // 69: whalerein.v1.GetHostCapabilities
+	(*HostCapabilities)(nil),          // 70: whalerein.v1.HostCapabilities
+	(*ListModels)(nil),                // 71: whalerein.v1.ListModels
+	(*ReadSessionModel)(nil),          // 72: whalerein.v1.ReadSessionModel
+	(*ModelChoice)(nil),               // 73: whalerein.v1.ModelChoice
+	(*ModelEffort)(nil),               // 74: whalerein.v1.ModelEffort
+	(*ModelEntry)(nil),                // 75: whalerein.v1.ModelEntry
+	(*ModelProvider)(nil),             // 76: whalerein.v1.ModelProvider
+	(*ModelProviderFailure)(nil),      // 77: whalerein.v1.ModelProviderFailure
+	(*ModelCatalog)(nil),              // 78: whalerein.v1.ModelCatalog
+	(*SessionModel)(nil),              // 79: whalerein.v1.SessionModel
+	(*SelectSessionModel)(nil),        // 80: whalerein.v1.SelectSessionModel
+	(*ModelSelectionReceipt)(nil),     // 81: whalerein.v1.ModelSelectionReceipt
+	(*ForkSession)(nil),               // 82: whalerein.v1.ForkSession
+	(*CreateSession)(nil),             // 83: whalerein.v1.CreateSession
+	(*LifecycleReceipt)(nil),          // 84: whalerein.v1.LifecycleReceipt
+	(*ListSessions)(nil),              // 85: whalerein.v1.ListSessions
+	(*QuestionOption)(nil),            // 86: whalerein.v1.QuestionOption
+	(*QuestionLocalizedText)(nil),     // 87: whalerein.v1.QuestionLocalizedText
+	(*QuestionSubject)(nil),           // 88: whalerein.v1.QuestionSubject
+	(*QuestionDisplay)(nil),           // 89: whalerein.v1.QuestionDisplay
+	(*QuestionIntent)(nil),            // 90: whalerein.v1.QuestionIntent
+	(*QuestionItem)(nil),              // 91: whalerein.v1.QuestionItem
+	(*QuestionAnswerItem)(nil),        // 92: whalerein.v1.QuestionAnswerItem
+	(*QuestionStamp)(nil),             // 93: whalerein.v1.QuestionStamp
+	(*QuestionDescriptor)(nil),        // 94: whalerein.v1.QuestionDescriptor
+	(*QuestionBatch)(nil),             // 95: whalerein.v1.QuestionBatch
+	(*ListQuestions)(nil),             // 96: whalerein.v1.ListQuestions
+	(*GetQuestion)(nil),               // 97: whalerein.v1.GetQuestion
+	(*QuestionPage)(nil),              // 98: whalerein.v1.QuestionPage
+	(*AnswerQuestion)(nil),            // 99: whalerein.v1.AnswerQuestion
+	(*QuestionReceipt)(nil),           // 100: whalerein.v1.QuestionReceipt
+	(*CancelQuestionAnswer)(nil),      // 101: whalerein.v1.CancelQuestionAnswer
+	(*QuestionCancelReceipt)(nil),     // 102: whalerein.v1.QuestionCancelReceipt
+	(*GetSession)(nil),                // 103: whalerein.v1.GetSession
+	(*GetApproval)(nil),               // 104: whalerein.v1.GetApproval
+	(*ListApprovals)(nil),             // 105: whalerein.v1.ListApprovals
+	(*ApprovalList)(nil),              // 106: whalerein.v1.ApprovalList
+	(*GetCommandResult)(nil),          // 107: whalerein.v1.GetCommandResult
+	(*SendMessage)(nil),               // 108: whalerein.v1.SendMessage
+	(*Interrupt)(nil),                 // 109: whalerein.v1.Interrupt
+	(*ResolveApproval)(nil),           // 110: whalerein.v1.ResolveApproval
+	(*Ping)(nil),                      // 111: whalerein.v1.Ping
+	(*Pong)(nil),                      // 112: whalerein.v1.Pong
+	(*SessionSummary)(nil),            // 113: whalerein.v1.SessionSummary
+	(*SessionList)(nil),               // 114: whalerein.v1.SessionList
+	(*CommandAccepted)(nil),           // 115: whalerein.v1.CommandAccepted
+	(*CommandResult)(nil),             // 116: whalerein.v1.CommandResult
+	(*Approval)(nil),                  // 117: whalerein.v1.Approval
+	(*EventEnvelope)(nil),             // 118: whalerein.v1.EventEnvelope
+	(*EventPayload)(nil),              // 119: whalerein.v1.EventPayload
+	(*WatchClosed)(nil),               // 120: whalerein.v1.WatchClosed
+	(*SessionKey)(nil),                // 121: whalerein.v1.SessionKey
+	(*SourceCapabilities)(nil),        // 122: whalerein.v1.SourceCapabilities
+	(*AttemptRef)(nil),                // 123: whalerein.v1.AttemptRef
+	(*TextContent)(nil),               // 124: whalerein.v1.TextContent
+	(*ReasoningContent)(nil),          // 125: whalerein.v1.ReasoningContent
+	(*LiveBlockDelta)(nil),            // 126: whalerein.v1.LiveBlockDelta
+	(*LiveBlockReset)(nil),            // 127: whalerein.v1.LiveBlockReset
+	(*ToolResultPart)(nil),            // 128: whalerein.v1.ToolResultPart
+	(*ToolActivity)(nil),              // 129: whalerein.v1.ToolActivity
+	(*NoticeContent)(nil),             // 130: whalerein.v1.NoticeContent
+	(*AttachmentContent)(nil),         // 131: whalerein.v1.AttachmentContent
+	(*ContentBlock)(nil),              // 132: whalerein.v1.ContentBlock
+	(*ConversationMessage)(nil),       // 133: whalerein.v1.ConversationMessage
+	(*MessageUpsert)(nil),             // 134: whalerein.v1.MessageUpsert
+	(*HistoryBatch)(nil),              // 135: whalerein.v1.HistoryBatch
+	(*HistoryPageSelection)(nil),      // 136: whalerein.v1.HistoryPageSelection
+	(*CommittedMessageRef)(nil),       // 137: whalerein.v1.CommittedMessageRef
+	(*HistoryRead)(nil),               // 138: whalerein.v1.HistoryRead
+	(*HistoryPage)(nil),               // 139: whalerein.v1.HistoryPage
+	(*AttachmentPolicy)(nil),          // 140: whalerein.v1.AttachmentPolicy
+	(*AttachmentMetadata)(nil),        // 141: whalerein.v1.AttachmentMetadata
+	(*OpenAttachment)(nil),            // 142: whalerein.v1.OpenAttachment
+	(*OpenAttachmentResult)(nil),      // 143: whalerein.v1.OpenAttachmentResult
+	(*PullAttachment)(nil),            // 144: whalerein.v1.PullAttachment
+	(*AttachmentPart)(nil),            // 145: whalerein.v1.AttachmentPart
+	(*CloseAttachment)(nil),           // 146: whalerein.v1.CloseAttachment
+	(*CloseAttachmentResult)(nil),     // 147: whalerein.v1.CloseAttachmentResult
+	(*ReadMessageReply)(nil),          // 148: whalerein.v1.ReadMessageReply
+	(*MessageReply)(nil),              // 149: whalerein.v1.MessageReply
+	(*AttemptStarted)(nil),            // 150: whalerein.v1.AttemptStarted
+	(*AttemptEnded)(nil),              // 151: whalerein.v1.AttemptEnded
+	(*LiveFrame)(nil),                 // 152: whalerein.v1.LiveFrame
+	(*SessionState)(nil),              // 153: whalerein.v1.SessionState
+	(*HistoryReset)(nil),              // 154: whalerein.v1.HistoryReset
+	(*SessionUpdate)(nil),             // 155: whalerein.v1.SessionUpdate
+	(*ObservationInterests)(nil),      // 156: whalerein.v1.ObservationInterests
+	(*WatchSession)(nil),              // 157: whalerein.v1.WatchSession
+	(*WatchReady)(nil),                // 158: whalerein.v1.WatchReady
+	(*CheckVersions)(nil),             // 159: whalerein.v1.CheckVersions
+	(*VersionCheck)(nil),              // 160: whalerein.v1.VersionCheck
+	(*VersionChecks)(nil),             // 161: whalerein.v1.VersionChecks
+	(*UnwatchSession)(nil),            // 162: whalerein.v1.UnwatchSession
+	(*WaitSession)(nil),               // 163: whalerein.v1.WaitSession
+	(*CancelSessionWait)(nil),         // 164: whalerein.v1.CancelSessionWait
+	(*ReadWaitState)(nil),             // 165: whalerein.v1.ReadWaitState
+	(*SessionWaitState)(nil),          // 166: whalerein.v1.SessionWaitState
+	(*SessionWaitResult)(nil),         // 167: whalerein.v1.SessionWaitResult
+	(*SessionWaitStateResult)(nil),    // 168: whalerein.v1.SessionWaitStateResult
+	(*ReadPendingQueue)(nil),          // 169: whalerein.v1.ReadPendingQueue
+	(*PendingQueueItem)(nil),          // 170: whalerein.v1.PendingQueueItem
+	(*PendingQueue)(nil),              // 171: whalerein.v1.PendingQueue
+	(*UpdatePendingQueue)(nil),        // 172: whalerein.v1.UpdatePendingQueue
+	(*NodeIdentity)(nil),              // 173: whalerein.v1.NodeIdentity
+	(*NodeReport)(nil),                // 174: whalerein.v1.NodeReport
+	(*NodeReportAck)(nil),             // 175: whalerein.v1.NodeReportAck
+	(*HostRouteAttach)(nil),           // 176: whalerein.v1.HostRouteAttach
+	(*HostRoute)(nil),                 // 177: whalerein.v1.HostRoute
+	(*HostRouteAttachReceipt)(nil),    // 178: whalerein.v1.HostRouteAttachReceipt
+	(*HostRouteClose)(nil),            // 179: whalerein.v1.HostRouteClose
+	(*HostRouteCloseReceipt)(nil),     // 180: whalerein.v1.HostRouteCloseReceipt
+	(*NodeInventory)(nil),             // 181: whalerein.v1.NodeInventory
+	(*NodeDrain)(nil),                 // 182: whalerein.v1.NodeDrain
+	(*NodeInventoryAck)(nil),          // 183: whalerein.v1.NodeInventoryAck
+	(*RouteDiscovery)(nil),            // 184: whalerein.v1.RouteDiscovery
+	(*ScopedAuthority)(nil),           // 185: whalerein.v1.ScopedAuthority
+	(*AuthorityRenewalRequest)(nil),   // 186: whalerein.v1.AuthorityRenewalRequest
+	(*AuthorityRenewalResponse)(nil),  // 187: whalerein.v1.AuthorityRenewalResponse
+	(*AuthorityAcknowledgement)(nil),  // 188: whalerein.v1.AuthorityAcknowledgement
+	(*RevocationStatus)(nil),          // 189: whalerein.v1.RevocationStatus
+	(*ExternalAuthorization)(nil),     // 190: whalerein.v1.ExternalAuthorization
+	(*HostEnrollmentRequest)(nil),     // 191: whalerein.v1.HostEnrollmentRequest
+	(*HostCredential)(nil),            // 192: whalerein.v1.HostCredential
+	(*HostEnrollmentStatus)(nil),      // 193: whalerein.v1.HostEnrollmentStatus
+	(*HostEnrollmentResponse)(nil),    // 194: whalerein.v1.HostEnrollmentResponse
+	(*OperationStatus)(nil),           // 195: whalerein.v1.OperationStatus
+	(*HostClients)(nil),               // 196: whalerein.v1.HostClients
+	(*SessionProof)(nil),              // 197: whalerein.v1.SessionProof
+	nil,                               // 198: whalerein.v1.RevocationNotice.GrantGenerationsEntry
+	nil,                               // 199: whalerein.v1.QuestionLocalizedText.TranslationsEntry
 }
 var file_whalerein_proto_depIdxs = []int32{
 	9,   // 0: whalerein.v1.ReceiveAdvertisement.profile:type_name -> whalerein.v1.TransportProfile
-	30,  // 1: whalerein.v1.ReceiveAdvertisement.budget:type_name -> whalerein.v1.TransportBudget
+	33,  // 1: whalerein.v1.ReceiveAdvertisement.budget:type_name -> whalerein.v1.TransportBudget
 	10,  // 2: whalerein.v1.PayloadReference.purpose:type_name -> whalerein.v1.PayloadPurpose
 	10,  // 3: whalerein.v1.RelayObjectReserveRequest.purpose:type_name -> whalerein.v1.PayloadPurpose
 	10,  // 4: whalerein.v1.RelayObject.purpose:type_name -> whalerein.v1.PayloadPurpose
 	3,   // 5: whalerein.v1.CapabilitySet.capabilities:type_name -> whalerein.v1.Capability
 	1,   // 6: whalerein.v1.HostRequest.kind:type_name -> whalerein.v1.RequestKind
-	38,  // 7: whalerein.v1.HostRequest.transport:type_name -> whalerein.v1.RequestTransportMetadata
-	32,  // 8: whalerein.v1.HostRequest.body_reference:type_name -> whalerein.v1.PayloadReference
+	41,  // 7: whalerein.v1.HostRequest.transport:type_name -> whalerein.v1.RequestTransportMetadata
+	35,  // 8: whalerein.v1.HostRequest.body_reference:type_name -> whalerein.v1.PayloadReference
 	0,   // 9: whalerein.v1.HostResult.status:type_name -> whalerein.v1.OnlineStatus
 	2,   // 10: whalerein.v1.HostResult.error_code:type_name -> whalerein.v1.ErrorCode
-	32,  // 11: whalerein.v1.HostResult.result_reference:type_name -> whalerein.v1.PayloadReference
+	35,  // 11: whalerein.v1.HostResult.result_reference:type_name -> whalerein.v1.PayloadReference
 	2,   // 12: whalerein.v1.ErrorResponse.code:type_name -> whalerein.v1.ErrorCode
 	0,   // 13: whalerein.v1.RequestReceipt.status:type_name -> whalerein.v1.OnlineStatus
 	0,   // 14: whalerein.v1.RequestState.status:type_name -> whalerein.v1.OnlineStatus
 	2,   // 15: whalerein.v1.RequestState.error_code:type_name -> whalerein.v1.ErrorCode
-	32,  // 16: whalerein.v1.RequestState.result_reference:type_name -> whalerein.v1.PayloadReference
+	35,  // 16: whalerein.v1.RequestState.result_reference:type_name -> whalerein.v1.PayloadReference
 	0,   // 17: whalerein.v1.RequestStateNotice.status:type_name -> whalerein.v1.OnlineStatus
-	32,  // 18: whalerein.v1.RequestStateNotice.result_reference:type_name -> whalerein.v1.PayloadReference
-	46,  // 19: whalerein.v1.HostList.hosts:type_name -> whalerein.v1.HostInfo
+	35,  // 18: whalerein.v1.RequestStateNotice.result_reference:type_name -> whalerein.v1.PayloadReference
+	49,  // 19: whalerein.v1.HostList.hosts:type_name -> whalerein.v1.HostInfo
 	4,   // 20: whalerein.v1.PairingClaimRequest.phase:type_name -> whalerein.v1.PairingPhase
 	4,   // 21: whalerein.v1.PairingClaimResponse.phase:type_name -> whalerein.v1.PairingPhase
 	4,   // 22: whalerein.v1.PairingClaim.phase:type_name -> whalerein.v1.PairingPhase
-	177, // 23: whalerein.v1.RevocationNotice.grant_generations:type_name -> whalerein.v1.RevocationNotice.GrantGenerationsEntry
-	31,  // 24: whalerein.v1.HostReady.receive:type_name -> whalerein.v1.ReceiveAdvertisement
-	39,  // 25: whalerein.v1.ChannelHello.capabilities:type_name -> whalerein.v1.CapabilitySet
-	31,  // 26: whalerein.v1.ChannelHello.receive:type_name -> whalerein.v1.ReceiveAdvertisement
-	39,  // 27: whalerein.v1.ChannelReady.capabilities:type_name -> whalerein.v1.CapabilitySet
-	31,  // 28: whalerein.v1.ChannelReady.receive:type_name -> whalerein.v1.ReceiveAdvertisement
-	39,  // 29: whalerein.v1.PairingHello.capabilities:type_name -> whalerein.v1.CapabilitySet
-	39,  // 30: whalerein.v1.PairingHelloReply.capabilities:type_name -> whalerein.v1.CapabilitySet
-	82,  // 31: whalerein.v1.RequestPayload.list_sessions:type_name -> whalerein.v1.ListSessions
-	100, // 32: whalerein.v1.RequestPayload.get_session:type_name -> whalerein.v1.GetSession
-	101, // 33: whalerein.v1.RequestPayload.get_approval:type_name -> whalerein.v1.GetApproval
-	104, // 34: whalerein.v1.RequestPayload.get_command_result:type_name -> whalerein.v1.GetCommandResult
-	105, // 35: whalerein.v1.RequestPayload.send_message:type_name -> whalerein.v1.SendMessage
-	106, // 36: whalerein.v1.RequestPayload.interrupt:type_name -> whalerein.v1.Interrupt
-	107, // 37: whalerein.v1.RequestPayload.resolve_approval:type_name -> whalerein.v1.ResolveApproval
-	108, // 38: whalerein.v1.RequestPayload.ping:type_name -> whalerein.v1.Ping
-	102, // 39: whalerein.v1.RequestPayload.list_approvals:type_name -> whalerein.v1.ListApprovals
-	135, // 40: whalerein.v1.RequestPayload.read_history:type_name -> whalerein.v1.HistoryRead
-	154, // 41: whalerein.v1.RequestPayload.watch_session:type_name -> whalerein.v1.WatchSession
-	156, // 42: whalerein.v1.RequestPayload.check_versions:type_name -> whalerein.v1.CheckVersions
-	159, // 43: whalerein.v1.RequestPayload.unwatch_session:type_name -> whalerein.v1.UnwatchSession
-	145, // 44: whalerein.v1.RequestPayload.read_message_reply:type_name -> whalerein.v1.ReadMessageReply
-	66,  // 45: whalerein.v1.RequestPayload.get_host_capabilities:type_name -> whalerein.v1.GetHostCapabilities
-	68,  // 46: whalerein.v1.RequestPayload.list_models:type_name -> whalerein.v1.ListModels
-	69,  // 47: whalerein.v1.RequestPayload.read_session_model:type_name -> whalerein.v1.ReadSessionModel
-	77,  // 48: whalerein.v1.RequestPayload.select_session_model:type_name -> whalerein.v1.SelectSessionModel
-	160, // 49: whalerein.v1.RequestPayload.wait_session:type_name -> whalerein.v1.WaitSession
-	161, // 50: whalerein.v1.RequestPayload.cancel_session_wait:type_name -> whalerein.v1.CancelSessionWait
-	162, // 51: whalerein.v1.RequestPayload.read_wait_state:type_name -> whalerein.v1.ReadWaitState
-	80,  // 52: whalerein.v1.RequestPayload.create_session:type_name -> whalerein.v1.CreateSession
-	166, // 53: whalerein.v1.RequestPayload.read_pending_queue:type_name -> whalerein.v1.ReadPendingQueue
-	169, // 54: whalerein.v1.RequestPayload.update_pending_queue:type_name -> whalerein.v1.UpdatePendingQueue
-	93,  // 55: whalerein.v1.RequestPayload.list_questions:type_name -> whalerein.v1.ListQuestions
-	94,  // 56: whalerein.v1.RequestPayload.get_question:type_name -> whalerein.v1.GetQuestion
-	96,  // 57: whalerein.v1.RequestPayload.answer_question:type_name -> whalerein.v1.AnswerQuestion
-	98,  // 58: whalerein.v1.RequestPayload.cancel_question_answer:type_name -> whalerein.v1.CancelQuestionAnswer
-	79,  // 59: whalerein.v1.RequestPayload.fork_session:type_name -> whalerein.v1.ForkSession
-	139, // 60: whalerein.v1.RequestPayload.open_attachment:type_name -> whalerein.v1.OpenAttachment
-	141, // 61: whalerein.v1.RequestPayload.pull_attachment:type_name -> whalerein.v1.PullAttachment
-	143, // 62: whalerein.v1.RequestPayload.close_attachment:type_name -> whalerein.v1.CloseAttachment
-	111, // 63: whalerein.v1.ResponsePayload.session_list:type_name -> whalerein.v1.SessionList
-	114, // 64: whalerein.v1.ResponsePayload.approval:type_name -> whalerein.v1.Approval
-	112, // 65: whalerein.v1.ResponsePayload.command_accepted:type_name -> whalerein.v1.CommandAccepted
-	113, // 66: whalerein.v1.ResponsePayload.command_result:type_name -> whalerein.v1.CommandResult
-	109, // 67: whalerein.v1.ResponsePayload.pong:type_name -> whalerein.v1.Pong
-	103, // 68: whalerein.v1.ResponsePayload.approval_list:type_name -> whalerein.v1.ApprovalList
-	136, // 69: whalerein.v1.ResponsePayload.history_page:type_name -> whalerein.v1.HistoryPage
-	155, // 70: whalerein.v1.ResponsePayload.watch_ready:type_name -> whalerein.v1.WatchReady
-	158, // 71: whalerein.v1.ResponsePayload.version_checks:type_name -> whalerein.v1.VersionChecks
-	110, // 72: whalerein.v1.ResponsePayload.session_info:type_name -> whalerein.v1.SessionSummary
-	146, // 73: whalerein.v1.ResponsePayload.message_reply:type_name -> whalerein.v1.MessageReply
-	67,  // 74: whalerein.v1.ResponsePayload.host_capabilities:type_name -> whalerein.v1.HostCapabilities
-	75,  // 75: whalerein.v1.ResponsePayload.model_catalog:type_name -> whalerein.v1.ModelCatalog
-	76,  // 76: whalerein.v1.ResponsePayload.session_model:type_name -> whalerein.v1.SessionModel
-	78,  // 77: whalerein.v1.ResponsePayload.model_selection_receipt:type_name -> whalerein.v1.ModelSelectionReceipt
-	164, // 78: whalerein.v1.ResponsePayload.session_wait_result:type_name -> whalerein.v1.SessionWaitResult
-	165, // 79: whalerein.v1.ResponsePayload.session_wait_state_result:type_name -> whalerein.v1.SessionWaitStateResult
-	81,  // 80: whalerein.v1.ResponsePayload.lifecycle_receipt:type_name -> whalerein.v1.LifecycleReceipt
-	168, // 81: whalerein.v1.ResponsePayload.pending_queue:type_name -> whalerein.v1.PendingQueue
-	95,  // 82: whalerein.v1.ResponsePayload.question_page:type_name -> whalerein.v1.QuestionPage
-	92,  // 83: whalerein.v1.ResponsePayload.question_batch:type_name -> whalerein.v1.QuestionBatch
-	97,  // 84: whalerein.v1.ResponsePayload.question_receipt:type_name -> whalerein.v1.QuestionReceipt
-	99,  // 85: whalerein.v1.ResponsePayload.question_cancel_receipt:type_name -> whalerein.v1.QuestionCancelReceipt
-	140, // 86: whalerein.v1.ResponsePayload.open_attachment_result:type_name -> whalerein.v1.OpenAttachmentResult
-	142, // 87: whalerein.v1.ResponsePayload.attachment_part:type_name -> whalerein.v1.AttachmentPart
-	144, // 88: whalerein.v1.ResponsePayload.close_attachment_result:type_name -> whalerein.v1.CloseAttachmentResult
+	198, // 23: whalerein.v1.RevocationNotice.grant_generations:type_name -> whalerein.v1.RevocationNotice.GrantGenerationsEntry
+	34,  // 24: whalerein.v1.HostReady.receive:type_name -> whalerein.v1.ReceiveAdvertisement
+	42,  // 25: whalerein.v1.ChannelHello.capabilities:type_name -> whalerein.v1.CapabilitySet
+	34,  // 26: whalerein.v1.ChannelHello.receive:type_name -> whalerein.v1.ReceiveAdvertisement
+	42,  // 27: whalerein.v1.ChannelReady.capabilities:type_name -> whalerein.v1.CapabilitySet
+	34,  // 28: whalerein.v1.ChannelReady.receive:type_name -> whalerein.v1.ReceiveAdvertisement
+	42,  // 29: whalerein.v1.PairingHello.capabilities:type_name -> whalerein.v1.CapabilitySet
+	42,  // 30: whalerein.v1.PairingHelloReply.capabilities:type_name -> whalerein.v1.CapabilitySet
+	85,  // 31: whalerein.v1.RequestPayload.list_sessions:type_name -> whalerein.v1.ListSessions
+	103, // 32: whalerein.v1.RequestPayload.get_session:type_name -> whalerein.v1.GetSession
+	104, // 33: whalerein.v1.RequestPayload.get_approval:type_name -> whalerein.v1.GetApproval
+	107, // 34: whalerein.v1.RequestPayload.get_command_result:type_name -> whalerein.v1.GetCommandResult
+	108, // 35: whalerein.v1.RequestPayload.send_message:type_name -> whalerein.v1.SendMessage
+	109, // 36: whalerein.v1.RequestPayload.interrupt:type_name -> whalerein.v1.Interrupt
+	110, // 37: whalerein.v1.RequestPayload.resolve_approval:type_name -> whalerein.v1.ResolveApproval
+	111, // 38: whalerein.v1.RequestPayload.ping:type_name -> whalerein.v1.Ping
+	105, // 39: whalerein.v1.RequestPayload.list_approvals:type_name -> whalerein.v1.ListApprovals
+	138, // 40: whalerein.v1.RequestPayload.read_history:type_name -> whalerein.v1.HistoryRead
+	157, // 41: whalerein.v1.RequestPayload.watch_session:type_name -> whalerein.v1.WatchSession
+	159, // 42: whalerein.v1.RequestPayload.check_versions:type_name -> whalerein.v1.CheckVersions
+	162, // 43: whalerein.v1.RequestPayload.unwatch_session:type_name -> whalerein.v1.UnwatchSession
+	148, // 44: whalerein.v1.RequestPayload.read_message_reply:type_name -> whalerein.v1.ReadMessageReply
+	69,  // 45: whalerein.v1.RequestPayload.get_host_capabilities:type_name -> whalerein.v1.GetHostCapabilities
+	71,  // 46: whalerein.v1.RequestPayload.list_models:type_name -> whalerein.v1.ListModels
+	72,  // 47: whalerein.v1.RequestPayload.read_session_model:type_name -> whalerein.v1.ReadSessionModel
+	80,  // 48: whalerein.v1.RequestPayload.select_session_model:type_name -> whalerein.v1.SelectSessionModel
+	163, // 49: whalerein.v1.RequestPayload.wait_session:type_name -> whalerein.v1.WaitSession
+	164, // 50: whalerein.v1.RequestPayload.cancel_session_wait:type_name -> whalerein.v1.CancelSessionWait
+	165, // 51: whalerein.v1.RequestPayload.read_wait_state:type_name -> whalerein.v1.ReadWaitState
+	83,  // 52: whalerein.v1.RequestPayload.create_session:type_name -> whalerein.v1.CreateSession
+	169, // 53: whalerein.v1.RequestPayload.read_pending_queue:type_name -> whalerein.v1.ReadPendingQueue
+	172, // 54: whalerein.v1.RequestPayload.update_pending_queue:type_name -> whalerein.v1.UpdatePendingQueue
+	96,  // 55: whalerein.v1.RequestPayload.list_questions:type_name -> whalerein.v1.ListQuestions
+	97,  // 56: whalerein.v1.RequestPayload.get_question:type_name -> whalerein.v1.GetQuestion
+	99,  // 57: whalerein.v1.RequestPayload.answer_question:type_name -> whalerein.v1.AnswerQuestion
+	101, // 58: whalerein.v1.RequestPayload.cancel_question_answer:type_name -> whalerein.v1.CancelQuestionAnswer
+	82,  // 59: whalerein.v1.RequestPayload.fork_session:type_name -> whalerein.v1.ForkSession
+	142, // 60: whalerein.v1.RequestPayload.open_attachment:type_name -> whalerein.v1.OpenAttachment
+	144, // 61: whalerein.v1.RequestPayload.pull_attachment:type_name -> whalerein.v1.PullAttachment
+	146, // 62: whalerein.v1.RequestPayload.close_attachment:type_name -> whalerein.v1.CloseAttachment
+	114, // 63: whalerein.v1.ResponsePayload.session_list:type_name -> whalerein.v1.SessionList
+	117, // 64: whalerein.v1.ResponsePayload.approval:type_name -> whalerein.v1.Approval
+	115, // 65: whalerein.v1.ResponsePayload.command_accepted:type_name -> whalerein.v1.CommandAccepted
+	116, // 66: whalerein.v1.ResponsePayload.command_result:type_name -> whalerein.v1.CommandResult
+	112, // 67: whalerein.v1.ResponsePayload.pong:type_name -> whalerein.v1.Pong
+	106, // 68: whalerein.v1.ResponsePayload.approval_list:type_name -> whalerein.v1.ApprovalList
+	139, // 69: whalerein.v1.ResponsePayload.history_page:type_name -> whalerein.v1.HistoryPage
+	158, // 70: whalerein.v1.ResponsePayload.watch_ready:type_name -> whalerein.v1.WatchReady
+	161, // 71: whalerein.v1.ResponsePayload.version_checks:type_name -> whalerein.v1.VersionChecks
+	113, // 72: whalerein.v1.ResponsePayload.session_info:type_name -> whalerein.v1.SessionSummary
+	149, // 73: whalerein.v1.ResponsePayload.message_reply:type_name -> whalerein.v1.MessageReply
+	70,  // 74: whalerein.v1.ResponsePayload.host_capabilities:type_name -> whalerein.v1.HostCapabilities
+	78,  // 75: whalerein.v1.ResponsePayload.model_catalog:type_name -> whalerein.v1.ModelCatalog
+	79,  // 76: whalerein.v1.ResponsePayload.session_model:type_name -> whalerein.v1.SessionModel
+	81,  // 77: whalerein.v1.ResponsePayload.model_selection_receipt:type_name -> whalerein.v1.ModelSelectionReceipt
+	167, // 78: whalerein.v1.ResponsePayload.session_wait_result:type_name -> whalerein.v1.SessionWaitResult
+	168, // 79: whalerein.v1.ResponsePayload.session_wait_state_result:type_name -> whalerein.v1.SessionWaitStateResult
+	84,  // 80: whalerein.v1.ResponsePayload.lifecycle_receipt:type_name -> whalerein.v1.LifecycleReceipt
+	171, // 81: whalerein.v1.ResponsePayload.pending_queue:type_name -> whalerein.v1.PendingQueue
+	98,  // 82: whalerein.v1.ResponsePayload.question_page:type_name -> whalerein.v1.QuestionPage
+	95,  // 83: whalerein.v1.ResponsePayload.question_batch:type_name -> whalerein.v1.QuestionBatch
+	100, // 84: whalerein.v1.ResponsePayload.question_receipt:type_name -> whalerein.v1.QuestionReceipt
+	102, // 85: whalerein.v1.ResponsePayload.question_cancel_receipt:type_name -> whalerein.v1.QuestionCancelReceipt
+	143, // 86: whalerein.v1.ResponsePayload.open_attachment_result:type_name -> whalerein.v1.OpenAttachmentResult
+	145, // 87: whalerein.v1.ResponsePayload.attachment_part:type_name -> whalerein.v1.AttachmentPart
+	147, // 88: whalerein.v1.ResponsePayload.close_attachment_result:type_name -> whalerein.v1.CloseAttachmentResult
 	2,   // 89: whalerein.v1.ResponsePayload.error_code:type_name -> whalerein.v1.ErrorCode
-	71,  // 90: whalerein.v1.ModelEntry.efforts:type_name -> whalerein.v1.ModelEffort
-	72,  // 91: whalerein.v1.ModelProvider.models:type_name -> whalerein.v1.ModelEntry
+	74,  // 90: whalerein.v1.ModelEntry.efforts:type_name -> whalerein.v1.ModelEffort
+	75,  // 91: whalerein.v1.ModelProvider.models:type_name -> whalerein.v1.ModelEntry
 	2,   // 92: whalerein.v1.ModelProviderFailure.code:type_name -> whalerein.v1.ErrorCode
-	70,  // 93: whalerein.v1.ModelCatalog.default_selection:type_name -> whalerein.v1.ModelChoice
-	73,  // 94: whalerein.v1.ModelCatalog.groups:type_name -> whalerein.v1.ModelProvider
-	74,  // 95: whalerein.v1.ModelCatalog.failures:type_name -> whalerein.v1.ModelProviderFailure
-	70,  // 96: whalerein.v1.SessionModel.pending:type_name -> whalerein.v1.ModelChoice
-	70,  // 97: whalerein.v1.SessionModel.last_used:type_name -> whalerein.v1.ModelChoice
-	70,  // 98: whalerein.v1.SessionModel.default_selection:type_name -> whalerein.v1.ModelChoice
-	70,  // 99: whalerein.v1.SessionModel.next:type_name -> whalerein.v1.ModelChoice
-	70,  // 100: whalerein.v1.ModelSelectionReceipt.selected:type_name -> whalerein.v1.ModelChoice
+	73,  // 93: whalerein.v1.ModelCatalog.default_selection:type_name -> whalerein.v1.ModelChoice
+	76,  // 94: whalerein.v1.ModelCatalog.groups:type_name -> whalerein.v1.ModelProvider
+	77,  // 95: whalerein.v1.ModelCatalog.failures:type_name -> whalerein.v1.ModelProviderFailure
+	73,  // 96: whalerein.v1.SessionModel.pending:type_name -> whalerein.v1.ModelChoice
+	73,  // 97: whalerein.v1.SessionModel.last_used:type_name -> whalerein.v1.ModelChoice
+	73,  // 98: whalerein.v1.SessionModel.default_selection:type_name -> whalerein.v1.ModelChoice
+	73,  // 99: whalerein.v1.SessionModel.next:type_name -> whalerein.v1.ModelChoice
+	73,  // 100: whalerein.v1.ModelSelectionReceipt.selected:type_name -> whalerein.v1.ModelChoice
 	11,  // 101: whalerein.v1.LifecycleReceipt.disposition:type_name -> whalerein.v1.LifecycleDisposition
-	178, // 102: whalerein.v1.QuestionLocalizedText.translations:type_name -> whalerein.v1.QuestionLocalizedText.TranslationsEntry
-	84,  // 103: whalerein.v1.QuestionDisplay.question:type_name -> whalerein.v1.QuestionLocalizedText
-	84,  // 104: whalerein.v1.QuestionDisplay.detail:type_name -> whalerein.v1.QuestionLocalizedText
-	84,  // 105: whalerein.v1.QuestionDisplay.approve:type_name -> whalerein.v1.QuestionLocalizedText
-	85,  // 106: whalerein.v1.QuestionIntent.subject:type_name -> whalerein.v1.QuestionSubject
-	86,  // 107: whalerein.v1.QuestionIntent.display:type_name -> whalerein.v1.QuestionDisplay
-	83,  // 108: whalerein.v1.QuestionItem.options:type_name -> whalerein.v1.QuestionOption
-	87,  // 109: whalerein.v1.QuestionItem.intent:type_name -> whalerein.v1.QuestionIntent
+	199, // 102: whalerein.v1.QuestionLocalizedText.translations:type_name -> whalerein.v1.QuestionLocalizedText.TranslationsEntry
+	87,  // 103: whalerein.v1.QuestionDisplay.question:type_name -> whalerein.v1.QuestionLocalizedText
+	87,  // 104: whalerein.v1.QuestionDisplay.detail:type_name -> whalerein.v1.QuestionLocalizedText
+	87,  // 105: whalerein.v1.QuestionDisplay.approve:type_name -> whalerein.v1.QuestionLocalizedText
+	88,  // 106: whalerein.v1.QuestionIntent.subject:type_name -> whalerein.v1.QuestionSubject
+	89,  // 107: whalerein.v1.QuestionIntent.display:type_name -> whalerein.v1.QuestionDisplay
+	86,  // 108: whalerein.v1.QuestionItem.options:type_name -> whalerein.v1.QuestionOption
+	90,  // 109: whalerein.v1.QuestionItem.intent:type_name -> whalerein.v1.QuestionIntent
 	7,   // 110: whalerein.v1.QuestionDescriptor.availability:type_name -> whalerein.v1.QuestionAvailability
-	90,  // 111: whalerein.v1.QuestionDescriptor.stamp:type_name -> whalerein.v1.QuestionStamp
+	93,  // 111: whalerein.v1.QuestionDescriptor.stamp:type_name -> whalerein.v1.QuestionStamp
 	12,  // 112: whalerein.v1.QuestionBatch.phase:type_name -> whalerein.v1.QuestionPhase
-	88,  // 113: whalerein.v1.QuestionBatch.questions:type_name -> whalerein.v1.QuestionItem
-	92,  // 114: whalerein.v1.QuestionPage.batches:type_name -> whalerein.v1.QuestionBatch
-	90,  // 115: whalerein.v1.QuestionPage.stamp:type_name -> whalerein.v1.QuestionStamp
+	91,  // 113: whalerein.v1.QuestionBatch.questions:type_name -> whalerein.v1.QuestionItem
+	95,  // 114: whalerein.v1.QuestionPage.batches:type_name -> whalerein.v1.QuestionBatch
+	93,  // 115: whalerein.v1.QuestionPage.stamp:type_name -> whalerein.v1.QuestionStamp
 	12,  // 116: whalerein.v1.AnswerQuestion.expected_phase:type_name -> whalerein.v1.QuestionPhase
-	89,  // 117: whalerein.v1.AnswerQuestion.answers:type_name -> whalerein.v1.QuestionAnswerItem
+	92,  // 117: whalerein.v1.AnswerQuestion.answers:type_name -> whalerein.v1.QuestionAnswerItem
 	12,  // 118: whalerein.v1.QuestionReceipt.phase:type_name -> whalerein.v1.QuestionPhase
-	114, // 119: whalerein.v1.ApprovalList.approvals:type_name -> whalerein.v1.Approval
+	117, // 119: whalerein.v1.ApprovalList.approvals:type_name -> whalerein.v1.Approval
 	13,  // 120: whalerein.v1.SendMessage.delivery_mode:type_name -> whalerein.v1.DeliveryMode
 	6,   // 121: whalerein.v1.ResolveApproval.decision:type_name -> whalerein.v1.ApprovalDecision
-	119, // 122: whalerein.v1.SessionSummary.source_capabilities:type_name -> whalerein.v1.SourceCapabilities
-	110, // 123: whalerein.v1.SessionList.sessions:type_name -> whalerein.v1.SessionSummary
+	122, // 122: whalerein.v1.SessionSummary.source_capabilities:type_name -> whalerein.v1.SourceCapabilities
+	113, // 123: whalerein.v1.SessionList.sessions:type_name -> whalerein.v1.SessionSummary
 	0,   // 124: whalerein.v1.CommandResult.status:type_name -> whalerein.v1.OnlineStatus
 	2,   // 125: whalerein.v1.CommandResult.error_code:type_name -> whalerein.v1.ErrorCode
 	5,   // 126: whalerein.v1.Approval.state:type_name -> whalerein.v1.ApprovalState
 	6,   // 127: whalerein.v1.Approval.decision:type_name -> whalerein.v1.ApprovalDecision
-	32,  // 128: whalerein.v1.EventEnvelope.payload_reference:type_name -> whalerein.v1.PayloadReference
-	152, // 129: whalerein.v1.EventPayload.update:type_name -> whalerein.v1.SessionUpdate
-	117, // 130: whalerein.v1.EventPayload.watch_closed:type_name -> whalerein.v1.WatchClosed
-	118, // 131: whalerein.v1.WatchClosed.session:type_name -> whalerein.v1.SessionKey
+	35,  // 128: whalerein.v1.EventEnvelope.payload_reference:type_name -> whalerein.v1.PayloadReference
+	155, // 129: whalerein.v1.EventPayload.update:type_name -> whalerein.v1.SessionUpdate
+	120, // 130: whalerein.v1.EventPayload.watch_closed:type_name -> whalerein.v1.WatchClosed
+	121, // 131: whalerein.v1.WatchClosed.session:type_name -> whalerein.v1.SessionKey
 	13,  // 132: whalerein.v1.SourceCapabilities.delivery_modes:type_name -> whalerein.v1.DeliveryMode
 	17,  // 133: whalerein.v1.LiveBlockDelta.kind:type_name -> whalerein.v1.BlockKind
 	17,  // 134: whalerein.v1.LiveBlockReset.kind:type_name -> whalerein.v1.BlockKind
-	121, // 135: whalerein.v1.ToolResultPart.text:type_name -> whalerein.v1.TextContent
-	128, // 136: whalerein.v1.ToolResultPart.attachment:type_name -> whalerein.v1.AttachmentContent
+	124, // 135: whalerein.v1.ToolResultPart.text:type_name -> whalerein.v1.TextContent
+	131, // 136: whalerein.v1.ToolResultPart.attachment:type_name -> whalerein.v1.AttachmentContent
 	18,  // 137: whalerein.v1.ToolActivity.stages:type_name -> whalerein.v1.ToolStage
-	125, // 138: whalerein.v1.ToolActivity.result:type_name -> whalerein.v1.ToolResultPart
+	128, // 138: whalerein.v1.ToolActivity.result:type_name -> whalerein.v1.ToolResultPart
 	19,  // 139: whalerein.v1.ToolActivity.outcome:type_name -> whalerein.v1.ToolOutcome
 	20,  // 140: whalerein.v1.NoticeContent.category:type_name -> whalerein.v1.NoticeCategory
 	21,  // 141: whalerein.v1.NoticeContent.state:type_name -> whalerein.v1.NoticeState
-	121, // 142: whalerein.v1.ContentBlock.text:type_name -> whalerein.v1.TextContent
-	126, // 143: whalerein.v1.ContentBlock.tool_activity:type_name -> whalerein.v1.ToolActivity
-	127, // 144: whalerein.v1.ContentBlock.notice:type_name -> whalerein.v1.NoticeContent
-	128, // 145: whalerein.v1.ContentBlock.attachment:type_name -> whalerein.v1.AttachmentContent
-	122, // 146: whalerein.v1.ContentBlock.reasoning:type_name -> whalerein.v1.ReasoningContent
+	124, // 142: whalerein.v1.ContentBlock.text:type_name -> whalerein.v1.TextContent
+	129, // 143: whalerein.v1.ContentBlock.tool_activity:type_name -> whalerein.v1.ToolActivity
+	130, // 144: whalerein.v1.ContentBlock.notice:type_name -> whalerein.v1.NoticeContent
+	131, // 145: whalerein.v1.ContentBlock.attachment:type_name -> whalerein.v1.AttachmentContent
+	125, // 146: whalerein.v1.ContentBlock.reasoning:type_name -> whalerein.v1.ReasoningContent
 	14,  // 147: whalerein.v1.ConversationMessage.role:type_name -> whalerein.v1.MessageRole
-	129, // 148: whalerein.v1.ConversationMessage.blocks:type_name -> whalerein.v1.ContentBlock
-	130, // 149: whalerein.v1.MessageUpsert.message:type_name -> whalerein.v1.ConversationMessage
-	120, // 150: whalerein.v1.MessageUpsert.origin:type_name -> whalerein.v1.AttemptRef
-	131, // 151: whalerein.v1.HistoryBatch.changes:type_name -> whalerein.v1.MessageUpsert
-	118, // 152: whalerein.v1.CommittedMessageRef.session:type_name -> whalerein.v1.SessionKey
-	133, // 153: whalerein.v1.HistoryRead.page:type_name -> whalerein.v1.HistoryPageSelection
-	134, // 154: whalerein.v1.HistoryRead.exact:type_name -> whalerein.v1.CommittedMessageRef
+	132, // 148: whalerein.v1.ConversationMessage.blocks:type_name -> whalerein.v1.ContentBlock
+	133, // 149: whalerein.v1.MessageUpsert.message:type_name -> whalerein.v1.ConversationMessage
+	123, // 150: whalerein.v1.MessageUpsert.origin:type_name -> whalerein.v1.AttemptRef
+	134, // 151: whalerein.v1.HistoryBatch.changes:type_name -> whalerein.v1.MessageUpsert
+	121, // 152: whalerein.v1.CommittedMessageRef.session:type_name -> whalerein.v1.SessionKey
+	136, // 153: whalerein.v1.HistoryRead.page:type_name -> whalerein.v1.HistoryPageSelection
+	137, // 154: whalerein.v1.HistoryRead.exact:type_name -> whalerein.v1.CommittedMessageRef
 	22,  // 155: whalerein.v1.HistoryRead.source:type_name -> whalerein.v1.HistorySource
-	118, // 156: whalerein.v1.HistoryPage.session:type_name -> whalerein.v1.SessionKey
-	132, // 157: whalerein.v1.HistoryPage.batch:type_name -> whalerein.v1.HistoryBatch
+	121, // 156: whalerein.v1.HistoryPage.session:type_name -> whalerein.v1.SessionKey
+	135, // 157: whalerein.v1.HistoryPage.batch:type_name -> whalerein.v1.HistoryBatch
 	22,  // 158: whalerein.v1.HistoryPage.source:type_name -> whalerein.v1.HistorySource
-	118, // 159: whalerein.v1.AttachmentMetadata.session:type_name -> whalerein.v1.SessionKey
-	137, // 160: whalerein.v1.AttachmentMetadata.policy:type_name -> whalerein.v1.AttachmentPolicy
-	118, // 161: whalerein.v1.OpenAttachment.session:type_name -> whalerein.v1.SessionKey
-	138, // 162: whalerein.v1.OpenAttachmentResult.attachment:type_name -> whalerein.v1.AttachmentMetadata
-	118, // 163: whalerein.v1.PullAttachment.session:type_name -> whalerein.v1.SessionKey
-	118, // 164: whalerein.v1.AttachmentPart.session:type_name -> whalerein.v1.SessionKey
-	118, // 165: whalerein.v1.CloseAttachment.session:type_name -> whalerein.v1.SessionKey
+	121, // 159: whalerein.v1.AttachmentMetadata.session:type_name -> whalerein.v1.SessionKey
+	140, // 160: whalerein.v1.AttachmentMetadata.policy:type_name -> whalerein.v1.AttachmentPolicy
+	121, // 161: whalerein.v1.OpenAttachment.session:type_name -> whalerein.v1.SessionKey
+	141, // 162: whalerein.v1.OpenAttachmentResult.attachment:type_name -> whalerein.v1.AttachmentMetadata
+	121, // 163: whalerein.v1.PullAttachment.session:type_name -> whalerein.v1.SessionKey
+	121, // 164: whalerein.v1.AttachmentPart.session:type_name -> whalerein.v1.SessionKey
+	121, // 165: whalerein.v1.CloseAttachment.session:type_name -> whalerein.v1.SessionKey
 	23,  // 166: whalerein.v1.MessageReply.state:type_name -> whalerein.v1.MessageReplyState
-	134, // 167: whalerein.v1.MessageReply.committed:type_name -> whalerein.v1.CommittedMessageRef
+	137, // 167: whalerein.v1.MessageReply.committed:type_name -> whalerein.v1.CommittedMessageRef
 	25,  // 168: whalerein.v1.MessageReply.pending_input:type_name -> whalerein.v1.InputKind
 	16,  // 169: whalerein.v1.AttemptEnded.outcome:type_name -> whalerein.v1.AttemptOutcome
-	120, // 170: whalerein.v1.LiveFrame.attempt:type_name -> whalerein.v1.AttemptRef
-	147, // 171: whalerein.v1.LiveFrame.started:type_name -> whalerein.v1.AttemptStarted
-	123, // 172: whalerein.v1.LiveFrame.delta:type_name -> whalerein.v1.LiveBlockDelta
-	124, // 173: whalerein.v1.LiveFrame.reset:type_name -> whalerein.v1.LiveBlockReset
-	148, // 174: whalerein.v1.LiveFrame.ended:type_name -> whalerein.v1.AttemptEnded
-	118, // 175: whalerein.v1.SessionState.session:type_name -> whalerein.v1.SessionKey
+	123, // 170: whalerein.v1.LiveFrame.attempt:type_name -> whalerein.v1.AttemptRef
+	150, // 171: whalerein.v1.LiveFrame.started:type_name -> whalerein.v1.AttemptStarted
+	126, // 172: whalerein.v1.LiveFrame.delta:type_name -> whalerein.v1.LiveBlockDelta
+	127, // 173: whalerein.v1.LiveFrame.reset:type_name -> whalerein.v1.LiveBlockReset
+	151, // 174: whalerein.v1.LiveFrame.ended:type_name -> whalerein.v1.AttemptEnded
+	121, // 175: whalerein.v1.SessionState.session:type_name -> whalerein.v1.SessionKey
 	15,  // 176: whalerein.v1.SessionState.run_phase:type_name -> whalerein.v1.RunPhase
-	91,  // 177: whalerein.v1.SessionState.questions:type_name -> whalerein.v1.QuestionDescriptor
-	118, // 178: whalerein.v1.SessionUpdate.session:type_name -> whalerein.v1.SessionKey
-	132, // 179: whalerein.v1.SessionUpdate.history:type_name -> whalerein.v1.HistoryBatch
-	149, // 180: whalerein.v1.SessionUpdate.live:type_name -> whalerein.v1.LiveFrame
-	150, // 181: whalerein.v1.SessionUpdate.state:type_name -> whalerein.v1.SessionState
-	151, // 182: whalerein.v1.SessionUpdate.reset:type_name -> whalerein.v1.HistoryReset
-	91,  // 183: whalerein.v1.SessionUpdate.questions:type_name -> whalerein.v1.QuestionDescriptor
-	153, // 184: whalerein.v1.WatchSession.interests:type_name -> whalerein.v1.ObservationInterests
-	150, // 185: whalerein.v1.WatchReady.state:type_name -> whalerein.v1.SessionState
-	91,  // 186: whalerein.v1.WatchReady.questions:type_name -> whalerein.v1.QuestionDescriptor
+	94,  // 177: whalerein.v1.SessionState.questions:type_name -> whalerein.v1.QuestionDescriptor
+	121, // 178: whalerein.v1.SessionUpdate.session:type_name -> whalerein.v1.SessionKey
+	135, // 179: whalerein.v1.SessionUpdate.history:type_name -> whalerein.v1.HistoryBatch
+	152, // 180: whalerein.v1.SessionUpdate.live:type_name -> whalerein.v1.LiveFrame
+	153, // 181: whalerein.v1.SessionUpdate.state:type_name -> whalerein.v1.SessionState
+	154, // 182: whalerein.v1.SessionUpdate.reset:type_name -> whalerein.v1.HistoryReset
+	94,  // 183: whalerein.v1.SessionUpdate.questions:type_name -> whalerein.v1.QuestionDescriptor
+	156, // 184: whalerein.v1.WatchSession.interests:type_name -> whalerein.v1.ObservationInterests
+	153, // 185: whalerein.v1.WatchReady.state:type_name -> whalerein.v1.SessionState
+	94,  // 186: whalerein.v1.WatchReady.questions:type_name -> whalerein.v1.QuestionDescriptor
 	15,  // 187: whalerein.v1.VersionCheck.run_phase:type_name -> whalerein.v1.RunPhase
-	91,  // 188: whalerein.v1.VersionCheck.questions:type_name -> whalerein.v1.QuestionDescriptor
-	157, // 189: whalerein.v1.VersionChecks.checks:type_name -> whalerein.v1.VersionCheck
+	94,  // 188: whalerein.v1.VersionCheck.questions:type_name -> whalerein.v1.QuestionDescriptor
+	160, // 189: whalerein.v1.VersionChecks.checks:type_name -> whalerein.v1.VersionCheck
 	25,  // 190: whalerein.v1.SessionWaitState.pending_input:type_name -> whalerein.v1.InputKind
 	24,  // 191: whalerein.v1.SessionWaitResult.reason:type_name -> whalerein.v1.WaitReason
-	163, // 192: whalerein.v1.SessionWaitResult.state:type_name -> whalerein.v1.SessionWaitState
-	163, // 193: whalerein.v1.SessionWaitStateResult.state:type_name -> whalerein.v1.SessionWaitState
+	166, // 192: whalerein.v1.SessionWaitResult.state:type_name -> whalerein.v1.SessionWaitState
+	166, // 193: whalerein.v1.SessionWaitStateResult.state:type_name -> whalerein.v1.SessionWaitState
 	26,  // 194: whalerein.v1.PendingQueueItem.placement:type_name -> whalerein.v1.QueuePlacement
-	129, // 195: whalerein.v1.PendingQueueItem.blocks:type_name -> whalerein.v1.ContentBlock
+	132, // 195: whalerein.v1.PendingQueueItem.blocks:type_name -> whalerein.v1.ContentBlock
 	27,  // 196: whalerein.v1.PendingQueueItem.actions:type_name -> whalerein.v1.QueueAction
-	167, // 197: whalerein.v1.PendingQueue.items:type_name -> whalerein.v1.PendingQueueItem
+	170, // 197: whalerein.v1.PendingQueue.items:type_name -> whalerein.v1.PendingQueueItem
 	27,  // 198: whalerein.v1.UpdatePendingQueue.action:type_name -> whalerein.v1.QueueAction
-	170, // 199: whalerein.v1.HostEnrollmentRequest.authorization:type_name -> whalerein.v1.ExternalAuthorization
-	28,  // 200: whalerein.v1.HostEnrollmentStatus.state:type_name -> whalerein.v1.EnrollmentState
-	173, // 201: whalerein.v1.HostEnrollmentResponse.status:type_name -> whalerein.v1.HostEnrollmentStatus
-	172, // 202: whalerein.v1.HostEnrollmentResponse.credential:type_name -> whalerein.v1.HostCredential
-	29,  // 203: whalerein.v1.OperationStatus.state:type_name -> whalerein.v1.OperationState
-	204, // [204:204] is the sub-list for method output_type
-	204, // [204:204] is the sub-list for method input_type
-	204, // [204:204] is the sub-list for extension type_name
-	204, // [204:204] is the sub-list for extension extendee
-	0,   // [0:204] is the sub-list for field type_name
+	28,  // 199: whalerein.v1.HostRoute.state:type_name -> whalerein.v1.RouteState
+	29,  // 200: whalerein.v1.HostRouteAttachReceipt.outcome:type_name -> whalerein.v1.RouteOutcome
+	177, // 201: whalerein.v1.HostRouteAttachReceipt.route:type_name -> whalerein.v1.HostRoute
+	2,   // 202: whalerein.v1.HostRouteAttachReceipt.error_code:type_name -> whalerein.v1.ErrorCode
+	29,  // 203: whalerein.v1.HostRouteCloseReceipt.outcome:type_name -> whalerein.v1.RouteOutcome
+	177, // 204: whalerein.v1.HostRouteCloseReceipt.route:type_name -> whalerein.v1.HostRoute
+	2,   // 205: whalerein.v1.HostRouteCloseReceipt.error_code:type_name -> whalerein.v1.ErrorCode
+	177, // 206: whalerein.v1.NodeInventory.routes:type_name -> whalerein.v1.HostRoute
+	177, // 207: whalerein.v1.NodeInventoryAck.routes:type_name -> whalerein.v1.HostRoute
+	177, // 208: whalerein.v1.RouteDiscovery.route:type_name -> whalerein.v1.HostRoute
+	185, // 209: whalerein.v1.AuthorityRenewalResponse.authority:type_name -> whalerein.v1.ScopedAuthority
+	2,   // 210: whalerein.v1.AuthorityRenewalResponse.error_code:type_name -> whalerein.v1.ErrorCode
+	30,  // 211: whalerein.v1.RevocationStatus.state:type_name -> whalerein.v1.RevocationState
+	190, // 212: whalerein.v1.HostEnrollmentRequest.authorization:type_name -> whalerein.v1.ExternalAuthorization
+	31,  // 213: whalerein.v1.HostEnrollmentStatus.state:type_name -> whalerein.v1.EnrollmentState
+	193, // 214: whalerein.v1.HostEnrollmentResponse.status:type_name -> whalerein.v1.HostEnrollmentStatus
+	192, // 215: whalerein.v1.HostEnrollmentResponse.credential:type_name -> whalerein.v1.HostCredential
+	32,  // 216: whalerein.v1.OperationStatus.state:type_name -> whalerein.v1.OperationState
+	217, // [217:217] is the sub-list for method output_type
+	217, // [217:217] is the sub-list for method input_type
+	217, // [217:217] is the sub-list for extension type_name
+	217, // [217:217] is the sub-list for extension extendee
+	0,   // [0:217] is the sub-list for field type_name
 }
 
 func init() { file_whalerein_proto_init() }
@@ -15455,8 +17718,8 @@ func file_whalerein_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_whalerein_proto_rawDesc), len(file_whalerein_proto_rawDesc)),
-			NumEnums:      30,
-			NumMessages:   149,
+			NumEnums:      33,
+			NumMessages:   167,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

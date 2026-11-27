@@ -18,7 +18,7 @@ import (
 // accepts only its per-enrollment credential; the shared provisioning token and
 // a disabled enrollment are denied.
 func TestAuthenticateBrokerUsesARealEnrollmentCredentialHash(t *testing.T) {
-	data, _ := storetest.New(t)
+	data, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	enrollment, credential, committed, err := data.EnrollHost(ctx, store.ExternalOperation{
 		OperationID: "op-admission-2", AuthorizationID: "auth-admission-2",

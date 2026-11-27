@@ -25,6 +25,7 @@ flowchart LR
 | CLI | `apps/cli/` | [Arguments, dispatch, output](architecture/cli.md) |
 | Access | `access/` | [Authorization, persistence, relay](architecture/access.md) |
 | DSH plugin | `host/dsh/` | [Execution, adapter, events](architecture/dsh-plugin.md) |
+| Benchmark observation | `contracts/latency/` | [Boundaries, outlets, joins](architecture/latency-observation.md) |
 
 Core is self-contained Rust. Clients provide a `SecretStore` and can register
 a `DiagnosticSink` to receive redacted events.

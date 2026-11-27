@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/whalerein/whalerein/access/internal/auth"
+	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/pairing"
 	"github.com/whalerein/whalerein/access/internal/relay"
 	"github.com/whalerein/whalerein/access/internal/requests"
@@ -103,6 +104,10 @@ func classify(err error) errorInfo {
 		// instead of a 404 that looks like a mistyped path.
 		return errorInfo{http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability,
 			"external account mode is not configured on this Access deployment", ""}
+	case errors.Is(err, external.ErrEnforcementUnavailable):
+		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "external enforcement unavailable", ""}
+	case errors.Is(err, external.ErrAuthorizationMismatch):
+		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "authorization mismatch", ""}
 	case errors.Is(err, errAuthorizationRefused):
 		return errorInfo{http.StatusForbidden, whalereinv1.ErrorCode_forbidden, "authorization refused", ""}
 	case errors.Is(err, errOperationConflict):

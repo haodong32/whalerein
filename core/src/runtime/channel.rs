@@ -345,6 +345,11 @@ async fn handshake(
     }
 
     let hash = noise.handshake_hash()?;
+    // Proof failure must not tear down an otherwise authenticated channel:
+    // the Host gate fails closed at dispatch if the proof never arrives.
+    let _ = access
+        .submit_session_proof(host_id, device_id, &negotiation_id, &hash)
+        .await;
     let channel =
         SecureChannel::from_handshake(&hash, &prologue, &negotiation_id, host_id, device_id)?;
     access
@@ -449,6 +454,8 @@ async fn send_handshake(
         connection_ref: String::new(),
         grant_generation: 0,
         enrollment_generation: 0,
+        device_session_id: String::new(),
+        proof_expected: false,
     };
     let Some(connection) = connection else {
         #[cfg(test)]

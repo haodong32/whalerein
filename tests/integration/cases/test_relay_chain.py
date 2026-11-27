@@ -17,12 +17,9 @@ pytestmark = pytest.mark.chain
 
 
 def psql(schema, query):
-    result = subprocess.run(
-        ["psql", "-h", "127.0.0.1", "-p", "55432", "-U", "postgres",
-         "-d", "whalerein_test", "-tAc", query],
-        capture_output=True, text=True, timeout=5, check=True,
-    )
-    return result.stdout.strip()
+    from journey_helpers import sql
+
+    return str(sql(schema, query.replace(f"{schema}.", "")))
 
 
 def compact_device(device):

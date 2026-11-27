@@ -17,7 +17,7 @@ import (
 // A newer permission renews only its own session. A terminal fence wins
 // against reordering and does not end a subsequent login on the same Device.
 func TestDeviceSessionPermissionRenewalAndFenceOrdering(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	firstToken := sha256.Sum256([]byte("first test credential"))
@@ -83,7 +83,7 @@ func TestDeviceSessionPermissionRenewalAndFenceOrdering(t *testing.T) {
 // Revocation blocks queued forwarding and retains the original request and
 // command identity for exact cancellation after a restart.
 func TestRevokedPermissionStopsForwardingAndPreservesExactCancellation(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	if _, err := s.EnsureHost(ctx, "session-host"); err != nil {

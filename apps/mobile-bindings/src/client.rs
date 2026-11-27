@@ -3065,6 +3065,7 @@ mod tests {
             enrollment_state: "enrolled".into(),
             pairing_eligible: false,
             device_access: "granted".into(),
+            route: None,
         });
         assert_eq!(host.host_id, "host-1");
         assert_eq!(host.display_name, "Studio");

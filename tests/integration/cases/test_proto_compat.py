@@ -157,7 +157,7 @@ def test_error_code_golden_table():
     assert table["schema"] == "whalerein/error-codes/v1"
     documented = _wire_error_table()
     names = [entry["name"] for entry in table["codes"]]
-    assert len(names) == 24 and len(set(names)) == 24
+    assert len(names) == 27 and len(set(names)) == 27
     assert set(documented) == set(names)
     for entry in table["codes"]:
         assert documented[entry["name"]] == (entry["exitCode"], entry["action"])

@@ -21,7 +21,7 @@ CLI formats typed ViewUpdates and terminal line boundaries only.
 
 A LiveFrame identifies an epoch, Attempt, block and inclusive normalized sequence
 interval. Started/delta/reset/ended are explicit oneof payloads. Deltas append
-visible text; reset replaces a provisional block. Adjacent deltas can coalesce for
+visible text; reset replaces a provisional block. The first delta after an idle batching window is published immediately. Subsequent adjacent deltas can coalesce for
 20 ms or an 8 KiB UTF-8 target without crossing identity/block/order boundaries.
 Provider internal chunks do not create gaps in this normalized sequence.
 

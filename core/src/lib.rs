@@ -17,6 +17,7 @@ mod observation;
 mod pairing;
 #[cfg(test)]
 mod profiles;
+pub mod route;
 mod runtime;
 mod security;
 mod session;

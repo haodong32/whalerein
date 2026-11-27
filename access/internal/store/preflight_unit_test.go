@@ -58,8 +58,8 @@ func TestStoreRejectsInvalidInputsBeforeDatabaseAccess(t *testing.T) {
 	s.Close()
 }
 
-func TestInvalidDatabaseURLDoesNotExposeCredentialsInError(t *testing.T) {
-	_, err := Open(context.Background(), "postgres://fixture-user:fixture-password@%zz/fixture")
+func TestInvalidDatabasePathDoesNotExposeCredentialsInError(t *testing.T) {
+	_, err := OpenPostgres(context.Background(), "postgres://fixture-user:fixture-password@%zz/fixture")
 	if err == nil {
 		t.Fatal("invalid database URL was accepted")
 	}
@@ -90,7 +90,7 @@ func TestStoreOwnsAndClosesItsSuppliedLazyPool(t *testing.T) {
 func TestOpenCancelledContextDoesNotLeaveUsablePool(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	value, err := Open(ctx, "postgres://localhost:1/fixture?sslmode=disable")
+	value, err := OpenPostgres(ctx, "postgres://localhost:1/fixture?sslmode=disable")
 	if value != nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled open returned store or wrong error: %v", err)
 	}

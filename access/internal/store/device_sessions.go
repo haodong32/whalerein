@@ -13,6 +13,7 @@ import (
 type DeviceSession struct {
 	ID, WorkspaceID, RegionID, DeviceID, KeyFingerprint, AuthorityRevision string
 	CredentialHash                                                         []byte
+	ProofPublicKey                                                         []byte
 	Revision                                                               int64
 	ExpiresAt                                                              time.Time
 }
@@ -22,8 +23,8 @@ type DeviceSession struct {
 func (s *Store) InstallDeviceSession(ctx context.Context, permission DeviceSession) error {
 	tag, err := s.db.Exec(ctx, `
 		INSERT INTO device_sessions (session_id,workspace_id,region_id,device_id,key_fingerprint,
-			authority_revision, credential_hash,revision,expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			authority_revision, credential_hash,revision,expires_at,proof_public_key)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT (session_id) DO UPDATE SET revision=excluded.revision,expires_at=excluded.expires_at,
 			authority_revision=excluded.authority_revision
 		WHERE NOT device_sessions.revoked
@@ -36,7 +37,8 @@ func (s *Store) InstallDeviceSession(ctx context.Context, permission DeviceSessi
 		         (device_sessions.revision=excluded.revision AND device_sessions.expires_at=excluded.expires_at
 				 AND device_sessions.authority_revision=excluded.authority_revision))`,
 		permission.ID, permission.WorkspaceID, permission.RegionID, permission.DeviceID,
-		permission.KeyFingerprint, permission.AuthorityRevision, permission.CredentialHash, permission.Revision, permission.ExpiresAt)
+		permission.KeyFingerprint, permission.AuthorityRevision, permission.CredentialHash, permission.Revision,
+		permission.ExpiresAt, permission.ProofPublicKey)
 	if err == nil && tag.RowsAffected() == 0 {
 		return ErrPairingFenced
 	}
@@ -55,21 +57,22 @@ func (s *Store) RevokeDeviceSession(ctx context.Context, id string, revision int
 // A first-time Device must authenticate before its initial pairing.
 func (s *Store) DeviceSessionByCredential(ctx context.Context, digest []byte, now time.Time) (DeviceSession, error) {
 	return scanDeviceSession(s.db.QueryRow(ctx, `
-		SELECT session_id,workspace_id,region_id,device_id,key_fingerprint,authority_revision,revision,expires_at
+		SELECT session_id,workspace_id,region_id,device_id,key_fingerprint,authority_revision,revision,expires_at,proof_public_key
 		FROM device_sessions WHERE credential_hash=$1 AND NOT revoked AND expires_at>$2`, digest, now))
 }
 
 // ActiveDeviceSession checks the installed permission for live use.
 func (s *Store) ActiveDeviceSession(ctx context.Context, id string, now time.Time) (DeviceSession, error) {
 	return scanDeviceSession(s.db.QueryRow(ctx, `
-		SELECT session_id,workspace_id,region_id,device_id,key_fingerprint,authority_revision,revision,expires_at
+		SELECT session_id,workspace_id,region_id,device_id,key_fingerprint,authority_revision,revision,expires_at,proof_public_key
 		FROM device_sessions WHERE session_id=$1 AND NOT revoked AND expires_at>$2`, id, now))
 }
 
 func scanDeviceSession(row interface{ Scan(...any) error }) (DeviceSession, error) {
 	var permission DeviceSession
 	err := row.Scan(&permission.ID, &permission.WorkspaceID, &permission.RegionID, &permission.DeviceID,
-		&permission.KeyFingerprint, &permission.AuthorityRevision, &permission.Revision, &permission.ExpiresAt)
+		&permission.KeyFingerprint, &permission.AuthorityRevision, &permission.Revision, &permission.ExpiresAt,
+		&permission.ProofPublicKey)
 	return permission, wrapRequestScan(err)
 }
 
@@ -233,4 +236,33 @@ func applyDeviceSessionAuthority(ctx context.Context, tx pgx.Tx) error {
 	}
 	_, err := tx.Exec(ctx, `SELECT set_config('whalerein.session_authority',$1,true)`, authority)
 	return err
+}
+
+// EarliestSessionExpiry returns the earliest absolute deadline among live
+// managed App sessions. It is an aggregate only; no identity is exposed.
+func (s *Store) EarliestSessionExpiry(ctx context.Context) (time.Time, bool, error) {
+	var expires *time.Time
+	if err := s.db.QueryRow(ctx, `SELECT MIN(expires_at) FROM device_sessions
+		WHERE NOT revoked AND expires_at IS NOT NULL`).Scan(&expires); err != nil {
+		return time.Time{}, false, err
+	}
+	if expires == nil {
+		return time.Time{}, false, nil
+	}
+	return *expires, true, nil
+}
+
+// DeviceSessionHasProof reports whether the exact live session has an
+// App-session proof key. Access uses this only to mark Host dispatch policy.
+func (s *Store) DeviceSessionHasProof(ctx context.Context, id string) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, ErrUnavailable
+	}
+	var expected bool
+	err := s.db.QueryRow(ctx, `SELECT NOT revoked AND length(proof_public_key)=32
+		FROM device_sessions WHERE session_id=$1`, id).Scan(&expected)
+	if err != nil {
+		return false, wrapRequestScan(err)
+	}
+	return expected, nil
 }

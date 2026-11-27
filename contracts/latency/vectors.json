@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "name": "whalerein/latency-observation-vectors",
+  "valid": [
+    {
+      "v": 1, "run": "run-abc123", "producer": "fixture", "lifetime": "lt-fixture-1",
+      "seq": 1, "ts": 1000000000, "event": "fixture_clock_check",
+      "data": {"producer": "core", "reading_ns": 1000000100, "before_ns": 1000000000,
+               "after_ns": 1000000200, "clock_source": "CLOCK_MONOTONIC", "ok": true}
+    },
+    {
+      "v": 1, "run": "run-abc123", "producer": "dsh", "lifetime": "lt-host-1",
+      "seq": 2, "ts": 1000001000, "event": "dsh_callback",
+      "data": {"stream": "s-1", "attempt": "attempt-0001", "block": "b-1",
+               "seq_start": 0, "seq_end": 2, "bytes": 42, "native": "assistant-preview"}
+    },
+    {
+      "v": 1, "run": "run-abc123", "producer": "host", "lifetime": "lt-host-1",
+      "seq": 3, "ts": 1000002000, "event": "host_enqueue",
+      "data": {"stream": "s-1", "block": "b-1", "seq_start": 0, "seq_end": 2,
+               "bytes": 42, "queue_depth": 1, "queue_bytes": 42}
+    },
+    {
+      "v": 1, "run": "run-abc123", "producer": "core", "lifetime": "lt-cli-1",
+      "seq": 4, "ts": 1000003000, "event": "core_dequeue",
+      "data": {"frame": "f-1", "wait_ns": 50000, "disposition": "applied"}
+    },
+    {
+      "v": 1, "run": "run-abc123", "producer": "cli", "lifetime": "lt-cli-1",
+      "seq": 5, "ts": 1000004000, "event": "cli_write",
+      "data": {"delivery": 1, "ordinal": 1, "bytes": 42, "outcome": "success", "flush": true}
+    },
+    {
+      "v": 1, "run": "run-abc123", "producer": "access", "lifetime": "lt-access-1",
+      "seq": 6, "ts": 1000005000, "event": "access_query",
+      "data": {"request": "r-1", "attempt": 1, "route": "inline", "stage": "admit"}
+    },
+    {
+      "v": 1, "run": "run-abc123", "producer": "fixture", "lifetime": "lt-fixture-1",
+      "seq": 7, "ts": 1000006000, "event": "fixture_observe",
+      "data": {"attempt": "attempt-0001", "ordinal": 1, "kind": "preview",
+               "bytes": 42, "prefix_bytes": 42, "correct": true}
+    },
+    {
+      "v": 1, "run": "run-abc123", "producer": "core", "lifetime": "lt-host-1",
+      "seq": 8, "ts": 1000007000, "event": "core_join",
+      "data": {"watch": "w-1", "connection": "c-1", "generation": 2,
+               "milestone": "watch_ready"}
+    }
+  ],
+  "invalid": [
+    {
+      "why": "missing required data field",
+      "value": {"v": 1, "run": "run-abc123", "producer": "core", "lifetime": "lt-1",
+                "seq": 1, "ts": 1, "event": "core_enqueue",
+                "data": {"frame": "f-1", "queue_depth": 1, "accepted": true}}
+    },
+    {
+      "why": "unknown enum value",
+      "value": {"v": 1, "run": "run-abc123", "producer": "core", "lifetime": "lt-1",
+                "seq": 1, "ts": 1, "event": "core_dequeue",
+                "data": {"frame": "f-1", "wait_ns": 1, "disposition": "maybe"}}
+    },
+    {
+      "why": "forbidden field leaks content",
+      "value": {"v": 1, "run": "run-abc123", "producer": "dsh", "lifetime": "lt-1",
+                "seq": 1, "ts": 1, "event": "dsh_callback",
+                "data": {"stream": "s-1", "attempt": "a-1", "block": "b-1",
+                         "seq_start": 0, "seq_end": 1, "bytes": 1,
+                         "native": "assistant-preview", "text": "secret"}}
+    },
+    {
+      "why": "unknown event",
+      "value": {"v": 1, "run": "run-abc123", "producer": "core", "lifetime": "lt-1",
+                "seq": 1, "ts": 1, "event": "core_made_up", "data": {}}
+    },
+    {
+      "why": "wrong producer role",
+      "value": {"v": 1, "run": "run-abc123", "producer": "host", "lifetime": "lt-1",
+                "seq": 1, "ts": 1, "event": "core_receipt",
+                "data": {"frame": "f-1", "kind": "event", "bytes": 1, "decode": "ok"}}
+    },
+    {
+      "why": "negative timestamp",
+      "value": {"v": 1, "run": "run-abc123", "producer": "core", "lifetime": "lt-1",
+                "seq": 1, "ts": -1, "event": "core_delivery",
+                "data": {"frame": "f-1", "delivery": 1, "kind": "preview", "bytes": 1}}
+    }
+  ]
+}

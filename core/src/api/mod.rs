@@ -60,12 +60,14 @@ pub use crate::diagnostics::journal::{
     DiagnosticContext, DiagnosticEvent, DiagnosticKind, DiagnosticLevel, DiagnosticSink,
 };
 pub use crate::diagnostics::MetricSample;
+pub use crate::observation::bench;
 pub use crate::observation::SessionObservation;
 pub use crate::pairing::{PairingDecision, PairingError};
 #[cfg(test)]
 pub use crate::profiles::{
     ActivationOutcome, ProfileContext, ProfileSelection, ProfileSummary, Profiles, RemovalOutcome,
 };
+pub use crate::route::{HostRoute, RecoveryDecision, RouteStatus};
 pub use crate::runtime::ConnectionState;
 #[cfg(unix)]
 pub use crate::security::FileSecretStore;

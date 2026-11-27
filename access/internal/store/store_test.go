@@ -763,7 +763,7 @@ func TestCleanupClearsExpiredBodiesAndDeletesExpiredTokens(t *testing.T) {
 func TestStoreOpensPingsAndAppliesMigrationsIdempotently(t *testing.T) {
 	_, db := storetest.New(t)
 	ctx := context.Background()
-	opened, err := store.Open(ctx, db.DSN)
+	opened, err := store.OpenPostgres(ctx, db.DSN)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -790,10 +790,10 @@ func TestStoreOpensPingsAndAppliesMigrationsIdempotently(t *testing.T) {
 	if err := (*store.Store)(nil).Ping(ctx); err == nil {
 		t.Fatal("nil store ping should fail")
 	}
-	if _, err := store.Open(ctx, "postgres://%zz"); err == nil {
+	if _, err := store.OpenPostgres(ctx, "postgres://%zz"); err == nil {
 		t.Fatal("invalid DSN should fail")
 	}
-	if _, err := store.Open(ctx, "postgres://postgres@127.0.0.1:1/none?sslmode=disable&connect_timeout=1"); err == nil {
+	if _, err := store.OpenPostgres(ctx, "postgres://postgres@127.0.0.1:1/none?sslmode=disable&connect_timeout=1"); err == nil {
 		t.Fatal("unreachable database should fail")
 	}
 }

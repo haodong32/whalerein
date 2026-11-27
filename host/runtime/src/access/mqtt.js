@@ -4,12 +4,15 @@
 // result/event control topics plus the QoS 0 live topic.
 
 import { readFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import mqtt from 'mqtt'
 import { ConfigError, topics, PROTOCOL_VERSION } from '../config.js'
 import { PluginError } from '../errors.js'
+import { emitFact } from '../observation/index.js'
 import { RelayTransport } from './transport.js'
 import { publishPacketBytes } from './packet.js'
 import { RelayObjectClient } from './relay-client.js'
+import { signRouteAttach } from './route.js'
 import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import {
   BROKER_PACKET_LIMIT_BYTES,
@@ -106,6 +109,12 @@ export class MqttAccess {
    * @param {object} [options.logger]
    * @param {() => number} [options.now]
    * @param {Uint8Array} [options.authorizationPublicKey] Ed25519 public key announced in HostReady.
+   * @param {string} [options.routeNodeId] serving node issued with the credential.
+   * @param {string} [options.routeIncarnation] serving node incarnation.
+   * @param {string} [options.routeService] managed service identity.
+   * @param {string} [options.routeEnvironment] managed environment.
+   * @param {number} [options.routeGeneration] durable monotonic route generation.
+   * @param {Uint8Array} [options.routeNoisePublicKey] Host Noise public key.
    * @param {import('../protocol.js').ProtoCodec} [options.codec]
    * @param {string|object} [options.transportProfile] packaged profile id or budget.
    */
@@ -115,6 +124,12 @@ export class MqttAccess {
     token,
     authorizationPublicKey = null,
     authorizationPrivateKey = null,
+    routeNodeId = '',
+    routeIncarnation = '',
+    routeService = '',
+    routeEnvironment = '',
+    routeGeneration = 0,
+    routeNoisePublicKey = null,
     accessOrigin = '',
     relayClient = null,
     relayObjectTtlMs,
@@ -127,10 +142,20 @@ export class MqttAccess {
     now = Date.now,
     codec = defaultCodec,
     transportProfile = 'default',
+    observation = null,
   }) {
     this.authorizationPublicKey = authorizationPublicKey instanceof Uint8Array && authorizationPublicKey.length === 32
       ? authorizationPublicKey
       : null
+    this.authorizationPrivateKey = authorizationPrivateKey instanceof Uint8Array ? authorizationPrivateKey : null
+    this.route = {
+      nodeId: typeof routeNodeId === 'string' ? routeNodeId : '',
+      incarnation: typeof routeIncarnation === 'string' ? routeIncarnation : '',
+      service: typeof routeService === 'string' ? routeService : '',
+      environment: typeof routeEnvironment === 'string' ? routeEnvironment : '',
+      generation: Number.isSafeInteger(routeGeneration) && routeGeneration > 0 ? routeGeneration : 0,
+      noisePublicKey: routeNoisePublicKey instanceof Uint8Array && routeNoisePublicKey.length === 32 ? routeNoisePublicKey : null,
+    }
     this.url = url
     this.hostId = hostId
     this.token = token
@@ -141,6 +166,7 @@ export class MqttAccess {
     this.connectFn = connect
     this.logger = logger
     this.now = now
+    this.observation = observation
     this.codec = resolveCodec(codec)
     validateTransportProfiles()
     const resolved = resolveTransportProfile(typeof transportProfile === 'string' ? transportProfile : 'default')
@@ -301,6 +327,12 @@ export class MqttAccess {
   }
 
   async stop() {
+    // A graceful shutdown closes the exact open route. A transport loss does
+    // not call this path, so the same process may reattach after a transient
+    // disconnect without minting a new generation.
+    if (this.#connected && this.route.generation > 0) {
+      try { await this.#publishReady({ closing: true }) } catch { /* best effort */ }
+    }
     this.#stopped = true
     this.#connected = false
     this.#generation++
@@ -517,7 +549,7 @@ export class MqttAccess {
     await this.#publishReady()
   }
 
-  async #publishReady() {
+  async #publishReady({ closing = false } = {}) {
     const receive = this.receiveAdvertisement()
     const ready = {
       host_id: this.hostId,
@@ -526,6 +558,26 @@ export class MqttAccess {
       relay_version: RELAY_VERSION,
     }
     if (this.authorizationPublicKey) ready.authorization_public_key = this.authorizationPublicKey
+    if (closing) ready.route_closing = true
+    const route = this.route
+    if (route.generation > 0 && route.nodeId && route.incarnation && route.service && route.environment &&
+        route.noisePublicKey && this.authorizationPrivateKey) {
+      const signedAtUnixMs = this.now()
+      const challenge = randomBytes(16).toString('hex')
+      const tuple = {
+        service: route.service, environment: route.environment, hostId: this.hostId,
+        nodeId: route.nodeId, incarnation: route.incarnation, challenge,
+        generation: route.generation, noiseKey: route.noisePublicKey, signedAtUnixMs,
+      }
+      ready.route_generation = route.generation
+      ready.route_challenge = challenge
+      ready.route_signed_at_unix_ms = signedAtUnixMs
+      ready.route_signature = signRouteAttach(this.authorizationPrivateKey, tuple)
+      ready.route_service = route.service
+      ready.route_environment = route.environment
+      ready.route_signing_public_key = this.authorizationPublicKey ?? new Uint8Array()
+      ready.route_noise_public_key = route.noisePublicKey
+    }
     const body = this.codec.encode('whalerein.v1.HostReady', ready)
     const result = this.codec.encode('whalerein.v1.HostResult', {
       host_id: this.hostId,
@@ -541,7 +593,14 @@ export class MqttAccess {
     if (packet > this.#transport.effectivePacketLimit(this.#accessReceive?.budget?.packet_bytes)) {
       throw new PluginError('protocol_version_incompatible', 'HostReady exceeds the hop packet budget')
     }
-    await this.#publish(this.topics.result, result)
+    const measurement = { request: '', attempt: 1, kind: 'ready', bytes: result.length }
+    try {
+      await this.#publish(this.topics.result, result)
+      this.#observePublish(measurement, 'accepted')
+    } catch (error) {
+      this.#observePublish(measurement, 'failed')
+      throw error
+    }
   }
 
   #onMessage(topic, payload, properties) {
@@ -664,6 +723,31 @@ export class MqttAccess {
     } finally { clearTimeout(timer) }
   }
 
+  // The local publish boundary owns one typed outcome. It is recorded after the
+  // transport accepted, rejected or skipped the message; no timestamp is
+  // invented for an attempt that never reached the client.
+  #observePublish({ request = '', attempt = 1, kind, bytes, stream = '', seq_start, seq_end, batch = '', queue_depth, queue_bytes }, outcome) {
+    const data = {
+      request: typeof request === 'string' ? request : '',
+      attempt: Number.isSafeInteger(attempt) && attempt > 0 ? attempt : 1,
+      kind,
+      bytes,
+      outcome,
+    }
+    // A live preview carries the interval and queue context of the exact batch
+    // whose local publish just finished. Result and ready publications keep
+    // their existing result-only shape.
+    if (typeof stream === 'string' && stream !== '') {
+      data.stream = stream
+      if (Number.isSafeInteger(seq_start)) data.seq_start = seq_start
+      if (Number.isSafeInteger(seq_end)) data.seq_end = seq_end
+      if (typeof batch === 'string' && batch !== '') data.batch = batch
+      if (Number.isSafeInteger(queue_depth)) data.queue_depth = queue_depth
+      if (Number.isSafeInteger(queue_bytes)) data.queue_bytes = queue_bytes
+    }
+    emitFact(this.observation, 'host_publish', data)
+  }
+
   /**
    * Publish one complete HostResult, inline or as a ready reference.
    *
@@ -679,12 +763,14 @@ export class MqttAccess {
     const expirySeconds = messageExpirySeconds(expiresAt, this.now(), options.upstreamExpirySeconds)
     if (expirySeconds === 0) {
       this.logger?.info('mqtt_reply_skipped', { reason: 'expired' })
+      this.#observePublish({ request: options.requestId ?? '', attempt: 1, kind: 'result', bytes: payload.length }, 'timeout')
       return Promise.resolve({ skipped: true, representation: 'none' })
     }
     const { properties, propertiesBytes } = replyProperties({
       requestId: options.requestId,
       expirySeconds,
     })
+    const measurement = { request: options.requestId ?? '', attempt: 1, kind: 'result', bytes: payload.length }
     return this.#transport.sendComplete(this.topics.result, payload, {
       kind: 'result',
       receiverLimit: this.#accessReceive?.budget?.packet_bytes,
@@ -692,15 +778,28 @@ export class MqttAccess {
       expiresAt,
       properties,
       propertiesBytes,
+    }).then((result) => {
+      this.#observePublish(measurement, result?.skipped === true ? 'timeout' : 'accepted')
+      return result
+    }, (error) => {
+      this.#observePublish(measurement, 'failed')
+      throw error
     })
   }
 
   /** Publish one complete control EventEnvelope, inline or as a ready reference. */
   publishEvent(payload) {
+    const measurement = { request: '', attempt: 1, kind: 'event', bytes: payload.length }
     return this.#transport.sendComplete(this.topics.event, payload, {
       kind: 'event',
       receiverLimit: this.#accessReceive?.budget?.packet_bytes,
       expiresAt: this.now() + this.#transport.objectTtlMs,
+    }).then((result) => {
+      this.#observePublish(measurement, 'accepted')
+      return result
+    }, (error) => {
+      this.#observePublish(measurement, 'failed')
+      throw error
     })
   }
 
@@ -714,9 +813,23 @@ export class MqttAccess {
    * advertising receive limits; the receiving Device's own ChannelHello budget
    * is applied by the caller's per-watch route.
    */
-  publishLive(payload, { deviceId = '' } = {}) {
+  publishLive(payload, {
+    deviceId = '', stream = '', seq_start, seq_end, batch = '', queue_depth, queue_bytes,
+  } = {}) {
     if (typeof deviceId !== 'string' || deviceId === '') return Promise.resolve(false)
-    return this.#transport.sendLive(this.deviceLiveTopic(deviceId), payload, {})
+    // The live outcome is the one Host transport fact for this preview batch.
+    // The caller already tokenized the batch and owns the enqueue readings.
+    const measurement = {
+      request: '', attempt: 1, kind: 'event', bytes: payload.length,
+      stream, seq_start, seq_end, batch, queue_depth, queue_bytes,
+    }
+    return this.#transport.sendLive(this.deviceLiveTopic(deviceId), payload, {}).then((accepted) => {
+      this.#observePublish(measurement, accepted === false ? 'dropped' : 'accepted')
+      return accepted
+    }, (error) => {
+      this.#observePublish(measurement, 'failed')
+      throw error
+    })
   }
 
   /** Wait until the first successful connect+subscribe+Ready cycle. */

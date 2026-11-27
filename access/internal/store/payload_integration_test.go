@@ -47,7 +47,7 @@ func payloadLimits() store.PayloadLimits {
 // Concurrent reservations must serialize on the node/host accounting locks
 // instead of reading the same totals and overcommitting the limit.
 func TestPayloadConcurrentAdmissionDoesNotOvercommit(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	const workers = 24
 	const charge = int64(100)
@@ -96,7 +96,7 @@ func TestPayloadConcurrentAdmissionDoesNotOvercommit(t *testing.T) {
 // Count and active-upload bounds are checked inside the same admission
 // transaction, and a completed upload stops counting as active.
 func TestPayloadObjectAndActiveUploadLimits(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	limits := payloadLimits()
 	limits.MaxObjects = 2
@@ -125,7 +125,7 @@ func TestPayloadObjectAndActiveUploadLimits(t *testing.T) {
 
 // A host quota is enforced independently of the node total.
 func TestPayloadHostQuotaIsEnforced(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	limits := payloadLimits()
 	limits.MaxHostBytes = 100
@@ -144,7 +144,7 @@ func TestPayloadHostQuotaIsEnforced(t *testing.T) {
 // A ready object is readable only through a lease. Repeating release cannot
 // decrement the reader count twice.
 func TestPayloadReaderLeaseIsIdempotentAndCounted(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	admission, err := s.ReservePayload(ctx, payloadReservation(1, 10), payloadLimits())
@@ -175,7 +175,7 @@ func TestPayloadReaderLeaseIsIdempotentAndCounted(t *testing.T) {
 
 // Expiry closes reads immediately and cleanup waits for the reader to close.
 func TestPayloadExpiryClosesReadsAndCleanupRespectsReaders(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	reservation := payloadReservation(1, 10)
@@ -226,7 +226,7 @@ func TestPayloadExpiryClosesReadsAndCleanupRespectsReaders(t *testing.T) {
 
 // Cancelling twice stays a success and closes admission immediately.
 func TestPayloadCancelIsIdempotent(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	admission, err := s.ReservePayload(ctx, payloadReservation(1, 10), payloadLimits())
@@ -247,7 +247,7 @@ func TestPayloadCancelIsIdempotent(t *testing.T) {
 
 // A foreign scope is refused without revealing whether the object exists.
 func TestPayloadReadRejectsForeignScope(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	admission, err := s.ReservePayload(ctx, payloadReservation(1, 10), payloadLimits())
@@ -269,7 +269,7 @@ func TestPayloadReadRejectsForeignScope(t *testing.T) {
 // Reconciliation pages surface stale reservations and ready rows without
 // touching live reservations.
 func TestPayloadReconciliationQueriesBoundTheirPages(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	admission, err := s.ReservePayload(ctx, payloadReservation(1, 10), payloadLimits())
@@ -289,7 +289,7 @@ func TestPayloadReconciliationQueriesBoundTheirPages(t *testing.T) {
 // Maintenance queries are owner-scoped: a distinct-root peer must not expire,
 // claim, fence or delete another owner's rows in the shared schema.
 func TestPayloadMaintenanceIsOwnerScoped(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	reserve := func(index int, owner string, expires time.Time) store.PayloadReservation {

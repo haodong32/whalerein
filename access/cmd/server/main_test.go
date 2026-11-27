@@ -17,12 +17,18 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"time"
 
 	"github.com/whalerein/whalerein/access/internal/config"
+	"github.com/whalerein/whalerein/access/internal/control"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/httpapi"
+	"github.com/whalerein/whalerein/access/internal/route"
 	"github.com/whalerein/whalerein/access/internal/store"
+	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
 
 func freePort(t *testing.T) int {
@@ -60,7 +66,7 @@ func writeConfig(t *testing.T, values configValues) string {
 listen: "127.0.0.1:%d"
 internal_listen: "127.0.0.1:%d"
 public_url: "https://access.example.com"
-database_url: "%s"
+database_path: "%s"
 admin_token: "admin-token-value"
 host_provisioning_token: "host-token-value"
 broker:
@@ -164,7 +170,7 @@ func TestCheckConfigReportsMissingEnvironmentVariable(t *testing.T) {
 listen: "127.0.0.1:1"
 internal_listen: "127.0.0.1:2"
 public_url: "https://access.example.com"
-database_url: "${MISSING_DATABASE_URL}"
+database_path: "${MISSING_DATABASE_URL}"
 admin_token: "a"
 host_provisioning_token: "b"
 broker:
@@ -324,5 +330,174 @@ func TestRunServerRejectsInvalidClientAddressConfiguration(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestRunReportsInvalidConfigurationBeforeStarting(t *testing.T) {
+	var stderr strings.Builder
+	code := run(context.Background(), []string{"--config", "/does-not-exist/access.yaml"}, io.Discard, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "invalid configuration") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRunMigrateOnlyReportsStoreOpenFailure(t *testing.T) {
+	path := writeConfig(t, configValues{publicPort: freePort(t), internalPort: freePort(t), databaseURL: "/"})
+	var stderr strings.Builder
+	code := run(context.Background(), []string{"--config", path, "--migrate-only"}, io.Discard, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "migration failed") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRunRejectsInvalidClientReferenceBeforeServing(t *testing.T) {
+	path := writeConfig(t, configValues{publicPort: freePort(t), internalPort: freePort(t), databaseURL: "unused.db"})
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = []byte(strings.Replace(string(raw), "http:\n", "http:\n  client_reference:\n    key: \"not-base64!\"\n", 1))
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	code := run(context.Background(), []string{"--config", path}, io.Discard, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "invalid configuration") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRunReportsObservationOutletFailure(t *testing.T) {
+	t.Setenv("WHALEREIN_BENCH_MODE", "unsupported")
+	err := runServerWithStore(context.Background(), config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)), defaultStartupStoreOps())
+	if err == nil || !strings.Contains(err.Error(), "latency observation outlet") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRunServerReportsCentralControlConfiguration(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	missing := config.Config{}
+	missing.External.ControlURL = "https://central.example"
+	missing.DatabasePath = "/"
+	if err := runServerWithStore(context.Background(), missing, logger, defaultStartupStoreOps()); err == nil || !strings.Contains(err.Error(), "open store") {
+		t.Fatalf("incomplete control config error = %v", err)
+	}
+	complete := config.Config{}
+	complete.External.ControlURL = "https://central.example"
+	complete.External.NodeID = "node-a"
+	complete.External.NodeToken = "node-token"
+	complete.External.Incarnation = "inc-1"
+	complete.DatabasePath = filepath.Join(t.TempDir(), "access.db")
+	if err := runServerWithStore(context.Background(), complete, logger, defaultStartupStoreOps()); err == nil || !strings.Contains(err.Error(), "configure broker") {
+		t.Fatalf("control client startup error = %v", err)
+	}
+	invalid := complete
+	invalid.External.NodeToken = ""
+	invalid.DatabasePath = filepath.Join(t.TempDir(), "access.db")
+	if err := runServerWithStore(context.Background(), invalid, logger, defaultStartupStoreOps()); err == nil || !strings.Contains(err.Error(), "central node client") {
+		t.Fatalf("control client validation error = %v", err)
+	}
+}
+
+func TestStartControlReporterStartsAndStopsWithContext(t *testing.T) {
+	client, err := control.New(control.Config{BaseURL: "http://127.0.0.1:1", Token: "t", NodeID: "n", Incarnation: "i"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	startControlReporter(ctx, client)
+	startControlReporter(ctx, nil)
+	cancel()
+}
+
+func TestProcessHostReadyClosingDoesNotAdvanceEnrollment(t *testing.T) {
+	enrolled := false
+	replayed := false
+	err := processHostReady(context.Background(), "host-1", &whalereinv1.HostReady{HostId: "host-1", RouteClosing: true},
+		&route.Service{},
+		func(context.Context, string) error { replayed = true; return nil },
+		func(context.Context, string) error { enrolled = true; return nil })
+	if err != nil || replayed || enrolled {
+		t.Fatalf("closing ready = %v replayed=%v enrolled=%v", err, replayed, enrolled)
+	}
+	err = processHostReady(context.Background(), "host-1", &whalereinv1.HostReady{HostId: "host-1"},
+		&route.Service{},
+		func(context.Context, string) error { replayed = true; return nil },
+		func(context.Context, string) error { enrolled = true; return nil })
+	if err != nil || !replayed || !enrolled {
+		t.Fatalf("normal ready = %v replayed=%v enrolled=%v", err, replayed, enrolled)
+	}
+}
+
+func TestObserveRouteCountsSuccessAndFailure(t *testing.T) {
+	metrics := diagnostics.NewMetrics()
+	observeRoute(metrics, "attach", true)
+	observeRoute(metrics, "attach", false)
+	observeRoute(metrics, "close", true)
+	if got := testutil.ToFloat64(metrics.RouteAttach.WithLabelValues("success")); got != 1 {
+		t.Fatalf("attach success = %v", got)
+	}
+	if got := testutil.ToFloat64(metrics.RouteAttach.WithLabelValues("failure")); got != 1 {
+		t.Fatalf("attach failure = %v", got)
+	}
+	if got := testutil.ToFloat64(metrics.RouteClose.WithLabelValues("success")); got != 1 {
+		t.Fatalf("close success = %v", got)
+	}
+}
+
+func TestEarliestSessionExpiryMetricUsesTheStoreAggregate(t *testing.T) {
+	ctx := context.Background()
+	data, err := store.Open(ctx, filepath.Join(t.TempDir(), "access.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	if err := data.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := earliestSessionExpiryUnix(data); got != 0 {
+		t.Fatalf("empty expiry = %v", got)
+	}
+	expires := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	if err := data.InstallDeviceSession(ctx, store.DeviceSession{
+		ID: "session", WorkspaceID: "workspace", RegionID: "region", DeviceID: "device",
+		KeyFingerprint: "fingerprint", AuthorityRevision: "revision",
+		CredentialHash: bytes.Repeat([]byte{1}, 32), Revision: 1, ExpiresAt: expires,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := earliestSessionExpiryUnix(data); got != float64(expires.Unix()) {
+		t.Fatalf("expiry = %v, want %v", got, expires.Unix())
+	}
+}
+
+func TestPendingRouteMetricHandlesNilAndQueue(t *testing.T) {
+	if got := pendingRoutes(nil); got != 0 {
+		t.Fatalf("nil pending = %v", got)
+	}
+	service := &route.Service{}
+	if got := pendingRoutes(service); got != 0 {
+		t.Fatalf("empty pending = %v", got)
+	}
+}
+
+func TestStartAuthorityWorkerRequiresCompleteConfiguration(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	startAuthorityWorker(ctx, nil, nil, nil, nil, config.Config{}, nil)
+	startAuthorityWorker(ctx, &control.Client{}, nil, nil, nil, config.Config{}, nil)
+	cfg := config.Config{}
+	cfg.External.SessionEnvironment = "production"
+	startAuthorityWorker(ctx, &control.Client{}, nil, nil, nil, cfg, nil)
+}
+
+func TestAuthorityOptionsAcceptEmptyAndConfiguredTrust(t *testing.T) {
+	if authorityOptions(external.Trust{}) == nil {
+		t.Fatal("empty trust produced no option")
+	}
+	key := make([]byte, 32)
+	if authorityOptions(external.Trust{Keys: []external.VerificationKey{{PublicKey: key}}}) == nil {
+		t.Fatal("configured trust produced no option")
 	}
 }

@@ -369,14 +369,10 @@ func revokeDeviceGrants(ctx context.Context, begin func(context.Context) (pgx.Tx
 		return nil, true, err
 	}
 	rows, err := tx.Query(ctx, `
-		WITH revoked AS (
-			UPDATE grants SET revoked_at = $2, updated_at = $2
-			WHERE device_id = $1 AND revoked_at IS NULL
-			RETURNING host_id
-		)
-		SELECT DISTINCT host_id FROM revoked ORDER BY host_id`, deviceID, at)
+		SELECT DISTINCT host_id FROM grants
+		WHERE device_id = $1 AND revoked_at IS NULL ORDER BY host_id`, deviceID)
 	if err != nil {
-		return nil, true, fmt.Errorf("revoke device grants: %w", err)
+		return nil, true, fmt.Errorf("list device grants: %w", err)
 	}
 	hosts := make([]string, 0)
 	for rows.Next() {
@@ -389,6 +385,10 @@ func revokeDeviceGrants(ctx context.Context, begin func(context.Context) (pgx.Tx
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
+		return nil, true, fmt.Errorf("list device grants: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE grants SET revoked_at = $2, updated_at = $2
+		WHERE device_id = $1 AND revoked_at IS NULL`, deviceID, at); err != nil {
 		return nil, true, fmt.Errorf("revoke device grants: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM device_credentials WHERE device_id=$1", deviceID); err != nil {
