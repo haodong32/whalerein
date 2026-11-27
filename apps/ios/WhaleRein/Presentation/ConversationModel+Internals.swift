@@ -132,6 +132,7 @@ extension ConversationModel {
         let local = state.messages.remove(at: index)
         let pending = optimisticMessages.removeValue(forKey: local.messageId)
         committedPresentationIDs[message.messageId] = local.messageId
+        scroll.markLayoutChange()
         return pending?.preservesPosition == true ? index : nil
     }
 

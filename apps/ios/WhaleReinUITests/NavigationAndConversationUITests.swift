@@ -68,6 +68,19 @@ final class NavigationAndConversationUITests: WhaleReinUITestCase {
         XCTAssertFalse(element("tool.details.msg-0319-block-0").exists)
     }
 
+    func testConversationFollowsGrowingReplyWithoutReaderInteraction() {
+        launchAndOpenConversation(scenario: "conversation.streaming")
+        let viewport = waitFor("conversation.scroll")
+        let preview = waitFor("conversation.preview")
+        XCTAssertLessThanOrEqual(preview.frame.maxY, viewport.frame.maxY + 1)
+        XCTAssertGreaterThan(preview.frame.maxY, viewport.frame.minY)
+        XCTAssertFalse(element("conversation.jumpToLatest").exists)
+
+        let committed = waitFor("message.msg-live-0001")
+        XCTAssertLessThanOrEqual(committed.frame.maxY, viewport.frame.maxY + 1)
+        XCTAssertGreaterThan(committed.frame.maxY, viewport.frame.minY)
+    }
+
     func testReadingOlderRowsWhileStreamingRetainsAnchorAndJumps() {
         // Restoring the conversation starts the scripted stream.
         // Opening the switcher first could let the short stream end.

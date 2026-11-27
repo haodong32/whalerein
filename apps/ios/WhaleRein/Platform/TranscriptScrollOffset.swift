@@ -13,6 +13,16 @@ final class TranscriptScrollOffset {
         case needsTrailingSpace(CGFloat, target: CGFloat)
     }
 
+    func followBottom() {
+        guard let scrollView, !scrollView.isTracking,
+              !scrollView.isDragging, !scrollView.isDecelerating else { return }
+        let insets = scrollView.adjustedContentInset
+        let current = scrollView.contentOffset
+        let bottom = max(-insets.top, scrollView.contentSize.height + insets.bottom - scrollView.bounds.height)
+        guard abs(current.y - bottom) > 0.5 else { return }
+        scrollView.setContentOffset(CGPoint(x: current.x, y: bottom), animated: false)
+    }
+
     func shift(by correction: CGFloat) -> Shift {
         guard let scrollView else { return .unchanged }
         let insets = scrollView.adjustedContentInset
