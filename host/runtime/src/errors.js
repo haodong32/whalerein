@@ -25,6 +25,9 @@ export const ERROR_CODES = Object.freeze([
   'pairing_fenced',
   'pairing_committed_unavailable',
   'pairing_committed_unconfirmed',
+  'route_stale',
+  'policy_denied',
+  'node_unavailable',
   'channel_replaced',
 ])
 
@@ -58,6 +61,9 @@ export const ERROR_EXIT_CODES = Object.freeze({
   'pairing_fenced': 8,
   'pairing_committed_unavailable': 8,
   'pairing_committed_unconfirmed': 8,
+  'route_stale': 8,
+  'policy_denied': 4,
+  'node_unavailable': 5,
   'channel_replaced': 8,
 })
 
@@ -85,6 +91,9 @@ export const ERROR_ACTIONS = Object.freeze({
   'pairing_fenced': 'restart_pairing',
   'pairing_committed_unavailable': 'restart_pairing',
   'pairing_committed_unconfirmed': 'review_pairing',
+  'route_stale': 'refresh',
+  'policy_denied': 'reauth',
+  'node_unavailable': 'retry',
   'channel_replaced': 'retry',
 })
 
@@ -198,6 +207,12 @@ export function publicMessage(code) {
       return 'pairing committed but its original grant is unavailable'
     case 'pairing_committed_unconfirmed':
       return 'pairing committed but Host confirmation is unknown'
+    case 'route_stale':
+      return 'serving route is stale'
+    case 'policy_denied':
+      return 'current policy denies this scope'
+    case 'node_unavailable':
+      return 'Access node is unavailable'
     case 'unavailable':
       return 'unavailable'
     case 'channel_replaced':

@@ -65,6 +65,12 @@ type Metrics struct {
 	AdmissionDenied          prometheus.Counter
 	AdmissionReconcileErrors prometheus.Counter
 
+	// ControlLastSuccess is the Unix time of the last accepted Central control
+	// message. Zero means Central has never confirmed this node.
+	ControlLastSuccess prometheus.Gauge
+	RouteAttach        *prometheus.CounterVec
+	RouteClose         *prometheus.CounterVec
+
 	// CleanupBatches counts bounded retention batches by operation. A full
 	// batch leaves work behind, which CleanupBacklog reports so an operator can
 	// alert on a backlog that outlives a long pause instead of discovering it
@@ -215,6 +221,18 @@ func NewMetrics() *Metrics {
 			Name: "grant_admission_reconcile_errors_total",
 			Help: "Grant reconciliation passes that could not read durable state.",
 		}),
+		ControlLastSuccess: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "access_control_last_success_unix_seconds",
+			Help: "Unix time of the last accepted Central node control message; zero means never.",
+		}),
+		RouteAttach: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "access_route_attach_total",
+			Help: "Host route attachment attempts by accepted outcome.",
+		}, []string{"outcome"}),
+		RouteClose: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "access_route_close_total",
+			Help: "Graceful Host route close attempts by accepted outcome.",
+		}, []string{"outcome"}),
 		CleanupBatches: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "cleanup_batches_total",
 			Help: "Bounded retention batches by cleanup operation.",
@@ -367,6 +385,9 @@ func NewMetrics() *Metrics {
 		m.AdmissionLoadErrors,
 		m.AdmissionDenied,
 		m.AdmissionReconcileErrors,
+		m.ControlLastSuccess,
+		m.RouteAttach,
+		m.RouteClose,
 		m.CleanupBatches,
 		m.CleanupRows,
 		m.CleanupBacklogTotal,

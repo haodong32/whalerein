@@ -29,7 +29,9 @@
                 "REQUEST_KIND_PAIRING_AUTHORIZE": 5,
                 "REQUEST_KIND_REVOCATION": 6,
                 "REQUEST_KIND_HOST_CLIENTS": 7,
-                "REQUEST_KIND_ACCESS_READY": 8
+                "REQUEST_KIND_ACCESS_READY": 8,
+                "REQUEST_KIND_AUTHORITY": 9,
+                "REQUEST_KIND_SESSION_PROOF": 10
               }
             },
             "ErrorCode": {
@@ -57,6 +59,9 @@
                 "pairing_fenced": 20,
                 "pairing_committed_unavailable": 21,
                 "pairing_committed_unconfirmed": 22,
+                "route_stale": 23,
+                "policy_denied": 24,
+                "node_unavailable": 25,
                 "channel_replaced": 220
               }
             },
@@ -485,6 +490,14 @@
                 "enrollment_generation": {
                   "type": "uint64",
                   "id": 19
+                },
+                "device_session_id": {
+                  "type": "string",
+                  "id": 20
+                },
+                "proof_expected": {
+                  "type": "bool",
+                  "id": 21
                 }
               },
               "reserved": [
@@ -981,6 +994,42 @@
                 "relay_version": {
                   "type": "uint32",
                   "id": 6
+                },
+                "route_generation": {
+                  "type": "uint64",
+                  "id": 7
+                },
+                "route_challenge": {
+                  "type": "string",
+                  "id": 8
+                },
+                "route_signed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 9
+                },
+                "route_signature": {
+                  "type": "bytes",
+                  "id": 10
+                },
+                "route_service": {
+                  "type": "string",
+                  "id": 11
+                },
+                "route_environment": {
+                  "type": "string",
+                  "id": 12
+                },
+                "route_signing_public_key": {
+                  "type": "bytes",
+                  "id": 13
+                },
+                "route_noise_public_key": {
+                  "type": "bytes",
+                  "id": 14
+                },
+                "route_closing": {
+                  "type": "bool",
+                  "id": 15
                 }
               },
               "reserved": [
@@ -3819,6 +3868,579 @@
                 }
               }
             },
+            "RouteState": {
+              "values": {
+                "ROUTE_STATE_UNSPECIFIED": 0,
+                "ROUTE_OPEN": 1,
+                "ROUTE_CLOSED": 2
+              }
+            },
+            "NodeIdentity": {
+              "fields": {
+                "node_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "incarnation": {
+                  "type": "string",
+                  "id": 2
+                },
+                "region_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "https_url": {
+                  "type": "string",
+                  "id": 4
+                },
+                "mqtt_url": {
+                  "type": "string",
+                  "id": 5
+                },
+                "capacity": {
+                  "type": "uint32",
+                  "id": 6
+                },
+                "registered_at_unix_ms": {
+                  "type": "int64",
+                  "id": 7
+                }
+              }
+            },
+            "NodeReport": {
+              "fields": {
+                "node_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "incarnation": {
+                  "type": "string",
+                  "id": 2
+                },
+                "sequence": {
+                  "type": "uint64",
+                  "id": 3
+                },
+                "ready": {
+                  "type": "bool",
+                  "id": 4
+                },
+                "capacity": {
+                  "type": "uint32",
+                  "id": 5
+                },
+                "host_count": {
+                  "type": "uint32",
+                  "id": 6
+                },
+                "applied_policy_revisions": {
+                  "rule": "repeated",
+                  "type": "string",
+                  "id": 7
+                },
+                "observed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 8
+                }
+              }
+            },
+            "NodeReportAck": {
+              "fields": {
+                "received_at_unix_ms": {
+                  "type": "int64",
+                  "id": 1
+                },
+                "placement_eligible": {
+                  "type": "bool",
+                  "id": 2
+                },
+                "rejection_reason": {
+                  "type": "string",
+                  "id": 3
+                }
+              }
+            },
+            "HostRouteAttach": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "workspace_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "service": {
+                  "type": "string",
+                  "id": 3
+                },
+                "environment": {
+                  "type": "string",
+                  "id": 4
+                },
+                "node_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "incarnation": {
+                  "type": "string",
+                  "id": 6
+                },
+                "generation": {
+                  "type": "uint64",
+                  "id": 7
+                },
+                "challenge": {
+                  "type": "string",
+                  "id": 8
+                },
+                "signed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 9
+                },
+                "host_signature": {
+                  "type": "bytes",
+                  "id": 10
+                },
+                "host_signing_public_key": {
+                  "type": "bytes",
+                  "id": 11
+                },
+                "host_noise_public_key": {
+                  "type": "bytes",
+                  "id": 12
+                },
+                "node_observed": {
+                  "type": "bool",
+                  "id": 13
+                },
+                "node_incarnation": {
+                  "type": "string",
+                  "id": 14
+                }
+              }
+            },
+            "HostRoute": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "workspace_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "node_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "incarnation": {
+                  "type": "string",
+                  "id": 4
+                },
+                "generation": {
+                  "type": "uint64",
+                  "id": 5
+                },
+                "state": {
+                  "type": "RouteState",
+                  "id": 6
+                },
+                "challenge": {
+                  "type": "string",
+                  "id": 7
+                },
+                "updated_at_unix_ms": {
+                  "type": "int64",
+                  "id": 8
+                }
+              }
+            },
+            "RouteOutcome": {
+              "values": {
+                "ROUTE_OUTCOME_UNSPECIFIED": 0,
+                "ROUTE_COMMITTED": 1,
+                "ROUTE_IDEMPOTENT": 2,
+                "ROUTE_STALE": 3,
+                "ROUTE_CONFLICT": 4,
+                "ROUTE_REFUSED": 5
+              }
+            },
+            "HostRouteAttachReceipt": {
+              "fields": {
+                "outcome": {
+                  "type": "RouteOutcome",
+                  "id": 1
+                },
+                "route": {
+                  "type": "HostRoute",
+                  "id": 2
+                },
+                "error_code": {
+                  "type": "ErrorCode",
+                  "id": 3
+                },
+                "reason": {
+                  "type": "string",
+                  "id": 4
+                }
+              }
+            },
+            "HostRouteClose": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "node_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "incarnation": {
+                  "type": "string",
+                  "id": 3
+                },
+                "generation": {
+                  "type": "uint64",
+                  "id": 4
+                },
+                "signed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 5
+                },
+                "host_signature": {
+                  "type": "bytes",
+                  "id": 6
+                },
+                "host_signing_public_key": {
+                  "type": "bytes",
+                  "id": 7
+                },
+                "challenge": {
+                  "type": "string",
+                  "id": 8
+                },
+                "service": {
+                  "type": "string",
+                  "id": 9
+                },
+                "environment": {
+                  "type": "string",
+                  "id": 10
+                }
+              }
+            },
+            "HostRouteCloseReceipt": {
+              "fields": {
+                "outcome": {
+                  "type": "RouteOutcome",
+                  "id": 1
+                },
+                "route": {
+                  "type": "HostRoute",
+                  "id": 2
+                },
+                "error_code": {
+                  "type": "ErrorCode",
+                  "id": 3
+                },
+                "reason": {
+                  "type": "string",
+                  "id": 4
+                }
+              }
+            },
+            "NodeInventory": {
+              "fields": {
+                "node_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "incarnation": {
+                  "type": "string",
+                  "id": 2
+                },
+                "sequence": {
+                  "type": "uint64",
+                  "id": 3
+                },
+                "routes": {
+                  "rule": "repeated",
+                  "type": "HostRoute",
+                  "id": 4
+                }
+              }
+            },
+            "NodeDrain": {
+              "fields": {
+                "node_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "incarnation": {
+                  "type": "string",
+                  "id": 2
+                },
+                "drained": {
+                  "type": "bool",
+                  "id": 3
+                }
+              }
+            },
+            "NodeInventoryAck": {
+              "fields": {
+                "routes": {
+                  "rule": "repeated",
+                  "type": "HostRoute",
+                  "id": 1
+                },
+                "inventory_sequence": {
+                  "type": "uint64",
+                  "id": 2
+                }
+              }
+            },
+            "RouteDiscovery": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "route": {
+                  "type": "HostRoute",
+                  "id": 2
+                },
+                "https_url": {
+                  "type": "string",
+                  "id": 3
+                },
+                "mqtt_url": {
+                  "type": "string",
+                  "id": 4
+                },
+                "fresh": {
+                  "type": "bool",
+                  "id": 5
+                },
+                "observed_at_unix_ms": {
+                  "type": "int64",
+                  "id": 6
+                },
+                "unavailable_reason": {
+                  "type": "string",
+                  "id": 7
+                }
+              }
+            },
+            "ScopedAuthority": {
+              "fields": {
+                "auth_version": {
+                  "type": "string",
+                  "id": 1
+                },
+                "authority_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "issuer": {
+                  "type": "string",
+                  "id": 3
+                },
+                "audience": {
+                  "type": "string",
+                  "id": 4
+                },
+                "environment": {
+                  "type": "string",
+                  "id": 5
+                },
+                "workspace_id": {
+                  "type": "string",
+                  "id": 6
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 7
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 8
+                },
+                "session_id": {
+                  "type": "string",
+                  "id": 9
+                },
+                "grant_generation": {
+                  "type": "uint64",
+                  "id": 10
+                },
+                "host_grant_generation": {
+                  "type": "uint64",
+                  "id": 11
+                },
+                "serving_node_id": {
+                  "type": "string",
+                  "id": 12
+                },
+                "route_generation": {
+                  "type": "uint64",
+                  "id": 13
+                },
+                "session_proof_public_key": {
+                  "type": "bytes",
+                  "id": 14
+                },
+                "policy_revision": {
+                  "type": "string",
+                  "id": 15
+                },
+                "issued_at_unix_ms": {
+                  "type": "int64",
+                  "id": 16
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 17
+                },
+                "key_id": {
+                  "type": "string",
+                  "id": 18
+                },
+                "signature": {
+                  "type": "bytes",
+                  "id": 19
+                }
+              }
+            },
+            "AuthorityRenewalRequest": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "session_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "grant_generation": {
+                  "type": "uint64",
+                  "id": 4
+                },
+                "route_generation": {
+                  "type": "uint64",
+                  "id": 5
+                },
+                "node_id": {
+                  "type": "string",
+                  "id": 6
+                },
+                "incarnation": {
+                  "type": "string",
+                  "id": 7
+                },
+                "current_authority_ids": {
+                  "rule": "repeated",
+                  "type": "string",
+                  "id": 8
+                },
+                "environment": {
+                  "type": "string",
+                  "id": 9
+                },
+                "session_proof_public_key": {
+                  "type": "bytes",
+                  "id": 10
+                },
+                "host_grant_generation": {
+                  "type": "uint64",
+                  "id": 11
+                }
+              }
+            },
+            "AuthorityRenewalResponse": {
+              "fields": {
+                "authority": {
+                  "type": "ScopedAuthority",
+                  "id": 1
+                },
+                "maximum_expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 2
+                },
+                "error_code": {
+                  "type": "ErrorCode",
+                  "id": 3
+                },
+                "reason": {
+                  "type": "string",
+                  "id": 4
+                }
+              }
+            },
+            "AuthorityAcknowledgement": {
+              "fields": {
+                "node_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "incarnation": {
+                  "type": "string",
+                  "id": 2
+                },
+                "authority_ids": {
+                  "rule": "repeated",
+                  "type": "string",
+                  "id": 3
+                },
+                "applied_policy_revision": {
+                  "type": "string",
+                  "id": 4
+                },
+                "applied_at_unix_ms": {
+                  "type": "int64",
+                  "id": 5
+                }
+              }
+            },
+            "RevocationState": {
+              "values": {
+                "REVOCATION_STATE_UNSPECIFIED": 0,
+                "REVOCATION_PENDING_ENFORCEMENT": 1,
+                "REVOCATION_EFFECTIVE": 2
+              }
+            },
+            "RevocationStatus": {
+              "fields": {
+                "scope_type": {
+                  "type": "string",
+                  "id": 1
+                },
+                "scope_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "revision": {
+                  "type": "uint64",
+                  "id": 3
+                },
+                "frozen_expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 4
+                },
+                "state": {
+                  "type": "RevocationState",
+                  "id": 5
+                },
+                "recorded_at_unix_ms": {
+                  "type": "int64",
+                  "id": 6
+                }
+              }
+            },
             "ExternalAuthorization": {
               "fields": {
                 "auth_version": {
@@ -3902,6 +4524,10 @@
                 "signature": {
                   "type": "bytes",
                   "id": 20
+                },
+                "session_proof_public_key": {
+                  "type": "bytes",
+                  "id": 21
                 }
               }
             },
@@ -3950,6 +4576,18 @@
                 "password": {
                   "type": "string",
                   "id": 4
+                },
+                "node_id": {
+                  "type": "string",
+                  "id": 5
+                },
+                "incarnation": {
+                  "type": "string",
+                  "id": 6
+                },
+                "authority_public_key": {
+                  "type": "bytes",
+                  "id": 7
                 }
               }
             },
@@ -4104,6 +4742,42 @@
                   "rule": "repeated",
                   "type": "string",
                   "id": 1
+                }
+              }
+            },
+            "SessionProof": {
+              "fields": {
+                "session_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "host_id": {
+                  "type": "string",
+                  "id": 2
+                },
+                "device_id": {
+                  "type": "string",
+                  "id": 3
+                },
+                "channel_id": {
+                  "type": "string",
+                  "id": 4
+                },
+                "transcript_hash": {
+                  "type": "bytes",
+                  "id": 5
+                },
+                "issued_at_unix_ms": {
+                  "type": "int64",
+                  "id": 6
+                },
+                "expires_at_unix_ms": {
+                  "type": "int64",
+                  "id": 7
+                },
+                "signature": {
+                  "type": "bytes",
+                  "id": 8
                 }
               }
             }

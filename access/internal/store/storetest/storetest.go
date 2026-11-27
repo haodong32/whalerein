@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -27,9 +28,10 @@ const defaultDSN = "postgres://postgres@127.0.0.1:55432/whalerein_test?sslmode=d
 
 // DB identifies one isolated test schema.
 type DB struct {
-	BaseDSN string
-	Schema  string
-	DSN     string
+	BaseDSN    string
+	Schema     string
+	DSN        string
+	SQLitePath string
 
 	// openStore is the seam used to turn a schema DSN into a migrated store.
 	// Production uses openStoreWithPool; unit tests inject a scripted opener.
@@ -39,6 +41,16 @@ type DB struct {
 // New creates a fresh schema, migrates it and returns the store.
 func New(t *testing.T) (*store.Store, *DB) {
 	return newStore(t, newSchema)
+}
+
+// NewSQLite creates one isolated node-local database. It is the component
+// fixture for the runtime storage contract; PostgreSQL remains available only
+// for explicit historical migration tests.
+func NewSQLite(t *testing.T) (*store.Store, *DB) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "access.db")
+	db := &DB{SQLitePath: path}
+	return db.Open(t), db
 }
 
 func newStore(t *testing.T, factory func() (*DB, func(), error)) (*store.Store, *DB) {
@@ -142,6 +154,19 @@ func newSchemaWithOps(base string, ops schemaOps) (*DB, func(), error) {
 // persisted schema.
 func (db *DB) Open(t *testing.T) *store.Store {
 	t.Helper()
+	if db.SQLitePath != "" {
+		ctx := context.Background()
+		instance, err := store.Open(ctx, db.SQLitePath)
+		if err != nil {
+			t.Fatalf("open sqlite test store: %v", err)
+		}
+		if err := instance.Migrate(ctx); err != nil {
+			instance.Close()
+			t.Fatalf("migrate sqlite test store: %v", err)
+		}
+		t.Cleanup(instance.Close)
+		return instance
+	}
 	s, cleanup, err := db.open()
 	if err != nil {
 		t.Fatalf("open test store: %v", err)

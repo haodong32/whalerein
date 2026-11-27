@@ -782,10 +782,14 @@ class FakeDsh:
         return self.process.control("release_attachment_pull")
 
 
+DATABASE_BY_SCHEMA = {}
+
+
 class Scenario:
     def __init__(self, directory, schema):
         self.directory = directory
         self.schema = schema
+        DATABASE_BY_SCHEMA[schema] = str(Path(directory) / "access.db")
         self.processes = []
         self.admin = uuid.uuid4().hex
         # Case-unique namespace: no broker session, subscription or topic can
@@ -795,7 +799,7 @@ class Scenario:
         # Test-only Host attachment policy overrides, injected before start.
         self.attachment_policy = None
         self.env = {
-            "WHALEREIN_DATABASE_URL": f"postgres://postgres@127.0.0.1:55432/whalerein_test?sslmode=disable&search_path={schema}",
+            "WHALEREIN_DATABASE_PATH": str(Path(directory) / "access.db"),
             "WHALEREIN_ADMIN_TOKEN": self.admin,
             "WHALEREIN_HOST_PROVISIONING_TOKEN": uuid.uuid4().hex,
             "WHALEREIN_BROKER_PASSWORD": BROKER_PASSWORD,
@@ -806,7 +810,7 @@ class Scenario:
         self.config.write_text("""listen: "127.0.0.1:18080"
 internal_listen: "127.0.0.1:18081"
 public_url: "http://127.0.0.1:18080"
-database_url: "${WHALEREIN_DATABASE_URL}"
+database_path: "${WHALEREIN_DATABASE_PATH}"
 admin_token: "${WHALEREIN_ADMIN_TOKEN}"
 host_provisioning_token: "${WHALEREIN_HOST_PROVISIONING_TOKEN}"
 broker:
@@ -832,6 +836,34 @@ internal:
 log:
   level: error
 """.replace("__ACCESS_CLIENT_ID__", self.access_client_id))
+
+    def query(self, statement):
+        """Run one read statement against the node-local SQLite file."""
+        import sqlite3
+
+        connection = sqlite3.connect(
+            f"file:{self.env['WHALEREIN_DATABASE_PATH']}?mode=ro", uri=True, timeout=30
+        )
+        try:
+            return connection.execute(statement).fetchall()
+        finally:
+            connection.close()
+
+    def sql(self, statement):
+        """Run one read/write statement against the node-local SQLite file.
+
+        Integration assertions that inspect Access state must use the runtime
+        backend, never a separate PostgreSQL schema.
+        """
+        import sqlite3
+
+        connection = sqlite3.connect(self.env["WHALEREIN_DATABASE_PATH"])
+        try:
+            row = connection.execute(statement).fetchone()
+            connection.commit()
+            return "" if row is None else str(row[0]) if len(row) == 1 else row
+        finally:
+            connection.close()
 
     def configure_relay_directory(self, **limits):
         """Enable the node-scoped ciphertext directory for one relay case.
@@ -1022,23 +1054,26 @@ log:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", device_id):
             raise ValueError("Invalid fixture Device identity")
 
-        def sql(statement):
-            subprocess.run(
-                ["psql", "-h", "127.0.0.1", "-p", "55432", "-U", "postgres",
-                 "-d", "whalerein_test", "-v", "ON_ERROR_STOP=1", "-c", statement],
-                check=True, capture_output=True, timeout=5,
-            )
+        import sqlite3
+
+        database = Path(self.env["WHALEREIN_DATABASE_PATH"])
 
         @contextmanager
         def credential():
             token = uuid.uuid4().hex + uuid.uuid4().hex
-            digest = hashlib.sha256(token.encode()).hexdigest()
-            table = self.schema + ".device_credentials"
-            sql(f"INSERT INTO {table}(auth_hash,device_id) VALUES (decode('{digest}','hex'),'{device_id}')")
+            digest = hashlib.sha256(token.encode()).digest()
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "INSERT INTO device_credentials(auth_hash,device_id) VALUES (?,?)",
+                    (digest, device_id),
+                )
             try:
                 yield token
             finally:
-                sql(f"DELETE FROM {table} WHERE auth_hash = decode('{digest}','hex')")
+                with sqlite3.connect(database) as connection:
+                    connection.execute(
+                        "DELETE FROM device_credentials WHERE auth_hash=?", (digest,)
+                    )
 
         return credential()
 
@@ -1046,36 +1081,18 @@ log:
         import base64
         import hashlib
 
-        query = f"""SELECT json_build_object(
-            'requestId',request_id,'hostId',host_id,'deviceId',device_id,
-            'commandId',command_id,'kind',kind,'protocolVersion',protocol_version,
-            'channelId',channel_id,'relayVersion',relay_version,
-            'body',encode(request_body,'base64'),
-            'payloadDigest',encode(payload_digest,'base64'))
-            FROM {self.schema}.requests WHERE command_id <> '' ORDER BY created_at DESC LIMIT 1"""
-        result = subprocess.run(
-            [
-                "psql",
-                "-h",
-                "127.0.0.1",
-                "-p",
-                "55432",
-                "-U",
-                "postgres",
-                "-d",
-                "whalerein_test",
-                "-tAc",
-                query,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        payload = json.loads(result.stdout)
-        # PostgreSQL wraps base64 at 76 columns; proto3 JSON requires one line.
-        for field in ("body", "payloadDigest"):
-            payload[field] = base64.b64encode(base64.b64decode(payload[field])).decode()
+        row = self.query(
+            """SELECT request_id,host_id,device_id,command_id,kind,protocol_version,
+               channel_id,relay_version,hex(request_body),hex(payload_digest)
+               FROM requests WHERE command_id <> '' ORDER BY created_at DESC LIMIT 1"""
+        )[0]
+        payload = {
+            "requestId": row[0], "hostId": row[1], "deviceId": row[2],
+            "commandId": row[3], "kind": row[4], "protocolVersion": row[5],
+            "channelId": row[6], "relayVersion": row[7],
+            "body": base64.b64encode(bytes.fromhex(row[8])).decode(),
+            "payloadDigest": base64.b64encode(bytes.fromhex(row[9])).decode(),
+        }
         payload["requestId"] = uuid.uuid4().hex
         payload["expiresAtUnixMs"] = str(int((time.time() + 60) * 1000))
         if changed:

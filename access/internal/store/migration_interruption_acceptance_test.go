@@ -62,7 +62,7 @@ func TestMain(m *testing.M) {
 func e02RunMigrationHarness(dsn string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	opened, err := store.Open(ctx, dsn)
+	opened, err := store.OpenPostgres(ctx, dsn)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "migration harness open failed:", err)
 		return 1
@@ -88,7 +88,7 @@ func TestMigrationSingleProcessUpgradeAndRepeatedStartup(t *testing.T) {
 	before := e02ReadIdentity(t, ctx, fixture, older, false)
 	e02AssertOlderLedger(t, ctx, fixture)
 
-	opened, err := store.Open(ctx, db.DSN)
+	opened, err := store.OpenPostgres(ctx, db.DSN)
 	if err != nil {
 		t.Fatalf("open upgraded store: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestMigrationSingleProcessUpgradeAndRepeatedStartup(t *testing.T) {
 	// accepted (no rewrite, no unknown-version rejection) and durable state stays
 	// identical.
 	complete := e02LedgerRows(t, ctx, fixture)
-	second, err := store.Open(ctx, db.DSN)
+	second, err := store.OpenPostgres(ctx, db.DSN)
 	if err != nil {
 		t.Fatalf("open store for repeated startup: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestMigrationInterruptionPreservesAtomicUpgrade(t *testing.T) {
 
 	e02AssertCompleteLedger(t, ctx, fixture)
 	e02AssertUpgradeObjects(t, ctx, fixture)
-	completed, err := store.Open(ctx, db.DSN)
+	completed, err := store.OpenPostgres(ctx, db.DSN)
 	if err != nil {
 		t.Fatalf("open completed store: %v", err)
 	}

@@ -11,6 +11,8 @@ import { codec } from '../src/protocol.js'
 import { transportProfileBudget } from '../src/contracts/transport.js'
 import { FakeBroker } from './support/fake-mqtt.js'
 import { waitFor } from './support/harness.js'
+import { ed25519 } from '@noble/curves/ed25519.js'
+import { attachInput } from '../src/access/route.js'
 
 const proto = codec()
 const RESULT_TOPIC = 'whalerein/v1/h/host-1/result'
@@ -752,4 +754,41 @@ test('a reply expiry is capped by a shorter upstream MQTT expiry', async () => {
   assert.equal(published.properties.messageExpiryInterval, 3)
   assert.equal(published.properties.correlationData.toString('utf8'), 'request-capped')
   await access.stop()
+})
+
+test('a route-enabled HostReady carries a proof for the serving node', async () => {
+  const privateKey = new Uint8Array(32).fill(5)
+  const publicKey = ed25519.getPublicKey(privateKey)
+  const noiseKey = new Uint8Array(32).fill(6)
+  const { broker, access } = makeAccess({
+    authorizationPublicKey: publicKey,
+    authorizationPrivateKey: privateKey,
+    routeNodeId: 'node-a',
+    routeIncarnation: 'inc-1',
+    routeService: 'official',
+    routeEnvironment: 'staging',
+    routeGeneration: 4,
+    routeNoisePublicKey: noiseKey,
+  })
+  access.start({})
+  await access.waitForConnected(2000)
+  const ready = broker.messages.find((message) => message.topic === RESULT_TOPIC)
+  const body = proto.decode('whalerein.v1.HostReady', proto.decode('whalerein.v1.HostResult', ready.payload).result_body)
+  assert.equal(body.route_generation, 4)
+  assert.equal(body.route_service, 'official')
+  assert.equal(body.route_environment, 'staging')
+  assert.equal(body.route_challenge.length, 32)
+  assert.equal(body.route_signing_public_key.length, 32)
+  assert.equal(body.route_noise_public_key.length, 32)
+  const expected = attachInput({
+    service: 'official', environment: 'staging', hostId: 'host-1', nodeId: 'node-a',
+    incarnation: 'inc-1', challenge: body.route_challenge, generation: 4,
+    noiseKey, signedAtUnixMs: body.route_signed_at_unix_ms,
+  })
+  assert.equal(ed25519.verify(body.route_signature, new TextEncoder().encode(expected), publicKey), true)
+  await access.stop()
+  const closing = broker.messages.filter((message) => message.topic === RESULT_TOPIC).at(-1)
+  const closingBody = proto.decode('whalerein.v1.HostReady', proto.decode('whalerein.v1.HostResult', closing.payload).result_body)
+  assert.equal(closingBody.route_closing, true)
+  assert.equal(closingBody.route_generation, 4)
 })

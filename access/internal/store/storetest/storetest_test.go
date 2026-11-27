@@ -1,6 +1,7 @@
 package storetest
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -29,4 +30,32 @@ func defaultDSNForTest() string {
 		return value
 	}
 	return defaultDSN
+}
+
+func TestNewSQLiteCreatesAnIsolatedReopenableStore(t *testing.T) {
+	s, db := NewSQLite(t)
+	if db.SQLitePath == "" {
+		t.Fatal("no SQLite path")
+	}
+	if _, err := s.EnsureHost(context.Background(), "host"); err != nil {
+		t.Fatal(err)
+	}
+	reopened := db.Open(t)
+	host, err := reopened.GetHost(context.Background(), "host")
+	if err != nil || host.HostID != "host" {
+		t.Fatalf("reopened host = %#v %v", host, err)
+	}
+}
+
+func TestNewSchemaAndNewSkipWithoutAPostgres(t *testing.T) {
+	t.Setenv("WHALEREIN_TEST_DATABASE_URL", "postgres://127.0.0.1:1/test?sslmode=disable")
+	NewSchema(t)
+	New(t)
+}
+
+func TestSQLiteOpenFailureIsReported(t *testing.T) {
+	db := &DB{SQLitePath: "/"}
+	if _, _, err := db.open(); err == nil {
+		t.Fatal("directory database path opened")
+	}
 }

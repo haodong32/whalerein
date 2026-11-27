@@ -240,6 +240,18 @@
         "number": 22
       },
       {
+        "name": "route_stale",
+        "number": 23
+      },
+      {
+        "name": "policy_denied",
+        "number": 24
+      },
+      {
+        "name": "node_unavailable",
+        "number": 25
+      },
+      {
         "name": "channel_replaced",
         "number": 220
       }
@@ -636,6 +648,68 @@
       {
         "name": "REQUEST_KIND_ACCESS_READY",
         "number": 8
+      },
+      {
+        "name": "REQUEST_KIND_AUTHORITY",
+        "number": 9
+      },
+      {
+        "name": "REQUEST_KIND_SESSION_PROOF",
+        "number": 10
+      }
+    ],
+    "RevocationState": [
+      {
+        "name": "REVOCATION_STATE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "REVOCATION_PENDING_ENFORCEMENT",
+        "number": 1
+      },
+      {
+        "name": "REVOCATION_EFFECTIVE",
+        "number": 2
+      }
+    ],
+    "RouteOutcome": [
+      {
+        "name": "ROUTE_OUTCOME_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "ROUTE_COMMITTED",
+        "number": 1
+      },
+      {
+        "name": "ROUTE_IDEMPOTENT",
+        "number": 2
+      },
+      {
+        "name": "ROUTE_STALE",
+        "number": 3
+      },
+      {
+        "name": "ROUTE_CONFLICT",
+        "number": 4
+      },
+      {
+        "name": "ROUTE_REFUSED",
+        "number": 5
+      }
+    ],
+    "RouteState": [
+      {
+        "name": "ROUTE_STATE_UNSPECIFIED",
+        "number": 0
+      },
+      {
+        "name": "ROUTE_OPEN",
+        "number": 1
+      },
+      {
+        "name": "ROUTE_CLOSED",
+        "number": 2
       }
     ],
     "RunPhase": [
@@ -1126,6 +1200,160 @@
     },
     "AttemptStarted": {
       "fields": []
+    },
+    "AuthorityAcknowledgement": {
+      "fields": [
+        {
+          "json_name": "nodeId",
+          "name": "node_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "incarnation",
+          "name": "incarnation",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "authorityIds",
+          "name": "authority_ids",
+          "number": 3,
+          "repeated": true,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "appliedPolicyRevision",
+          "name": "applied_policy_revision",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "appliedAtUnixMs",
+          "name": "applied_at_unix_ms",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "AuthorityRenewalRequest": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "grantGeneration",
+          "name": "grant_generation",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "routeGeneration",
+          "name": "route_generation",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "nodeId",
+          "name": "node_id",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "incarnation",
+          "name": "incarnation",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "currentAuthorityIds",
+          "name": "current_authority_ids",
+          "number": 8,
+          "repeated": true,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "environment",
+          "name": "environment",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "sessionProofPublicKey",
+          "name": "session_proof_public_key",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "hostGrantGeneration",
+          "name": "host_grant_generation",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        }
+      ]
+    },
+    "AuthorityRenewalResponse": {
+      "fields": [
+        {
+          "json_name": "authority",
+          "name": "authority",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.ScopedAuthority"
+        },
+        {
+          "json_name": "maximumExpiresAtUnixMs",
+          "name": "maximum_expires_at_unix_ms",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "errorCode",
+          "name": "error_code",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ErrorCode"
+        },
+        {
+          "json_name": "reason",
+          "name": "reason",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
     },
     "CancelQuestionAnswer": {
       "fields": [
@@ -1852,6 +2080,13 @@
           "number": 20,
           "repeated": false,
           "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "sessionProofPublicKey",
+          "name": "session_proof_public_key",
+          "number": 21,
+          "repeated": false,
+          "type": "TYPE_BYTES"
         }
       ]
     },
@@ -2194,6 +2429,27 @@
           "number": 4,
           "repeated": false,
           "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "nodeId",
+          "name": "node_id",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "incarnation",
+          "name": "incarnation",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "authorityPublicKey",
+          "name": "authority_public_key",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_BYTES"
         }
       ]
     },
@@ -2452,6 +2708,69 @@
           "number": 6,
           "repeated": false,
           "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "routeGeneration",
+          "name": "route_generation",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "routeChallenge",
+          "name": "route_challenge",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "routeSignedAtUnixMs",
+          "name": "route_signed_at_unix_ms",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "routeSignature",
+          "name": "route_signature",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "routeService",
+          "name": "route_service",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "routeEnvironment",
+          "name": "route_environment",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "routeSigningPublicKey",
+          "name": "route_signing_public_key",
+          "number": 13,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "routeNoisePublicKey",
+          "name": "route_noise_public_key",
+          "number": 14,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "routeClosing",
+          "name": "route_closing",
+          "number": 15,
+          "repeated": false,
+          "type": "TYPE_BOOL"
         }
       ]
     },
@@ -2578,6 +2897,20 @@
           "number": 19,
           "repeated": false,
           "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "deviceSessionId",
+          "name": "device_session_id",
+          "number": 20,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "proofExpected",
+          "name": "proof_expected",
+          "number": 21,
+          "repeated": false,
+          "type": "TYPE_BOOL"
         }
       ]
     },
@@ -2690,6 +3023,313 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.PayloadReference"
+        }
+      ]
+    },
+    "HostRoute": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "workspaceId",
+          "name": "workspace_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "nodeId",
+          "name": "node_id",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "incarnation",
+          "name": "incarnation",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "generation",
+          "name": "generation",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "state",
+          "name": "state",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.RouteState"
+        },
+        {
+          "json_name": "challenge",
+          "name": "challenge",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "updatedAtUnixMs",
+          "name": "updated_at_unix_ms",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "HostRouteAttach": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "workspaceId",
+          "name": "workspace_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "service",
+          "name": "service",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "environment",
+          "name": "environment",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "nodeId",
+          "name": "node_id",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "incarnation",
+          "name": "incarnation",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "generation",
+          "name": "generation",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "challenge",
+          "name": "challenge",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "signedAtUnixMs",
+          "name": "signed_at_unix_ms",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "hostSignature",
+          "name": "host_signature",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "hostSigningPublicKey",
+          "name": "host_signing_public_key",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "hostNoisePublicKey",
+          "name": "host_noise_public_key",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "nodeObserved",
+          "name": "node_observed",
+          "number": 13,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "nodeIncarnation",
+          "name": "node_incarnation",
+          "number": 14,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "HostRouteAttachReceipt": {
+      "fields": [
+        {
+          "json_name": "outcome",
+          "name": "outcome",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.RouteOutcome"
+        },
+        {
+          "json_name": "route",
+          "name": "route",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HostRoute"
+        },
+        {
+          "json_name": "errorCode",
+          "name": "error_code",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ErrorCode"
+        },
+        {
+          "json_name": "reason",
+          "name": "reason",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "HostRouteClose": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "nodeId",
+          "name": "node_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "incarnation",
+          "name": "incarnation",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "generation",
+          "name": "generation",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "signedAtUnixMs",
+          "name": "signed_at_unix_ms",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "hostSignature",
+          "name": "host_signature",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "hostSigningPublicKey",
+          "name": "host_signing_public_key",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "challenge",
+          "name": "challenge",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "service",
+          "name": "service",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "environment",
+          "name": "environment",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "HostRouteCloseReceipt": {
+      "fields": [
+        {
+          "json_name": "outcome",
+          "name": "outcome",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.RouteOutcome"
+        },
+        {
+          "json_name": "route",
+          "name": "route",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HostRoute"
+        },
+        {
+          "json_name": "errorCode",
+          "name": "error_code",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ErrorCode"
+        },
+        {
+          "json_name": "reason",
+          "name": "reason",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -3189,6 +3829,221 @@
         {
           "json_name": "defaultPersistence",
           "name": "default_persistence",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "NodeDrain": {
+      "fields": [
+        {
+          "json_name": "nodeId",
+          "name": "node_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "incarnation",
+          "name": "incarnation",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "drained",
+          "name": "drained",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "NodeIdentity": {
+      "fields": [
+        {
+          "json_name": "nodeId",
+          "name": "node_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "incarnation",
+          "name": "incarnation",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "regionId",
+          "name": "region_id",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "httpsUrl",
+          "name": "https_url",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "mqttUrl",
+          "name": "mqtt_url",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "capacity",
+          "name": "capacity",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "registeredAtUnixMs",
+          "name": "registered_at_unix_ms",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "NodeInventory": {
+      "fields": [
+        {
+          "json_name": "nodeId",
+          "name": "node_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "incarnation",
+          "name": "incarnation",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "sequence",
+          "name": "sequence",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "routes",
+          "name": "routes",
+          "number": 4,
+          "repeated": true,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HostRoute"
+        }
+      ]
+    },
+    "NodeInventoryAck": {
+      "fields": [
+        {
+          "json_name": "routes",
+          "name": "routes",
+          "number": 1,
+          "repeated": true,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HostRoute"
+        },
+        {
+          "json_name": "inventorySequence",
+          "name": "inventory_sequence",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        }
+      ]
+    },
+    "NodeReport": {
+      "fields": [
+        {
+          "json_name": "nodeId",
+          "name": "node_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "incarnation",
+          "name": "incarnation",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "sequence",
+          "name": "sequence",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "ready",
+          "name": "ready",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "capacity",
+          "name": "capacity",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "hostCount",
+          "name": "host_count",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "appliedPolicyRevisions",
+          "name": "applied_policy_revisions",
+          "number": 7,
+          "repeated": true,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "observedAtUnixMs",
+          "name": "observed_at_unix_ms",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "NodeReportAck": {
+      "fields": [
+        {
+          "json_name": "receivedAtUnixMs",
+          "name": "received_at_unix_ms",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "placementEligible",
+          "name": "placement_eligible",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "rejectionReason",
+          "name": "rejection_reason",
           "number": 3,
           "repeated": false,
           "type": "TYPE_STRING"
@@ -5620,6 +6475,244 @@
         }
       ]
     },
+    "RevocationStatus": {
+      "fields": [
+        {
+          "json_name": "scopeType",
+          "name": "scope_type",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "scopeId",
+          "name": "scope_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "revision",
+          "name": "revision",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "frozenExpiresAtUnixMs",
+          "name": "frozen_expires_at_unix_ms",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "state",
+          "name": "state",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.RevocationState"
+        },
+        {
+          "json_name": "recordedAtUnixMs",
+          "name": "recorded_at_unix_ms",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "RouteDiscovery": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "route",
+          "name": "route",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_MESSAGE",
+          "type_name": "whalerein.v1.HostRoute"
+        },
+        {
+          "json_name": "httpsUrl",
+          "name": "https_url",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "mqttUrl",
+          "name": "mqtt_url",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "fresh",
+          "name": "fresh",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "observedAtUnixMs",
+          "name": "observed_at_unix_ms",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "unavailableReason",
+          "name": "unavailable_reason",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "ScopedAuthority": {
+      "fields": [
+        {
+          "json_name": "authVersion",
+          "name": "auth_version",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "authorityId",
+          "name": "authority_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "issuer",
+          "name": "issuer",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "audience",
+          "name": "audience",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "environment",
+          "name": "environment",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "workspaceId",
+          "name": "workspace_id",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": 9,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "grantGeneration",
+          "name": "grant_generation",
+          "number": 10,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "hostGrantGeneration",
+          "name": "host_grant_generation",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "servingNodeId",
+          "name": "serving_node_id",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "routeGeneration",
+          "name": "route_generation",
+          "number": 13,
+          "repeated": false,
+          "type": "TYPE_UINT64"
+        },
+        {
+          "json_name": "sessionProofPublicKey",
+          "name": "session_proof_public_key",
+          "number": 14,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "policyRevision",
+          "name": "policy_revision",
+          "number": 15,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "issuedAtUnixMs",
+          "name": "issued_at_unix_ms",
+          "number": 16,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": 17,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "keyId",
+          "name": "key_id",
+          "number": 18,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "signature",
+          "name": "signature",
+          "number": 19,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        }
+      ]
+    },
     "SelectSessionModel": {
       "fields": [
         {
@@ -5756,6 +6849,66 @@
           "number": 6,
           "repeated": false,
           "type": "TYPE_BOOL"
+        }
+      ]
+    },
+    "SessionProof": {
+      "fields": [
+        {
+          "json_name": "sessionId",
+          "name": "session_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "deviceId",
+          "name": "device_id",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "channelId",
+          "name": "channel_id",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "transcriptHash",
+          "name": "transcript_hash",
+          "number": 5,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "issuedAtUnixMs",
+          "name": "issued_at_unix_ms",
+          "number": 6,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "expiresAtUnixMs",
+          "name": "expires_at_unix_ms",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        },
+        {
+          "json_name": "signature",
+          "name": "signature",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_BYTES"
         }
       ]
     },

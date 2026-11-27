@@ -67,6 +67,7 @@ pub use crate::pairing::{PairingDecision, PairingError};
 pub use crate::profiles::{
     ActivationOutcome, ProfileContext, ProfileSelection, ProfileSummary, Profiles, RemovalOutcome,
 };
+pub use crate::route::{HostRoute, RecoveryDecision, RouteStatus};
 pub use crate::runtime::ConnectionState;
 #[cfg(unix)]
 pub use crate::security::FileSecretStore;

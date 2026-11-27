@@ -412,19 +412,44 @@ func TestOpenPayloadReadChecksStateScopeAndExpiry(t *testing.T) {
 	})
 }
 
-func TestReleasePayloadReadIsSingleStatement(t *testing.T) {
+func TestReleasePayloadReadDeletesLeaseAndDecrementsOnce(t *testing.T) {
 	ctx := context.Background()
-	db := &fakeDB{t: t, execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-		return pgconn.NewCommandTag("SELECT 1"), nil
-	}}
+	tx := &externalTx{}
+	updates := 0
+	tx.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		switch {
+		case strings.Contains(sql, "DELETE FROM temporary_ciphertext_leases"):
+			return pgconn.NewCommandTag("DELETE 1"), nil
+		case strings.Contains(sql, "UPDATE temporary_ciphertext_objects"):
+			updates++
+			if args[0] != "object" {
+				t.Fatalf("wrong object scope: %v", args)
+			}
+			return pgconn.NewCommandTag("UPDATE 1"), nil
+		default:
+			t.Fatalf("unexpected exec %q", sql)
+			return pgconn.CommandTag{}, nil
+		}
+	}
+	db := &fakeDB{t: t, beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }}
 	if err := newStore(db).ReleasePayloadRead(ctx, "object", "lease"); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	db = &fakeDB{t: t, execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-		return pgconn.CommandTag{}, errors.New("release")
-	}}
-	if err := newStore(db).ReleasePayloadRead(ctx, "object", "lease"); err == nil {
-		t.Fatal("release failure was ignored")
+	if updates != 1 || !tx.committed {
+		t.Fatalf("updates=%d committed=%v", updates, tx.committed)
+	}
+	// A duplicate release deletes nothing and must not decrement again.
+	tx = &externalTx{}
+	tx.execFn = func(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+		if strings.Contains(sql, "DELETE FROM temporary_ciphertext_leases") {
+			return pgconn.NewCommandTag("DELETE 0"), nil
+		}
+		t.Fatalf("duplicate release updated readers")
+		return pgconn.CommandTag{}, nil
+	}
+	db = &fakeDB{t: t, beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }}
+	if err := newStore(db).ReleasePayloadRead(ctx, "object", "lease"); err != nil {
+		t.Fatalf("duplicate release: %v", err)
 	}
 	if err := (&Store{}).ReleasePayloadRead(ctx, "object", "lease"); err == nil {
 		t.Fatal("release without a pool must fail")

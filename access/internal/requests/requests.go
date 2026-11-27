@@ -93,6 +93,10 @@ type PayloadChecker interface {
 // from "the host is known to be offline". During an Access restart or broker
 // reconnect the first answer is unavailable, not offline; treating it as
 // offline would terminally fail every in-flight request.
+type proofSessionReader interface {
+	DeviceSessionHasProof(context.Context, string) (bool, error)
+}
+
 type Presence interface {
 	IsHostOnline(ctx context.Context, hostID string) bool
 	Available() bool
@@ -638,6 +642,7 @@ func (s *Service) envelopeFor(row store.Request) *whalereinv1.HostRequest {
 		ProtocolVersion: row.ProtocolVersion,
 		RelayVersion:    RelayEpoch,
 		ChannelId:       row.ChannelID,
+		DeviceSessionId: row.DeviceSessionID,
 	}
 	// Preserve the representation admitted for this exact row. Access never
 	// converts a reference back into ciphertext it cannot read.
@@ -749,6 +754,16 @@ func (s *Service) ForwardDue(ctx context.Context) error {
 			continue
 		}
 		envelope := s.envelopeFor(row)
+		if row.DeviceSessionID != "" {
+			// A managed session defaults to proof-required. A transient lookup
+			// failure must not silently downgrade it to Access admission.
+			envelope.ProofExpected = true
+			if reader, ok := s.store.(proofSessionReader); ok {
+				if expected, proofErr := reader.DeviceSessionHasProof(ctx, row.DeviceSessionID); proofErr == nil {
+					envelope.ProofExpected = expected
+				}
+			}
+		}
 		publish := func() error { return s.broker.PublishRequest(ctx, row.HostID, envelope) }
 		var err error
 		if s.sessions != nil {

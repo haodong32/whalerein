@@ -319,6 +319,7 @@ func TestRouteTableSnapshot(t *testing.T) {
 		"POST /v1/relay/objects",
 		"POST /v1/relay/objects/{object_id}/finish",
 		"POST /v1/requests/{request_id}/heartbeat",
+		"POST /v1/sessions/{session_id}/proof",
 		"PUT /v1/relay/objects/{object_id}",
 	}
 	gotPublic := routeTable(f.server.publicRoutes())

@@ -103,13 +103,14 @@ type harness struct {
 	provider *provider
 	// prepared keeps one signed request per Host so a retry replays the exact
 	// payload instead of generating new keys.
-	prepared    map[string]*whalereinv1.HostEnrollmentRequest
-	signingKeys map[string]ed25519.PrivateKey
+	prepared     map[string]*whalereinv1.HostEnrollmentRequest
+	signingKeys  map[string]ed25519.PrivateKey
+	authorityKey ed25519.PublicKey
 }
 
 func newHarness(t *testing.T) harness {
 	t.Helper()
-	data, _ := storetest.New(t)
+	data, _ := storetest.NewSQLite(t)
 	issuer := newIssuerKey(t)
 	provider := newProvider(t)
 	// Access pins the fixture's public key and verifies independently.
@@ -127,6 +128,8 @@ func newHarness(t *testing.T) harness {
 		}},
 	}
 	service := external.New(trust, data, "mqtts://access.fixture.test:8883",
+		external.WithNodeIdentity("node-a", "inc-1"),
+		external.WithAuthorityPublicKey(issuer.public),
 		external.WithHostEnforcer(acceptEnforcer{}))
 
 	api, err := httpapi.New(httpapi.Dependencies{
@@ -145,8 +148,9 @@ func newHarness(t *testing.T) harness {
 	t.Cleanup(server.Close)
 	return harness{
 		server: server, provider: provider,
-		prepared:    map[string]*whalereinv1.HostEnrollmentRequest{},
-		signingKeys: map[string]ed25519.PrivateKey{},
+		prepared:     map[string]*whalereinv1.HostEnrollmentRequest{},
+		signingKeys:  map[string]ed25519.PrivateKey{},
+		authorityKey: issuer.public,
 	}
 }
 
@@ -314,6 +318,12 @@ func TestEnrollmentCommitsOnceAndDeliversTheCredentialOnce(t *testing.T) {
 	if !strings.HasPrefix(response.GetCredential().GetPassword(), "") ||
 		response.GetCredential().GetPassword() == "" {
 		t.Fatal("the credential must be present")
+	}
+	if response.GetCredential().GetNodeId() != "node-a" || response.GetCredential().GetIncarnation() != "inc-1" {
+		t.Fatalf("credential node identity = %q/%q", response.GetCredential().GetNodeId(), response.GetCredential().GetIncarnation())
+	}
+	if string(response.GetCredential().GetAuthorityPublicKey()) != string(h.authorityKey) {
+		t.Fatal("credential did not carry the issuer authority key")
 	}
 	if got := response.GetStatus().GetState(); got != whalereinv1.EnrollmentState_enrollment_pending {
 		t.Fatalf("a new enrollment stays pending until readiness: %v", got)

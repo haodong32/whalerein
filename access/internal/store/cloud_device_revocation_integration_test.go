@@ -79,7 +79,7 @@ func confirmCloudGrant(t *testing.T, s *store.Store, workspace, hostID, deviceID
 // its confirmed client row, and the exact-scoped forwarding watch is denied
 // before its ordinary deadline.
 func TestCloudDeviceGrantRevocationIsHostScopedAndReleasesTheSlotAfterEnforcement(t *testing.T) {
-	s, _ := storetest.New(t)
+	s, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	const workspace, device = "workspace", "device"

@@ -157,15 +157,7 @@ def test_revoke_during_session_watch_ends_with_authorization_error(
 
         # Query only the credential count from this case's database. The
         # transport credential is never extracted from the platform keyring.
-        result = subprocess.run(
-            [
-                "psql", "-h", "127.0.0.1", "-p", "55432", "-U", "postgres",
-                "-d", "whalerein_test", "-tAc",
-                f"SET search_path TO {scenario.schema}; SELECT count(*) FROM device_credentials",
-            ],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
-        assert result.stdout.strip().splitlines()[-1] == "0"
+        assert scenario.sql("SELECT count(*) FROM device_credentials") == "0"
     finally:
         watcher.close()
 
@@ -336,23 +328,21 @@ def test_command_submission_and_heartbeat_stay_on_https(scenario, paired_client,
         )
         try:
             def row():
-                raw = sql(
-                    scenario.schema,
-                    "SELECT coalesce((SELECT request_id || '|' || kind::text || '|' "
-                    "|| status || '|' || relay_version::text || '|' "
-                    "|| coalesce(extract(epoch from client_lease_until)::text, '') "
+                rows = scenario.query(
+                    "SELECT request_id,kind,status,relay_version,client_lease_until,expires_at "
                     "FROM requests WHERE command_id <> '' "
-                    "ORDER BY created_at DESC LIMIT 1), 'absent')",
+                    "ORDER BY created_at DESC LIMIT 1"
                 )
-                if not raw or raw == "absent":
+                if not rows:
                     return None
-                request_id, kind, status, relay_version, lease = raw.split("|")
+                request_id, kind, status, relay_version, lease, expires = rows[0]
                 return {
                     "request_id": request_id,
                     "kind": int(kind),
                     "status": status,
                     "relay_version": int(relay_version),
-                    "lease": float(lease) if lease else None,
+                    "lease": float(lease) / 1000.0 if lease is not None else None,
+                    "expires": float(expires) / 1000.0,
                 }
 
             wait(lambda: row() is not None, timeout=20)
@@ -364,8 +354,18 @@ def test_command_submission_and_heartbeat_stay_on_https(scenario, paired_client,
             # The fixture normally holds the send turn so the lease must move.
             # If the Source answers immediately, completion legitimately stops
             # renewal; the command response then proves the lane instead.
-            if (row() or {}).get("status") != "succeeded":
-                wait(lambda: (row() or {}).get("lease", 0) > first_lease, timeout=15)
+            current = row() or {}
+            # A lease already at the request expiry cannot move: the renewal is
+            # capped by expires_at. Otherwise the held send must renew.
+            if current.get("status") != "succeeded" and first_lease < current.get("expires", 0) - 0.5:
+                # The command may complete while we wait; completion legitimately
+                # stops renewal. Stop waiting on either a moved lease or a
+                # terminal result so this is not a race.
+                wait(
+                    lambda: (r := row()) is not None
+                    and (r.get("status") == "succeeded" or (r.get("lease") or 0) > first_lease),
+                    timeout=15,
+                )
         finally:
             fixture.control("finish_send_turn", session_id=session_id)
             assert sender.wait_exit(timeout=15) == 0

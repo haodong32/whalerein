@@ -2,6 +2,7 @@ import { MemoryHostCredentials } from '../src/security/credentials.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { HostRuntime } from '../src/host.js'
@@ -13,6 +14,8 @@ import { silentLogger } from '../src/log.js'
 import { generateKeypair, open, requestAad, seal } from '../src/security/noise.js'
 import { sha256Bytes } from '../src/security/digest.js'
 import { DEFAULT_CONNECTION_REF, establishChannel } from './support/channel.js'
+import { ed25519 } from '@noble/curves/ed25519.js'
+import { authorityCanonical, sessionProofCanonical } from '../src/security/authority.js'
 
 const proto = codec()
 
@@ -64,7 +67,7 @@ class FakeHostAccess {
   }
 }
 
-function setup(logger = silentLogger, now = Date.now) {
+function setup(logger = silentLogger, now = Date.now, extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'whalerein-router-'))
   const config = testConfig({
     adapter: 'fake',
@@ -73,7 +76,7 @@ function setup(logger = silentLogger, now = Date.now) {
     host_token: 'token',
     state_dir: dir,
     event_batch_ms: 0,
-  }, {})
+  }, extra)
   const store = new StateStore({ path: ':memory:' })
   const adapter = new TestSource({ sessions: [{ sessionId: 's1', running: true }] })
   const access = new FakeHostAccess()
@@ -1416,5 +1419,151 @@ test('a query reply for a revoked or replaced connection is dropped', async () =
     assert.equal(after, before, 'no result is published for a closed connection')
   } finally {
     await ctx.host.stop(); ctx.store.close(); rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+
+test('an Access-delivered scoped authority is verified and staged before acknowledgement', async () => {
+  const epoch = 1_700_000_000_000
+  const issuerPrivate = new Uint8Array(randomBytes(32))
+  const issuerPublic = ed25519.getPublicKey(issuerPrivate)
+  const proofPrivate = new Uint8Array(randomBytes(32))
+  const proofPublic = ed25519.getPublicKey(proofPrivate)
+  const ctx = setup(silentLogger, () => epoch, { authorityPublicKey: issuerPublic })
+  const host = ctx.host
+  const authority = {
+    auth_version: 'whalerein/v1/scoped-authority-v1',
+    authority_id: 'authority-1',
+    issuer: 'https://cloud.example',
+    audience: 'https://access.example',
+    environment: 'test',
+    workspace_id: 'workspace',
+    host_id: 'host-1',
+    device_id: 'd1',
+    session_id: 'session-1',
+    grant_generation: 2,
+    host_grant_generation: 1,
+    serving_node_id: 'node-a',
+    route_generation: 4,
+    session_proof_public_key: proofPublic,
+    policy_revision: 'r1',
+    issued_at_unix_ms: epoch,
+    expires_at_unix_ms: epoch + 60_000,
+    key_id: 'key-1',
+  }
+  authority.signature = ed25519.sign(new TextEncoder().encode(authorityCanonical(authority)), issuerPrivate)
+  try {
+    await host.start()
+    const body = proto.encode('whalerein.v1.ScopedAuthority', authority)
+    const request = baseRequest({
+      request_id: 'authority-1', kind: 'REQUEST_KIND_AUTHORITY', device_id: 'd1',
+      expires_at_unix_ms: epoch + 30_000, body,
+    })
+    const accepted = await send(ctx.access, request)
+    assert.equal(accepted.status, 'succeeded')
+    const blocked = await send(ctx.access, baseRequest({
+      device_session_id: 'session-1', proof_expected: true,
+      expires_at_unix_ms: epoch + 30_000,
+    }))
+    assert.equal(blocked.status, 'rejected')
+    assert.equal(blocked.error_code, 'unauthorized')
+  } finally {
+    await host.stop()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('managed dispatch without an installed authority is rejected before decryption', async () => {
+  const issuerPrivate = new Uint8Array(randomBytes(32))
+  const issuerPublic = ed25519.getPublicKey(issuerPrivate)
+  const ctx = setup(silentLogger, Date.now, { authorityPublicKey: issuerPublic, requireAuthority: true })
+  try {
+    await ctx.host.start()
+    const result = await send(ctx.access, baseRequest({ device_session_id: 'session-missing' }))
+    assert.equal(result.status, 'rejected')
+    assert.equal(result.error_code, 'unauthorized')
+  } finally {
+    await ctx.host.stop()
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('a transcript-bound SessionProof activates the staged permit and unlocks dispatch', async () => {
+  const epoch = 1_700_000_000_000
+  const issuerPrivate = new Uint8Array(randomBytes(32))
+  const issuerPublic = ed25519.getPublicKey(issuerPrivate)
+  const proofPrivate = new Uint8Array(randomBytes(32))
+  const proofPublic = ed25519.getPublicKey(proofPrivate)
+  const ctx = setup(silentLogger, () => epoch + 1, { authorityPublicKey: issuerPublic })
+  let security
+  try {
+    await ctx.host.start()
+    security = ctx.host.security
+    security.setRevocationsPending(false)
+    const authority = {
+      auth_version: 'whalerein/v1/scoped-authority-v1', authority_id: 'authority-1',
+      issuer: 'https://cloud.example', audience: 'https://access.example', environment: 'test',
+      workspace_id: 'workspace', host_id: 'host-1', device_id: 'd1', session_id: 'session-1',
+      grant_generation: 2, host_grant_generation: 1, serving_node_id: 'node-a', route_generation: 4,
+      session_proof_public_key: proofPublic, policy_revision: 'r1',
+      issued_at_unix_ms: epoch + 1, expires_at_unix_ms: epoch + 30_000, key_id: 'key-1',
+    }
+    authority.signature = ed25519.sign(new TextEncoder().encode(authorityCanonical(authority)), issuerPrivate)
+    const staged = await send(ctx.access, baseRequest({
+      request_id: 'authority-2', kind: 'REQUEST_KIND_AUTHORITY', body: proto.encode('whalerein.v1.ScopedAuthority', authority),
+      expires_at_unix_ms: epoch + 30_000,
+    }))
+    assert.equal(staged.status, 'succeeded', JSON.stringify(staged))
+    assert.equal(ctx.host.sessionAuthorized('session-1', 'd1'), false)
+
+    const channel = establishChannel({ security, store: ctx.store, hostId: 'host-1', deviceId: 'd1' })
+    const proof = {
+      session_id: 'session-1', host_id: 'host-1', device_id: 'd1', channel_id: channel.channelId,
+      transcript_hash: channel.noise.handshakeHash,
+      issued_at_unix_ms: epoch + 1, expires_at_unix_ms: epoch + 30_000,
+    }
+    const wrongPrivate = new Uint8Array(randomBytes(32))
+    const wrong = { ...proof, signature: ed25519.sign(new TextEncoder().encode(sessionProofCanonical(proof)), wrongPrivate) }
+    const denied = await send(ctx.access, baseRequest({
+      request_id: 'proof-wrong', kind: 'REQUEST_KIND_SESSION_PROOF', device_id: 'd1',
+      channel_id: channel.channelId, body: proto.encode('whalerein.v1.SessionProof', wrong),
+      expires_at_unix_ms: epoch + 30_000,
+    }))
+    assert.equal(denied.status, 'rejected')
+    assert.equal(ctx.host.sessionAuthorized('session-1', 'd1'), false)
+    const otherChannel = { ...proof, channel_id: 'other-channel' }
+    otherChannel.signature = ed25519.sign(new TextEncoder().encode(sessionProofCanonical(otherChannel)), proofPrivate)
+    const wrongChannel = await send(ctx.access, baseRequest({
+      request_id: 'proof-channel', kind: 'REQUEST_KIND_SESSION_PROOF', device_id: 'd1',
+      channel_id: channel.channelId, body: proto.encode('whalerein.v1.SessionProof', otherChannel),
+      expires_at_unix_ms: epoch + 30_000,
+    }))
+    assert.equal(wrongChannel.status, 'rejected')
+    const replayed = { ...proof, transcript_hash: new Uint8Array(32) }
+    replayed.signature = ed25519.sign(new TextEncoder().encode(sessionProofCanonical(replayed)), proofPrivate)
+    const replay = await send(ctx.access, baseRequest({
+      request_id: 'proof-replay', kind: 'REQUEST_KIND_SESSION_PROOF', device_id: 'd1',
+      channel_id: channel.channelId, body: proto.encode('whalerein.v1.SessionProof', replayed),
+      expires_at_unix_ms: epoch + 30_000,
+    }))
+    assert.equal(replay.status, 'rejected')
+    proof.signature = ed25519.sign(new TextEncoder().encode(sessionProofCanonical(proof)), proofPrivate)
+    const proved = await send(ctx.access, baseRequest({
+      request_id: 'proof-1', kind: 'REQUEST_KIND_SESSION_PROOF', device_id: 'd1',
+      channel_id: channel.channelId, body: proto.encode('whalerein.v1.SessionProof', proof),
+      expires_at_unix_ms: epoch + 30_000,
+    }))
+    assert.equal(proved.status, 'succeeded')
+    ctx.access.route = { generation: 4 }
+    assert.equal(ctx.host.sessionAuthorized('session-1', 'd1'), true)
+
+    const query = encryptedQuery({
+      security, store: ctx.store, channel, payload: { list_sessions: {} },
+      overrides: { device_session_id: 'session-1', proof_expected: true },
+    })
+    assert.equal((await send(ctx.access, query)).status, 'succeeded')
+  } finally {
+    await ctx.host.stop()
+    rmSync(ctx.dir, { recursive: true, force: true })
   }
 })

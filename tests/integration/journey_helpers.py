@@ -21,7 +21,7 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from environment import ROOT, Process, http, wait, approval_card
+from environment import DATABASE_BY_SCHEMA, ROOT, Process, http, wait, approval_card
 
 CLI = ROOT / "target/debug/whalerein"
 DSH_FIXTURE = ROOT / "tests/integration/fixtures/dsh.mjs"
@@ -33,7 +33,21 @@ JOURNEY_BROWSER = ROOT / "tests/integration/native/journey-browser.mjs"
 
 
 def sql(schema, statement):
-    """Run one statement in the case schema and return its last output line."""
+    """Run one statement against the case database and return its first value.
+
+    The runtime backend is node-local SQLite. A schema registered by Scenario
+    is resolved to its database file; an unregistered schema keeps the legacy
+    PostgreSQL path for historical cases that still own one.
+    """
+    path = DATABASE_BY_SCHEMA.get(schema)
+    if path:
+        translated = (
+            statement.replace("now() - interval '25 hours'", "(unixepoch()*1000 - 90000000)")
+            .replace("now()", "(unixepoch()*1000)")
+        )
+        with sqlite3.connect(path) as connection:
+            row = connection.execute(translated).fetchone()
+        return "" if row is None else str(row[0]) if len(row) == 1 else row
     result = subprocess.run(
         [
             "psql",

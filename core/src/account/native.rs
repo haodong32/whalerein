@@ -8,6 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hmac::{Hmac, Mac};
 use reqwest::{Client, Method, Response, StatusCode};
+use ring::rand::SystemRandom;
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::time::{sleep, timeout_at, Instant};
@@ -156,6 +158,9 @@ pub struct AccountHost {
     pub pairing_eligible: bool,
     #[serde(default)]
     pub device_access: String,
+    /// Central's current route for this Host. Older services omit it.
+    #[serde(default)]
+    pub route: Option<crate::route::HostRoute>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -237,6 +242,9 @@ struct Session {
     expires: u64,
     verified: SignedInAccount,
     regional: Option<RegionalSession>,
+    /// PKCS#8 Ed25519 key bound to this App session. Never leaves SecretStore.
+    #[serde(default)]
+    proof_key: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -274,6 +282,8 @@ struct LoginAttempt {
     revocation: String,
     token: String,
     prompt: Option<LoginPrompt>,
+    #[serde(default)]
+    proof_key: String,
 }
 
 /// Pending native authorization-code attempt. `state` is the exact value
@@ -695,11 +705,24 @@ impl AccountClient {
                     revocation: new_token(),
                     token: new_token(),
                     prompt: None,
+                    proof_key: new_proof_key(),
                 });
                 self.save(&state)?;
             }
             state.attempt.expect("login attempt allocated")
         };
+        if attempt.proof_key.is_empty() {
+            // Upgrade an attempt persisted before per-session proof keys.
+            attempt.proof_key = new_proof_key();
+            let _lock = self.lock("account.lock").await?;
+            let mut state = load_state(&self.secrets)?;
+            if let Some(pending) = state.attempt.as_mut() {
+                if pending.token == attempt.token {
+                    pending.proof_key = attempt.proof_key.clone();
+                }
+            }
+            self.save(&state)?;
+        }
         if attempt.prompt.is_none() {
             #[derive(Serialize)]
             #[serde(rename_all = "camelCase")]
@@ -708,6 +731,7 @@ impl AccountClient {
                 credential_digest: String,
                 revocation_digest: String,
                 attempt_digest: String,
+                proof_public_key: String,
             }
 
             let manifest = self.instance.manifest()?.ok_or(CoreError::Unauthorized)?;
@@ -716,6 +740,8 @@ impl AccountClient {
                 credential_digest: token_digest(&attempt.credential),
                 revocation_digest: token_digest(&attempt.revocation),
                 attempt_digest: token_digest(&attempt.token),
+                proof_public_key: session_proof_public_key(&attempt.proof_key)
+                    .ok_or_else(|| CoreError::InvalidInput("session proof key".into()))?,
             };
             let response = self
                 .http
@@ -799,6 +825,7 @@ impl AccountClient {
             expires: active.expires_at,
             verified: verified.clone(),
             regional: None,
+            proof_key: attempt.proof_key,
         });
         self.save(&state)?;
         Ok(verified)
@@ -1024,6 +1051,7 @@ impl AccountClient {
             expires: active.expires_at,
             verified: verified.clone(),
             regional: None,
+            proof_key: String::new(),
         });
         self.save(&state)?;
         Ok(verified)
@@ -1083,6 +1111,7 @@ impl AccountClient {
             expires: active.expires_at,
             verified: verified.clone(),
             regional: None,
+            proof_key: String::new(),
         });
         self.save(&state)?;
         Ok(verified)
@@ -1424,6 +1453,18 @@ fn new_token() -> String {
     URL_SAFE_NO_PAD.encode(crate::util::random_bytes(32))
 }
 
+fn new_proof_key() -> String {
+    let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+        .expect("system randomness must produce an Ed25519 key");
+    URL_SAFE_NO_PAD.encode(document.as_ref())
+}
+
+fn session_proof_public_key(proof_key: &str) -> Option<String> {
+    let document = URL_SAFE_NO_PAD.decode(proof_key).ok()?;
+    let pair = Ed25519KeyPair::from_pkcs8(&document).ok()?;
+    Some(URL_SAFE_NO_PAD.encode(pair.public_key().as_ref()))
+}
+
 fn token_digest(token: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(token.as_bytes()))
 }
@@ -1468,6 +1509,19 @@ async fn decode_created<T: DeserializeOwned>(response: Response) -> CoreResult<T
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(CoreError::Unauthorized),
         _ => Err(unavailable()),
     }
+}
+
+pub(crate) fn local_session_proof(
+    secrets: &Arc<dyn SecretStore>,
+) -> CoreResult<Option<(String, String)>> {
+    let state = load_state(secrets)?;
+    let Some(active) = state.active else {
+        return Ok(None);
+    };
+    if active.id.is_empty() || active.proof_key.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((active.id, active.proof_key)))
 }
 
 fn load_state(secrets: &Arc<dyn SecretStore>) -> CoreResult<AccountState> {
@@ -1829,6 +1883,11 @@ mod tests {
                 }
                 ("POST", "/api/v1/client/login/poll") => {
                     assert_eq!(recorded.lock().unwrap().as_ref().unwrap()["attemptDigest"], bearer_digest());
+                    let key = recorded.lock().unwrap().as_ref().unwrap()["proofPublicKey"]
+                        .as_str()
+                        .expect("proof public key")
+                        .to_owned();
+                    assert_eq!(URL_SAFE_NO_PAD.decode(key).unwrap().len(), 32);
                     MockResponse::json(200, &active())
                 }
                 ("GET", "/api/v1/client/me") => {
@@ -1839,7 +1898,9 @@ mod tests {
                     assert_eq!(recorded.lock().unwrap().as_ref().unwrap()["credentialDigest"], bearer_digest());
                     MockResponse::json(200, &json!({
                         "workspace": {"id": "ws"},
-                        "hosts": [{"hostId":"host-a","displayName":"Computer","enrolled":true,"online":false}],
+                        "hosts": [{"hostId":"host-a","displayName":"Computer","enrolled":true,"online":false,
+                            "route":{"nodeId":"node-b","routeGeneration":9,"state":"open",
+                                     "directory":"fresh","httpsUrl":"https://b","mqttUrl":"mqtts://b"}}],
                     }))
                 }
                 ("POST", "/api/v1/client/sessions/fixture-session/revoke") => {
@@ -1869,10 +1930,12 @@ mod tests {
             .login(|_| panic!("existing session should not prompt"))
             .await
             .unwrap();
-        assert_eq!(
-            client.hosts_for_device(None).await.unwrap()[0].host_id,
-            "host-a"
-        );
+        let hosts = client.hosts_for_device(None).await.unwrap();
+        assert_eq!(hosts[0].host_id, "host-a");
+        let route = hosts[0].route.as_ref().expect("route");
+        assert_eq!(route.node_id, "node-b");
+        assert_eq!(route.route_generation, 9);
+        assert!(route.usable());
         let state = load_state(&secrets).unwrap();
         let session = state.active.unwrap();
         assert!(session.credential != session.revocation);
@@ -1923,6 +1986,7 @@ mod tests {
             expires: unix_now() + 600,
             verified: account,
             regional: None,
+            proof_key: String::new(),
         }
     }
 

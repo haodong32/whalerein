@@ -83,7 +83,7 @@ func TestDrainCleanupTaskStopsAtRoundLimitOrCancellation(t *testing.T) {
 // budget.
 func TestRunServerRejectsInvalidTransportBeforeOpeningStore(t *testing.T) {
 	cfg := config.Default()
-	cfg.DatabaseURL = "fixture"
+	cfg.DatabasePath = "fixture"
 	cfg.Broker.URL = "tcp://127.0.0.1:1"
 	cfg.Transport = config.TransportConfig{Profile: "not-a-profile"}
 	opened := false

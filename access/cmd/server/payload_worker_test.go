@@ -117,7 +117,7 @@ func TestRunWithReportsMigrationAndServeFailures(t *testing.T) {
 listen: "127.0.0.1:1"
 internal_listen: "127.0.0.1:2"
 public_url: "https://access.example.com"
-database_url: "postgres://127.0.0.1:1/db"
+database_path: "postgres://127.0.0.1:1/db"
 admin_token: "a"
 host_provisioning_token: "b"
 broker:

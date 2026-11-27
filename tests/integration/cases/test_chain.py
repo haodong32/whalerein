@@ -672,15 +672,9 @@ def test_probe_login(scenario, paired_device):
     assert result.stdout.strip() == "probe-login-ok"
     assert live_connection() == before, "Probe displaced the existing host connection"
     assert any(host["online"] for host in paired_device.hosts())
-    query = subprocess.run(
-        [
-            "psql", "-h", "127.0.0.1", "-p", "55432", "-U", "postgres",
-            "-d", "whalerein_test", "-tAc",
-            f"SELECT count(*) FROM {scenario.schema}.hosts WHERE host_id = 'probe-unregistered-host'",
-        ],
-        capture_output=True, text=True, timeout=5, check=True,
-    )
-    assert query.stdout.strip() == "0", "Probe provisioned a host"
+    assert scenario.sql(
+        "SELECT count(*) FROM hosts WHERE host_id = 'probe-unregistered-host'"
+    ) == "0", "Probe provisioned a host"
 
 
 def test_lost_final_notification_refreshes_without_subsequent_events(scenario, paired_device, session_id):
@@ -784,10 +778,9 @@ def test_pairing_receipt_survives_lost_response_and_both_restarts(scenario):
         import hashlib
         from journey_helpers import sql
 
-        digest, hello, finish = sql(
-            scenario.schema,
-            "SELECT encode(auth_hash,'hex') || '|' || encode(hello_response,'hex') "
-            "|| '|' || encode(finish_response,'hex') FROM pairing_operations",
+        digest, hello, finish = scenario.sql(
+            "SELECT hex(auth_hash) || '|' || hex(hello_response) "
+            "|| '|' || hex(finish_response) FROM pairing_operations",
         ).split("|")
         assert digest and finish
         # The Core generates 32 random bytes in unpadded base64url form.

@@ -51,7 +51,7 @@ func integrationInput(body []byte) payload.ReserveInput {
 // A new service instance over the same database and directory repairs a stale
 // reservation without publishing incomplete data.
 func TestStorageRestartAbandonsStaleReservation(t *testing.T) {
-	db, _ := storetest.New(t)
+	db, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	root := t.TempDir()
 	first, err := payload.New(payload.Dependencies{Store: db, Config: integrationConfig(root)})
@@ -95,7 +95,7 @@ func TestStorageRestartAbandonsStaleReservation(t *testing.T) {
 
 // A file renamed before the metadata commit is published by reconciliation.
 func TestStorageRestartPublishesCommittedFile(t *testing.T) {
-	db, _ := storetest.New(t)
+	db, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	root := t.TempDir()
 	first, err := payload.New(payload.Dependencies{Store: db, Config: integrationConfig(root)})
@@ -147,7 +147,7 @@ func TestStorageRestartPublishesCommittedFile(t *testing.T) {
 
 // A failed file deletion keeps the charge and is retried by a later pass.
 func TestStorageCleanupRetriesFailedDeletion(t *testing.T) {
-	db, _ := storetest.New(t)
+	db, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	root := t.TempDir()
 	config := integrationConfig(root)
@@ -199,7 +199,7 @@ func TestStorageCleanupRetriesFailedDeletion(t *testing.T) {
 
 // The configured reserve is compared with actual filesystem free space.
 func TestStorageAdmissionRefusesBelowFreeSpaceReserve(t *testing.T) {
-	db, _ := storetest.New(t)
+	db, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	config := integrationConfig(t.TempDir())
 	config.FreeSpaceReserveBytes = 1 << 62
@@ -218,7 +218,7 @@ func TestStorageAdmissionRefusesBelowFreeSpaceReserve(t *testing.T) {
 // A distinct-owner node running its maintenance passes must not fence the
 // owner's finished object in the shared schema.
 func TestStoragePeerRecoveryDoesNotFenceOwnerObject(t *testing.T) {
-	db, _ := storetest.New(t)
+	db, _ := storetest.NewSQLite(t)
 	ctx := context.Background()
 	rootA, rootB := t.TempDir(), t.TempDir()
 	configA := integrationConfig(rootA)

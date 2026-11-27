@@ -8,7 +8,6 @@ import subprocess
 import pytest
 
 from environment import ROOT, wait
-from journey_helpers import sql
 
 pytestmark = pytest.mark.chain
 
@@ -52,7 +51,7 @@ def test_send_during_unavailable_presence_is_queued_and_delivered(
             sender.stdin.write("presence-window message\n")
             sender.stdin.flush()
             commands = "FROM requests WHERE command_id <> ''"
-            wait(lambda: sql(scenario.schema, "SELECT count(*) " + commands + " AND status='received'") == "1",
+            wait(lambda: scenario.sql("SELECT count(*) " + commands + " AND status='received'") == "1",
                  timeout=20)
             assert scenario.dsh.process.control("gx_effect_counts")["sendUserMessage"] == before
             scenario.access.close()
@@ -62,8 +61,8 @@ def test_send_during_unavailable_presence_is_queued_and_delivered(
                  timeout=30)
             output, _ = sender.communicate(timeout=40)
             assert sender.returncode == 0 and json.loads(output)["status"] == "succeeded"
-            assert sql(scenario.schema, "SELECT count(*) " + commands) == "1"
-            assert sql(scenario.schema, "SELECT status " + commands) == "succeeded"
+            assert scenario.sql("SELECT count(*) " + commands) == "1"
+            assert scenario.sql("SELECT status " + commands) == "succeeded"
         finally:
             if sender.poll() is None:
                 sender.kill()

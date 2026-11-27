@@ -265,9 +265,15 @@ func (tx *revokeDeviceTx) Exec(_ context.Context, sql string, args ...any) (pgco
 		step = "lock"
 	} else if strings.Contains(sql, "UPDATE devices") {
 		step = "generation"
+	} else if strings.Contains(sql, "UPDATE grants") {
+		step = "grants"
 	}
 	tx.steps = append(tx.steps, step)
-	if len(args) != 1 || args[0] != "device" {
+	if step == "grants" {
+		if len(args) != 2 || args[0] != "device" {
+			tx.t.Fatal("wrong grant scope")
+		}
+	} else if len(args) != 1 || args[0] != "device" {
 		tx.t.Fatal("wrong device scope")
 	}
 	if tx.fail == step {
@@ -290,7 +296,7 @@ func (tx *revokeDeviceTx) QueryRow(_ context.Context, _ string, args ...any) pgx
 }
 func (tx *revokeDeviceTx) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
 	tx.steps = append(tx.steps, "grants")
-	if !strings.Contains(sql, "UPDATE grants") || len(args) != 2 || args[0] != "device" {
+	if !strings.Contains(sql, "SELECT DISTINCT host_id FROM grants") || len(args) != 1 || args[0] != "device" {
 		tx.t.Fatal("wrong grant scope")
 	}
 	if tx.fail == "grants" {
@@ -316,7 +322,7 @@ func TestRevokeDeviceFencesAllGrantsAndCredentialsInOneTransaction(t *testing.T)
 		want       error
 		steps      []string
 	}{
-		{"success", "", true, nil, []string{"lock", "device", "generation", "grants", "credentials", "commit", "rollback"}},
+		{"success", "", true, nil, []string{"lock", "device", "generation", "grants", "grants", "credentials", "commit", "rollback"}},
 		{"missing device", "missing", false, nil, []string{"lock", "device", "rollback"}},
 		{"lock failure", "lock", false, errFenceTest, []string{"lock", "rollback"}},
 		{"device read failure", "device", false, errFenceTest, []string{"lock", "device", "rollback"}},
@@ -324,8 +330,8 @@ func TestRevokeDeviceFencesAllGrantsAndCredentialsInOneTransaction(t *testing.T)
 		{"grant failure", "grants", true, errFenceTest, []string{"lock", "device", "generation", "grants", "rollback"}},
 		{"scan failure", "scan", true, errFenceTest, []string{"lock", "device", "generation", "grants", "rollback"}},
 		{"rows failure", "rows", true, errFenceTest, []string{"lock", "device", "generation", "grants", "rollback"}},
-		{"credential failure", "credentials", true, errFenceTest, []string{"lock", "device", "generation", "grants", "credentials", "rollback"}},
-		{"commit failure", "commit", true, errFenceTest, []string{"lock", "device", "generation", "grants", "credentials", "commit", "rollback"}},
+		{"credential failure", "credentials", true, errFenceTest, []string{"lock", "device", "generation", "grants", "grants", "credentials", "rollback"}},
+		{"commit failure", "commit", true, errFenceTest, []string{"lock", "device", "generation", "grants", "grants", "credentials", "commit", "rollback"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &revokeDeviceTx{t: t, fail: tc.fail}

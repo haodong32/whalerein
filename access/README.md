@@ -4,7 +4,7 @@ Internal design: [Access architecture](../docs/architecture/access.md).
 
 WhaleRein Access is the Standalone-mode Go modular monolith for transport
 authorization, one-time pairing, `HostRequest` copies, and encrypted message
-relay. It owns one PostgreSQL database and one MQTT 5 broker session. It does
+relay. It owns one local SQLite database and one local MQTT 5 broker session. It does
 not execute DSH business logic and never parses encrypted payloads.
 
 The wire contract is `proto/v1/WIRE.md` and `proto/v1/whalerein.proto`. HTTPS
@@ -24,16 +24,16 @@ access/
    ├─ requests                request copy, dedupe and forwarding lease
    ├─ events                  device event routing by outer device_id
    ├─ broker                  MQTT 5 client, presence, callbacks support
-   ├─ store                   versioned PostgreSQL state and migrations
+   ├─ store                   node-local SQLite state and migrations
    └─ diagnostics             logs, /healthz, /readyz, /metrics
 ```
 
 Dependency direction: `httpapi -> auth,pairing,requests,payload`; `requests,events ->
 store,broker`; `pairing -> store,broker`; `auth -> store`; `payload -> store`; `auth` never imports
 `broker`, `broker` never imports `auth`, and `httpapi` never touches
-PostgreSQL or MQTT directly.
+SQLite or MQTT directly. No other Access node shares its store or broker.
 
-## PostgreSQL schema
+## Local SQLite schema
 
 All Access replicas must run the same version during a schema upgrade. Stop old
 replicas before applying migration 008 and start only versions that enforce its
@@ -51,7 +51,7 @@ proof columns to bypass that check.
 
 Pairing admission checks the original invitation, pending intent and COMMIT
 deadlines again after Host replies and database lock waits. Its final transaction
-check uses the later of the current Access and PostgreSQL clocks; FINISH also
+check uses the later of the current Access and local storage clocks; FINISH also
 preserves its earlier Access observation. A clock that runs ahead can cause early rejection;
 the check does not promise that the physical database commit finishes before the
 deadline.
@@ -148,7 +148,7 @@ substituted from the environment with `${NAME}` or `${NAME:-default}`. `$$`
 escapes a literal dollar sign. Missing required variables fail startup.
 
 ```bash
-export WHALEREIN_DATABASE_URL='postgres://postgres@127.0.0.1:55432/whalerein_access?sslmode=disable'
+export WHALEREIN_DATABASE_PATH='/var/lib/whalerein/data/access.db'
 export WHALEREIN_ADMIN_TOKEN='replace-me'
 export WHALEREIN_HOST_PROVISIONING_TOKEN='replace-me-too'
 export WHALEREIN_BROKER_PASSWORD='replace-me-three'
@@ -163,7 +163,11 @@ Configuration summary:
 | `mode` | `standalone` (default) or `external` with configured trust and region |
 | `listen` / `internal_listen` | public and internal listener addresses |
 | `public_url` | public Access URL used in pairing URIs |
-| `database_url` | PostgreSQL DSN |
+| `database_path` | absolute path to this node's SQLite database; it is never a network DSN |
+| `external.control_url` | Central base URL for managed node registration and heartbeats |
+| `external.node_id` / `external.incarnation` | This node's registered identity; a replacement disk gets a fresh incarnation |
+| `external.node_token` | Per-node bearer credential; Central holds the same value in `WHALEREIN_NODE_TOKENS` |
+| `external.node_capacity` | Whole-Host placement capacity advertised in the heartbeat |
 | `admin_token` | admin bearer for an invitation for any host, and for `DELETE /v1/devices/{id}`. A host mints its own invitation and revokes its own grant with an Ed25519 signature |
 | `host_provisioning_token` | shared deployment provisioning token |
 | `broker.url` | Access MQTT URL (`tcp://`, `tls://`, ...) |
@@ -228,7 +232,7 @@ warning. Set it explicitly for self-hosted brokers and official 443/ALPN.
 ## Docker Compose
 
 The Access server image is built by `deploy/docker/access.Dockerfile` and is
-part of `deploy/compose/stack.yaml` together with PostgreSQL 18 and Mosquitto 2.1.4:
+part of `deploy/compose/stack.yaml` together with Mosquitto 2.1.4:
 
 ```bash
 docker compose -f deploy/compose/stack.yaml up -d --build
@@ -239,6 +243,26 @@ Access runs its embedded migration before serving traffic; no separate
 `createdb`/`psql` step is needed. The compose credentials are development
 defaults and must be replaced for a shared deployment.
 
+### Node metrics
+
+The Access metrics endpoint exports bounded operational signals, including
+`access_control_last_success_unix_seconds` for Central control freshness and
+`access_route_attach_total{outcome}` / `access_route_close_total{outcome}` for
+Host route changes. Labels are bounded enums and never include Host/Device IDs,
+tokens or payload content.
+
+### Managed node control
+
+When all of `external.control_url`, `node_id`, `node_token` and `incarnation`
+are set, Access registers that incarnation with Central and sends a
+metadata-only heartbeat every ten seconds. The report sequence is persisted in
+the node's SQLite file, so a normal restart continues above the previous
+sequence. A replacement disk starts a new incarnation. A failed report is
+logged and retried; it never grants local authority. A managed Host receives
+this `node_id`/`incarnation` in its enrollment credential, signs the route
+tuple in `HostReady`, and Access verifies the enrolled Host keys before
+forwarding `HostRouteAttach` to Central.
+
 ## Local run
 
 Go 1.26+ is required. The root `go.mod` selects Go 1.27.4 for development when toolchain switching is enabled.
@@ -248,13 +272,13 @@ is already running, stop it first with
 
 ```bash
 # Dependencies only; the Access process runs natively below.
-docker compose -f deploy/compose/stack.yaml up -d postgres mosquitto
-# The compose file creates whalerein_dev and whalerein_test.
+docker compose -f deploy/compose/stack.yaml up -d mosquitto
+# Access creates its SQLite database under the mounted data volume.
 
 # Validate config and apply versioned migrations.
 cp access/config.example.yaml access/config.yaml
-# Set database_url to:
-# postgres://postgres@127.0.0.1:55432/whalerein_dev?sslmode=disable
+# Set database_path to a writable file on the node's own disk, for example
+# /var/lib/whalerein/data/access.db
 go run ./access/cmd/server -config access/config.yaml -check-config
 go run ./access/cmd/server -config access/config.yaml -migrate-only
 
@@ -419,7 +443,7 @@ will and the Host `HostReady` result remain the existing fallbacks when a
 notification is lost. Presence stays unavailable until the first snapshot
 establishes current state.
 
-Revocation installs a local Access deny before the PostgreSQL write, then denies
+Revocation installs a local Access deny before the SQLite write, then denies
 the matching broker scope and closes the device connection through
 `$CONTROL/whalerein/v1`. Completion requires the durable commit, the broker
 acknowledgement and the closure. Without a control path the broker fails closed
@@ -567,7 +591,7 @@ Database and MQTT integration tests run in the single Linux test container:
 ./repo test transport
 ```
 
-Pytest owns PostgreSQL, Mosquitto, fixture callbacks, and native driver execution.
+Pytest owns isolated SQLite databases, Mosquitto, fixture callbacks, and native driver execution.
 Go integration assertions use the `integration` build tag and are excluded from
 unit execution. Each database test uses an isolated schema; transport fixtures
 own their listeners instead of reusing development Access credentials. No opt-in
@@ -620,7 +644,7 @@ result-body budget derives from the selected profile (24 MiB for the default
 changes take effect only after a process restart.
 
 Pairing consumes the invitation and writes device/grant/activation-outbox state
-in one PostgreSQL transaction. The existing requests queue retries idempotent
+in one SQLite transaction. The existing requests queue retries idempotent
 host COMMIT delivery until its deadline, including after Access restart. IDs
 cannot be rebound to another public-key fingerprint. Pairing recovery reuses
 the identity; it never revokes an older active grant as compensation.
@@ -686,3 +710,37 @@ Advancing the configured serving authority gates old credentials on HTTP and
 MQTT and prevents prior-authority queued work from forwarding. The operator
 must enforce exclusive serving authority and current revocation state before
 promoting a different region or a restored database.
+
+## Standalone backup and restore
+
+Stop Access before taking the copy. The installation key is the original
+credential, not a key generated after the disk was lost. The manifest binds the
+database digest, installation id, quiesced flag and authorization revision with
+an HMAC.
+
+```sh
+# create: database is copied and the manifest is written beside it
+whalerein-access-backup create \
+  --database /var/lib/whalerein/data/access.db \
+  --out /backup/access.db \
+  --installation-id <id> \
+  --key-file /run/secrets/standalone-key \
+  --revision <final-authorized-revision>
+
+# verify: floor is the greatest revision independently known committed
+whalerein-access-backup verify \
+  --database /backup/access.db --manifest /backup/access.db.json \
+  --installation-id <id> --key-file /run/secrets/standalone-key \
+  --floor <proven-revision>
+
+# restore only onto a new, empty path
+whalerein-access-backup restore \
+  --backup /backup/access.db --manifest /backup/access.db.json \
+  --target /var/lib/whalerein/data/access.db \
+  --installation-id <id> --key-file /run/secrets/standalone-key \
+  --floor <proven-revision>
+```
+
+A stale or unprovable backup is refused. After restoring, start Access with the
+same installation key; a backup below the proven floor requires a fresh
+authority and explicit re-pairing.
