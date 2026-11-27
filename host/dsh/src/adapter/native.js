@@ -1,4 +1,5 @@
 import { PluginError } from 'whalerein-host/errors.js'
+import { boundReviewValue, normalizeReviewAvailability } from './review.js'
 
 export const EVENT_KINDS = Object.freeze([
   'output',
@@ -78,6 +79,10 @@ export function normalizeApproval(approval) {
     toolName: boundedApprovalText(approval.toolName),
     callId: boundedApprovalText(approval.callId),
     reason: boundedApprovalText(approval.reason, APPROVAL_REASON_MAX),
+    reviewAction: boundReviewValue(approval.reviewAction),
+    reviewTarget: boundReviewValue(approval.reviewTarget),
+    reviewImpact: boundReviewValue(approval.reviewImpact),
+    reviewAvailability: normalizeReviewAvailability(approval.reviewAvailability),
     digest: approval.digest instanceof Uint8Array ? approval.digest : new Uint8Array(approval.digest ?? 0),
     version: Number(approval.version ?? 0),
     expiresAt: Number(approval.expiresAt ?? 0),

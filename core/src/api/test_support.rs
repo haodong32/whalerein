@@ -15,8 +15,8 @@ use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use whalerein_proto::{
-    ChannelHello, ChannelReady, CommandResult, ErrorCode, ErrorResponse, HostInfo, HostList,
-    HostRequest, OnlineStatus, PairingClaimRequest, PairingClaimResponse, PairingFinish,
+    ChannelHello, ChannelReady, CommandResult, ErrorCode, ErrorResponse, HostDirectory, HostInfo,
+    HostList, HostRequest, OnlineStatus, PairingClaimRequest, PairingClaimResponse, PairingFinish,
     PairingHello, PairingHelloReply, PairingPhase, RequestKind, RequestReceipt, RequestState,
     ResponsePayload, SessionList, SessionSummary,
 };
@@ -288,6 +288,9 @@ pub struct FakeHost {
     pub fail_revoke_before: bool,
     pub drop_revoke_receipt: bool,
     pub drop_pair_finish_once: bool,
+    /// Host-owned grant identity returned on a successful FINISH. Empty means
+    /// a legacy Host that predates Host-owned grants.
+    pub pair_grant_id: String,
     pub pair_finish_calls: usize,
     pub pair_hello_calls: usize,
     pub pair_hello_delay_ms: u64,
@@ -298,7 +301,17 @@ pub struct FakeHost {
     pub fence_pair_finish_status: u16,
     pub saved_pair_finish: Option<(Vec<u8>, Vec<u8>)>,
     pub fail_hosts: bool,
+    /// Answer the device directory with a 403 instead of a 401.
+    pub forbid_hosts: bool,
     pub hosts_delay_ms: u64,
+    /// Advisory pre-pair directory values served by the fake Access route.
+    pub directory_display_name: String,
+    pub directory_os_family: String,
+    /// Force the directory route to fail with this status.
+    pub directory_status: Option<u16>,
+    /// Serve this raw malformed body instead of the protojson directory.
+    pub directory_body: Option<Vec<u8>>,
+    pub directory_delay_ms: u64,
     pub fail_pending_queue: bool,
     /// Test-only override for the session id a queue read reports.
     pub pending_queue_session_override: Option<String>,
@@ -349,6 +362,10 @@ pub struct FakeHost {
     pub channel_capabilities: Option<whalerein_proto::CapabilitySet>,
     /// Receive advertisement the device supplied in `ChannelHello`.
     pub last_hello_receive: Option<whalerein_proto::ReceiveAdvertisement>,
+    /// Grant identity the device sent in the last authenticated `ChannelHello`.
+    pub last_hello_grant_id: String,
+    /// Forces a different grant echo in `ChannelReady`, for mismatch tests.
+    pub ready_grant_override: Option<String>,
     /// Overrides the Host receive advertisement in `ChannelReady`.
     pub channel_receive: Option<whalerein_proto::ReceiveAdvertisement>,
     /// Omits the Host receive advertisement to exercise the explicit failure.
@@ -712,6 +729,7 @@ impl FakeHost {
             fail_revoke_before: false,
             drop_revoke_receipt: false,
             drop_pair_finish_once: false,
+            pair_grant_id: String::new(),
             pair_finish_calls: 0,
             pair_hello_calls: 0,
             pair_hello_delay_ms: 0,
@@ -722,7 +740,13 @@ impl FakeHost {
             fence_pair_finish_status: 409,
             saved_pair_finish: None,
             fail_hosts: false,
+            forbid_hosts: false,
             hosts_delay_ms: 0,
+            directory_display_name: "Studio Mac".into(),
+            directory_os_family: "macos".into(),
+            directory_status: None,
+            directory_body: None,
+            directory_delay_ms: 0,
             fail_pending_queue: false,
             pending_queue_session_override: None,
             pending_queue_wrong_payload: false,
@@ -764,6 +788,8 @@ impl FakeHost {
             reject_channel_handshakes: false,
             channel_capabilities: None,
             last_hello_receive: None,
+            last_hello_grant_id: String::new(),
+            ready_grant_override: None,
             channel_receive: None,
             omit_channel_receive: false,
             revoke_after_command: false,
@@ -860,6 +886,9 @@ impl FakeHost {
                 if self.revoked {
                     return error_response(401, ErrorCode::Unauthorized, "unauthorized");
                 }
+                if self.forbid_hosts {
+                    return error_response(403, ErrorCode::Forbidden, "forbidden");
+                }
                 if self.fail_hosts {
                     return error_response(503, ErrorCode::Unavailable, "unavailable");
                 }
@@ -890,6 +919,34 @@ impl FakeHost {
                     self.revoke_after_hosts = false;
                     self.revoked = true;
                 }
+                response
+            }
+            ("GET", ["v1", "hosts", host_id, "directory"]) => {
+                if *host_id != self.host_id
+                    || request.headers.get("authorization")
+                        != Some(&format!("Bearer {}", self.token))
+                {
+                    return error_response(404, ErrorCode::NotFound, "not found");
+                }
+                if let Some(status) = self.directory_status {
+                    return error_response(status, ErrorCode::Unavailable, "unavailable");
+                }
+                let mut response = match &self.directory_body {
+                    Some(body) => MockResponse {
+                        status: 200,
+                        body: body.clone(),
+                        delay_ms: 0,
+                    },
+                    None => MockResponse::json(
+                        200,
+                        &HostDirectory {
+                            host_id: (*host_id).to_owned(),
+                            display_name: self.directory_display_name.clone(),
+                            os_family: self.directory_os_family.clone(),
+                        },
+                    ),
+                };
+                response.delay_ms = self.directory_delay_ms;
                 response
             }
             ("POST", ["v1", "hosts", host_id, "requests"]) => {
@@ -1139,6 +1196,7 @@ impl FakeHost {
                         device_token: claim.device_token.clone(),
                         device_public_key: noise.remote_static().unwrap().to_vec(),
                         protocol_version: PROTOCOL_VERSION,
+                        grant_id: self.pair_grant_id.clone(),
                         ..Default::default()
                     },
                 )
@@ -1317,17 +1375,20 @@ impl FakeHost {
             if !payload.is_empty() {
                 return Err(ErrorCode::InvalidArgument);
             }
-            let hash = noise.handshake_hash().map_err(|_| ErrorCode::Internal)?;
+            let split = noise.split_keys().map_err(|_| ErrorCode::Internal)?;
             self.channel = Some(
-                SecureChannel::from_handshake(
-                    &hash,
-                    &prologue,
+                SecureChannel::from_split(
+                    split,
                     &request.channel_id,
                     &request.host_id,
                     &request.device_id,
                 )
                 .map_err(|_| ErrorCode::Internal)?,
             );
+            #[cfg(test)]
+            if let Some(channel) = self.channel.as_ref() {
+                channel.publish_state_for_test();
+            }
             return Ok((OnlineStatus::Succeeded, Vec::new()));
         }
 
@@ -1339,6 +1400,7 @@ impl FakeHost {
         let hello =
             ChannelHello::decode(payload.as_slice()).map_err(|_| ErrorCode::InvalidArgument)?;
         self.last_hello_receive = hello.receive;
+        self.last_hello_grant_id = hello.grant_id.clone();
         if hello.protocol_version != PROTOCOL_VERSION {
             return Err(ErrorCode::ProtocolVersionIncompatible);
         }
@@ -1361,6 +1423,12 @@ impl FakeHost {
                         .expect("fixture receive advertisement")
                 }))
             },
+            // A new Host echoes the grant it verified; the fixture can force a
+            // mismatch to exercise the Device-side check.
+            grant_id: self
+                .ready_grant_override
+                .clone()
+                .unwrap_or_else(|| hello.grant_id.clone()),
         };
         let message = noise
             .write(&ready.encode_to_vec())

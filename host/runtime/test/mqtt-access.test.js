@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { randomBytes } from 'node:crypto'
-import { MqttAccess } from '../src/access/mqtt.js'
+import { MqttAccess, sanitizeReadyDisplayName, sanitizeReadyOsFamily } from '../src/access/mqtt.js'
 import { ConfigError } from '../src/config.js'
 import { codec } from '../src/protocol.js'
 import { transportProfileBudget } from '../src/contracts/transport.js'
@@ -65,6 +65,13 @@ function makeAccess(overrides = {}) {
     ...overrides,
   })
   return { broker, access, options, accesses }
+}
+
+function hostReadyFrom(broker, index = -1) {
+  const messages = broker.messages.filter((message) => message.topic === RESULT_TOPIC)
+  const message = messages.at(index)
+  assert.ok(message, 'a HostReady result was published')
+  return proto.decode('whalerein.v1.HostReady', proto.decode('whalerein.v1.HostResult', message.payload).result_body)
 }
 
 function request(overrides = {}) {
@@ -178,6 +185,65 @@ test('when MQTT connects, Access uses MQTT 5 identity, subscribes to its request
   await access.stop()
   assert.equal(access.connected, false)
   assert.equal(access.describe().connected, false)
+})
+
+test('HostReady carries bounded directory metadata on connect and reconnect', async () => {
+  const { broker, access } = makeAccess({
+    displayName: '  Hao\u0000dong\u009F MacBook  ',
+    osFamily: 'macOS',
+  })
+  access.start({})
+  await access.waitForConnected(2000)
+  const first = hostReadyFrom(broker)
+  assert.equal(first.host_id, 'host-1')
+  assert.equal(first.display_name, 'Haodong MacBook')
+  assert.equal(first.os_family, 'macOS')
+  assert.equal(access.hostId, 'host-1', 'display metadata never feeds the Host id')
+  assert.equal(access.requestTopic, REQUEST_TOPIC)
+  assert.equal(access.resultTopic, RESULT_TOPIC)
+
+  broker.disconnectClientId('whalerein-host-host-1')
+  await waitFor(() => access.connected === false)
+  await waitFor(() => access.connected === true, 5000)
+  const second = hostReadyFrom(broker)
+  assert.equal(second.host_id, 'host-1')
+  assert.equal(second.display_name, 'Haodong MacBook')
+  assert.equal(second.os_family, 'macOS')
+  assert.ok(second.receive.connection_generation > first.receive.connection_generation)
+  await access.stop()
+})
+
+test('HostReady omits empty or invalid directory metadata and bounds overlong values', async () => {
+  const cases = [
+    { label: 'empty', displayName: '', osFamily: '', display: undefined, os: undefined },
+    { label: 'null', displayName: null, osFamily: null, display: undefined, os: undefined },
+    { label: 'control-only', displayName: '\u0000\u001F\u007F\u009F  ', osFamily: 'lin\u0000ux', display: undefined, os: undefined },
+    { label: 'overlong', displayName: 'x'.repeat(80), osFamily: 'a'.repeat(17), display: 'x'.repeat(64), os: undefined },
+    { label: 'invalid os characters', displayName: 'Host', osFamily: 'linux/x86_64', display: 'Host', os: undefined },
+    { label: 'valid bounded values', displayName: '  Host  ', osFamily: 'Windows 11', display: 'Host', os: 'Windows 11' },
+  ]
+  for (const entry of cases) {
+    const { broker, access } = makeAccess({ displayName: entry.displayName, osFamily: entry.osFamily })
+    access.start({})
+    await access.waitForConnected(2000)
+    const body = hostReadyFrom(broker)
+    assert.equal(body.host_id, 'host-1', entry.label)
+    assert.equal(body.display_name, entry.display, entry.label)
+    assert.equal(body.os_family, entry.os, entry.label)
+    await access.stop()
+  }
+})
+
+test('directory metadata sanitizers stay bounded and drop C0/C1 controls', () => {
+  assert.equal(sanitizeReadyDisplayName(undefined), '')
+  assert.equal(sanitizeReadyDisplayName('\u0000\u001F\u007F\u009F'), '')
+  assert.equal(sanitizeReadyDisplayName('  A\u0000B\u009FC  '), 'ABC')
+  assert.equal(sanitizeReadyDisplayName('x'.repeat(80)).length, 64)
+  assert.equal(sanitizeReadyOsFamily(undefined), '')
+  assert.equal(sanitizeReadyOsFamily('  macOS  '), 'macOS')
+  assert.equal(sanitizeReadyOsFamily('a'.repeat(17)), '')
+  assert.equal(sanitizeReadyOsFamily('linux/x86_64'), '')
+  assert.equal(sanitizeReadyOsFamily('Windows 11'), 'Windows 11')
 })
 
 test('a request with another relay epoch is rejected before business dispatch, never framed with WRMQTT2', async () => {
@@ -761,6 +827,8 @@ test('a route-enabled HostReady carries a proof for the serving node', async () 
   const publicKey = ed25519.getPublicKey(privateKey)
   const noiseKey = new Uint8Array(32).fill(6)
   const { broker, access } = makeAccess({
+    displayName: 'Route Host',
+    osFamily: 'Linux',
     authorizationPublicKey: publicKey,
     authorizationPrivateKey: privateKey,
     routeNodeId: 'node-a',
@@ -774,6 +842,8 @@ test('a route-enabled HostReady carries a proof for the serving node', async () 
   await access.waitForConnected(2000)
   const ready = broker.messages.find((message) => message.topic === RESULT_TOPIC)
   const body = proto.decode('whalerein.v1.HostReady', proto.decode('whalerein.v1.HostResult', ready.payload).result_body)
+  assert.equal(body.display_name, 'Route Host')
+  assert.equal(body.os_family, 'Linux')
   assert.equal(body.route_generation, 4)
   assert.equal(body.route_service, 'official')
   assert.equal(body.route_environment, 'staging')

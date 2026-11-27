@@ -2,7 +2,7 @@
 //
 // It performs routing, bearer authentication and protojson encoding only. It
 // never accesses PostgreSQL or MQTT directly; all state work goes through the
-// auth, pairing and requests services.
+// auth, pairing, directory and requests services.
 package httpapi
 
 import (
@@ -24,6 +24,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/external"
 	"github.com/whalerein/whalerein/access/internal/policy"
 	"github.com/whalerein/whalerein/access/internal/requests"
+	"github.com/whalerein/whalerein/access/internal/selfstatus"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
@@ -58,12 +59,24 @@ type PairingService interface {
 	Claim(ctx context.Context, request *whalereinv1.PairingClaimRequest) (*whalereinv1.PairingClaimResponse, error)
 }
 
+// DirectoryService is the pre-pair Host display directory boundary. It reads
+// only the exact unfinished invitation identified by the caller's token hash.
+type DirectoryService interface {
+	HostDirectory(ctx context.Context, hostID string, tokenHash []byte, now time.Time) (store.HostDirectory, error)
+}
+
 // RequestService is the requests package boundary used by HTTP.
 type RequestService interface {
 	Submit(ctx context.Context, input requests.SubmitInput) (store.Request, bool, error)
 	Release(ctx context.Context, deviceID, sessionID, requestID string, deliveryLimitBytes int64) (store.Request, error)
 	Get(ctx context.Context, deviceID, requestID string) (store.Request, error)
 	Heartbeat(ctx context.Context, deviceID, sessionID, requestID string) (store.Request, error)
+}
+
+// SelfStatusService is the bounded bootstrap relay boundary. A nil service
+// keeps the route registered and answers unsupported_capability.
+type SelfStatusService interface {
+	Submit(ctx context.Context, input selfstatus.Input) (*whalereinv1.SelfStatus, error)
 }
 
 // Dependencies wires the HTTP server.
@@ -73,15 +86,24 @@ type Dependencies struct {
 	Auth                     AuthService
 	Pairing                  PairingService
 	Requests                 RequestService
-	Readiness                *diagnostics.Readiness
-	Metrics                  *diagnostics.Metrics
-	Masker                   *diagnostics.Masker
-	Logger                   *slog.Logger
-	InternalToken            string
-	MaxBodyBytes             int64
-	ClientAddress            *clientaddr.Resolver
-	ClientReference          *clientaddr.Referencer
-	HostPresence             external.HostPresence
+	// Directory serves the pre-pair Host display directory. A nil value keeps
+	// the route registered and answers unavailable.
+	Directory       DirectoryService
+	Readiness       *diagnostics.Readiness
+	Metrics         *diagnostics.Metrics
+	Masker          *diagnostics.Masker
+	Logger          *slog.Logger
+	InternalToken   string
+	MaxBodyBytes    int64
+	ClientAddress   *clientaddr.Resolver
+	ClientReference *clientaddr.Referencer
+	HostPresence    external.HostPresence
+	// SelfStatus is the bounded HTTPS bootstrap relay for a Device that lost the
+	// last ordinary grant receipt. It is not an ordinary submission path.
+	SelfStatus SelfStatusService
+	// SelfStatusMaxBytes bounds the bootstrap envelope. Zero takes the package
+	// ceiling.
+	SelfStatusMaxBytes int64
 	// Relay is the temporary ciphertext directory. A nil value keeps the
 	// routes registered and answers unsupported_capability.
 	Relay RelayService
@@ -157,7 +179,9 @@ func (s *Server) publicRoutes() []routeSpec {
 		{method: http.MethodPost, pattern: "/v1/pairing/invitations", handler: s.handleInvitation},
 		{method: http.MethodPost, pattern: "/v1/pairing/claims", handler: s.handleClaim},
 		{method: http.MethodGet, pattern: "/v1/hosts", handler: s.handleHosts},
+		{method: http.MethodGet, pattern: "/v1/hosts/{host_id}/directory", handler: s.handleHostDirectory},
 		{method: http.MethodPost, pattern: "/v1/hosts/{host_id}/requests", handler: s.handleSubmit},
+		{method: http.MethodPost, pattern: "/v1/hosts/{host_id}/self-status", handler: s.handleSelfStatus},
 		{method: http.MethodGet, pattern: "/v1/requests/{request_id}", handler: s.handleGetRequest},
 		{method: http.MethodPost, pattern: "/v1/requests/{request_id}/heartbeat", handler: s.handleHeartbeat},
 		{method: http.MethodDelete, pattern: "/v1/devices/{device_id}", handler: s.handleDeleteDevice},

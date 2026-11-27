@@ -375,8 +375,15 @@ test('approval text is bounded on the wire and native tool arguments never enter
   const wire = listed.response.approval_list.approvals[0]
   assert.ok(wire.reason.length > 0 && wire.reason.length <= 1024)
   assert.deepEqual(Object.keys(wire).sort(), [
-    'approval_id', 'call_id', 'decision', 'digest', 'expires_at_unix_ms', 'reason', 'session_id', 'state', 'tool_name', 'version',
+    'approval_id', 'call_id', 'decision', 'digest', 'expires_at_unix_ms', 'reason',
+    'review_action', 'review_availability', 'review_impact', 'review_target',
+    'session_id', 'state', 'tool_name', 'version',
   ])
+  // The list path is read-scoped and never releases protected review detail.
+  assert.equal(wire.review_action, '')
+  assert.equal(wire.review_target, '')
+  assert.equal(wire.review_impact, '')
+  assert.equal(wire.review_availability, 'approval_review_unavailable')
   assert.equal(JSON.stringify(wire).includes('arguments'), false)
   assert.equal(JSON.stringify(wire).includes('parameters'), false)
 })

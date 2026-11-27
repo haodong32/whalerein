@@ -10,6 +10,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/pairing"
 	"github.com/whalerein/whalerein/access/internal/relay"
 	"github.com/whalerein/whalerein/access/internal/requests"
+	"github.com/whalerein/whalerein/access/internal/selfstatus"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 )
@@ -22,8 +23,11 @@ var (
 	errUnsupportedMediaType = errors.New("unsupported content type")
 	errBodyTooLarge         = errors.New("request body too large")
 	errMissingAuth          = errors.New("missing bearer token")
+	errDirectoryNotFound    = errors.New("host directory not found")
+	errDirectoryUnavailable = errors.New("host directory unavailable")
 	errInternalToken        = errors.New("invalid internal callback token")
 	errPanic                = errors.New("handler panic")
+	errSelfStatusDisabled   = errors.New("self-status relay is not configured")
 )
 
 type errorInfo struct {
@@ -86,6 +90,30 @@ func classify(err error) errorInfo {
 		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "relay storage pressure", "storage_pressure"}
 	case errors.Is(err, relay.ErrUnavailable):
 		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "relay directory unavailable", ""}
+	case errors.Is(err, errSelfStatusDisabled):
+		return errorInfo{http.StatusNotImplemented, whalereinv1.ErrorCode_unsupported_capability,
+			"self-status relay is not configured on this Access deployment", ""}
+	case errors.Is(err, selfstatus.ErrInvalid):
+		return errorInfo{http.StatusBadRequest, whalereinv1.ErrorCode_invalid_argument, "invalid self-status request", ""}
+	case errors.Is(err, selfstatus.ErrInaccessible):
+		// Deliberately identical to every other absent tuple: an unknown Host, a
+		// foreign grant and a Host refusal must not be distinguishable.
+		return errorInfo{http.StatusNotFound, whalereinv1.ErrorCode_not_found, "not found", ""}
+	case errors.Is(err, selfstatus.ErrReplay):
+		return errorInfo{http.StatusConflict, whalereinv1.ErrorCode_conflict, "self-status exchange already used", ""}
+	case errors.Is(err, selfstatus.ErrBusy):
+		return errorInfo{http.StatusTooManyRequests, whalereinv1.ErrorCode_rate_limited,
+			"self-status admission limit reached", "admission_limit"}
+	case errors.Is(err, selfstatus.ErrHostOffline):
+		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "self-status pending", "host_offline"}
+	case errors.Is(err, selfstatus.ErrTimeout), errors.Is(err, selfstatus.ErrHostUnavailable):
+		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "self-status pending", "self_status_pending"}
+	case errors.Is(err, errDirectoryNotFound):
+		// Invalid, unknown, expired and already-used invitations share one
+		// response, so the route discloses nothing about the Host or token.
+		return errorInfo{http.StatusNotFound, whalereinv1.ErrorCode_not_found, "not found", ""}
+	case errors.Is(err, errDirectoryUnavailable):
+		return errorInfo{http.StatusServiceUnavailable, whalereinv1.ErrorCode_unavailable, "service unavailable", ""}
 	case errors.Is(err, errMissingAuth), errors.Is(err, auth.ErrUnauthorized), errors.Is(err, pairing.ErrUnauthorized), errors.Is(err, errInternalToken):
 		return errorInfo{http.StatusUnauthorized, whalereinv1.ErrorCode_unauthorized, "unauthorized", ""}
 	case denial != nil:

@@ -203,6 +203,8 @@ final class FixtureSessionService: SessionService {
                 accessURL: value.accessURL,
                 fingerprint: FixtureCatalog.fingerprint,
                 fingerprintDisplay: FixtureCatalog.fingerprintDisplay,
+                displayName: "Studio Mac",
+                osFamily: "macOS",
                 expiresAt: clock.now().addingTimeInterval(120)
             )
             pendingPrompt = prompt
@@ -1013,7 +1015,13 @@ final class FixtureSessionService: SessionService {
                 version: current.version + 1,
                 expiresAtUnixMs: current.expiresAtUnixMs,
                 digestHex: "b7e2c4a6d8f01e3c5a7b9d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c",
-                state: .pending
+                state: .pending,
+                review: ApprovalReviewDetails(
+                    action: "Run the updated release verification script",
+                    target: "tools/release/verify-v2.sh",
+                    impact: "Executes the updated checks and replaces the previous report.",
+                    availability: .complete
+                )
             )
             approvalsBySession[sessionId] = current
             emit(.approvalChanged(current), hostId: hostId, sessionId: sessionId)
@@ -1055,25 +1063,16 @@ final class FixtureSessionService: SessionService {
 
     // MARK: - Diagnostics
 
-    func diagnosticsPreview() async throws -> DiagnosticsReport {
+    func diagnosticsCapture(refresh: Bool) async throws -> DiagnosticsCapture {
         try requirePaired()
         if options.diagnosticsFailure {
             throw SessionServiceError(.unavailable)
         }
-        let now = clock.now()
-        return FixtureCatalog.diagnostics(now: now)
+        return FixtureCatalog.diagnostics(now: clock.now())
     }
 
     func clearDiagnostics() async throws {
         // The fixture has no Core journal to clear.
-    }
-
-    func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {
-        try requirePaired()
-        let report = try await diagnosticsPreview()
-        let text = DiagnosticsRedactor.exportText(report: report)
-        try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtection])
-        return report
     }
 
     // MARK: - Device lifecycle

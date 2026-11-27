@@ -1,6 +1,8 @@
-// App lifecycle: background flushes the draft, hides content and records a
-// resume marker; foreground starts a fresh watch and resyncs the visible
-// session. The visible-watch tests use the deterministic stub service.
+// App lifecycle: inactive shields and pauses without touching the healthy
+// watch; background flushes the draft, stops the watch once and records a
+// resume marker; foreground starts one watch from the Core cursor and resyncs
+// the visible session. The visible-watch tests use the deterministic stub
+// service.
 
 import Foundation
 import Testing
@@ -25,7 +27,7 @@ struct AppLifecycleTests {
         return (app, preferences)
     }
 
-    @Test("background flushes the draft, shields content and records a resume marker")
+    @Test("background flushes the draft, shields content, stops the watch once and records a resume marker")
     func backgroundFlushesAndShields() async {
         let service = StubSessionService()
         let (app, _) = makeApp(service: service) { $0.paired = true }
@@ -41,20 +43,22 @@ struct AppLifecycleTests {
         #expect(app.isPrivacyShieldVisible)
         #expect(app.resumeMarker?.hostId == "studio-mac")
         #expect(app.resumeMarker?.sessionId == "s-001")
-        #expect(service.stopWatchCount == 0)
+        #expect(service.stopWatchCount == 1)
         #expect(app.conversation?.isSuspended == true)
+        #expect(app.conversation?.isRenderingPaused == true)
+        #expect(app.conversation?.eventSubscriptionCount == 1)
 
         let key = AppStorageLocations.sessionKey(hostId: "studio-mac", sessionId: "s-001")
         await waitUntil { service.savedDrafts[key] == "half-typed" }
         #expect(service.savedDrafts[key] == "half-typed")
     }
 
-    @Test("foreground restarts the watch and applies the new reset instead of a stale stream")
+    @Test("foreground restarts the watch from the cursor and applies the new reset instead of a stale stream")
     func foregroundResyncs() async {
         let service = StubSessionService()
         let (app, _) = makeApp(service: service) { $0.paired = true }
         await app.bootstrapConversation()
-        await waitUntil { service.activeStreamCount == 1 }
+        await waitUntil { service.activeStreamCount == 2 }
         service.emit(
             .reset(messages: [], approvals: []),
             sequence: 1
@@ -71,8 +75,10 @@ struct AppLifecycleTests {
         #expect(service.startWatchCalls.count == 2)
         #expect(app.conversation === conversation)
         #expect(app.conversation?.isSuspended == false)
+        #expect(app.conversation?.isRenderingPaused == false)
         #expect(app.conversation?.watchEnded == false)
         #expect(app.conversation?.lastAppliedSequence == -1)
+        #expect(app.conversation?.eventSubscriptionCount == 1)
 
         let resumed = ConversationMessage(
             messageId: "msg-resumed",
@@ -86,17 +92,34 @@ struct AppLifecycleTests {
         #expect(app.conversation?.loadState == .loaded)
     }
 
-    @Test("inactive is shielded before the system snapshot and active clears it")
+    @Test("inactive is shielded synchronously and keeps the healthy watch and probe")
     func scenePhaseShield() async {
         let service = StubSessionService()
         let (app, _) = makeApp(service: service) { $0.paired = true }
-        await app.launchRestore()
+        await app.bootstrapConversation()
+        await waitUntil { app.conversation?.eventSubscriptionCount == 1 }
+        service.emit(.reset(messages: [], approvals: []), sequence: 1)
+        await waitUntil { app.conversation?.loadState == .loaded }
+        let startWatches = service.startWatchCalls.count
+        let monitorStarts = service.startHostMonitorCalls.count
 
-        await app.handleScenePhase(.inactive)
+        let inactive = app.scenePhaseDidChange(.inactive)
+        // The shield is up before anything is awaited.
         #expect(app.isPrivacyShieldVisible)
+        #expect(app.conversation?.isRenderingPaused == true)
+        await inactive.value
+        #expect(service.stopWatchCount == 0)
+        #expect(service.stopHostMonitorCount == 0)
+        #expect(service.startWatchCalls.count == startWatches)
+        #expect(service.startHostMonitorCalls.count == monitorStarts)
+        #expect(app.connectivity.isOnline("studio-mac"))
 
         await app.handleScenePhase(.active)
         #expect(!app.isPrivacyShieldVisible)
+        #expect(app.conversation?.isRenderingPaused == false)
+        #expect(service.stopWatchCount == 0)
+        #expect(service.startWatchCalls.count == startWatches)
+        #expect(service.eventStreamCount == 2)
     }
 
     @Test("closing a conversation flushes a draft that is still inside the debounce window")
@@ -113,19 +136,24 @@ struct AppLifecycleTests {
         #expect(service.savedDrafts[key] == "close me now")
     }
 
-    @Test("suspending retains the observation and resuming keeps exactly one subscription")
+    @Test("suspending stops the watch once and resuming reuses the one subscription")
     func subscriptionLifecycle() async {
         let service = StubSessionService()
         let model = await makeStartedConversation(service: service)
         #expect(service.eventStreamCount == 1)
         #expect(service.activeStreamCount == 1)
+        #expect(service.startWatchCalls.count == 1)
 
         await model.suspendForBackground()
-        #expect(service.activeStreamCount == 1)
+        #expect(service.stopWatchCount == 1)
+        #expect(service.eventStreamCount == 1)
+        #expect(model.isSuspended)
 
         await model.resumeAfterForeground()
+        #expect(service.startWatchCalls.count == 2)
         #expect(service.eventStreamCount == 1)
         #expect(service.activeStreamCount == 1)
-        #expect(service.startWatchCalls.count == 1)
+        #expect(!model.isSuspended)
+        #expect(!model.watchEnded)
     }
 }

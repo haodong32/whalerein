@@ -39,3 +39,4 @@ export function createAdapter({ mode = 'auto', ctx, config, store, logger, now, 
 export { DshAdapter, normalizeEvent, normalizeSummary, normalizeApproval, EVENT_KINDS, CONTROL_EVENT_KINDS } from './base.js'
 export { FakeDshAdapter } from './fake.js'
 export { RealDshAdapter } from './real.js'
+export { describeApprovalRequest, normalizeReviewAvailability } from './review.js'

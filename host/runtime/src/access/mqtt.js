@@ -1,7 +1,8 @@
 // MQTT 5 over TLS transport. This is the plugin's only network connection:
 // no HTTP server and no inbound listener. It subscribes to its own request
-// topic and its exact host presence topic, and publishes only its own
-// result/event control topics plus the QoS 0 live topic.
+// topic, its private self-status service request topic and its exact host
+// presence topic, and publishes only its own result/event control topics, the
+// private self-status service reply topic plus the QoS 0 live topic.
 
 import { readFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
@@ -44,6 +45,33 @@ export function replyProperties({ requestId = '', expirySeconds = null } = {}) {
   return { properties, propertiesBytes }
 }
 
+// Directory metadata is bounded display data, never an identifier. The Host id,
+// route proof and grants are built without these values.
+const READY_DISPLAY_NAME_MAX = 64
+const READY_OS_FAMILY_MAX = 16
+const READY_OS_FAMILY = /^[A-Za-z0-9 ._-]+$/
+
+/** Bounded Host label for HostReady; C0/C1 controls are dropped. */
+export function sanitizeReadyDisplayName(value) {
+  const text = String(value ?? '')
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
+    .trim()
+  return Array.from(text).slice(0, READY_DISPLAY_NAME_MAX).join('').trim()
+}
+
+/** Bounded OS family for HostReady; anything outside the grammar is omitted. */
+export function sanitizeReadyOsFamily(value) {
+  const text = String(value ?? '').trim()
+  if (text === '' || text.length > READY_OS_FAMILY_MAX || !READY_OS_FAMILY.test(text)) return ''
+  return text
+}
+
+/**
+ * The self-status exchange is bounded to a few seconds end to end, so its
+ * reply never outlives the exchange. Other control replies derive their expiry
+ * from the request deadline; this lane has a fixed short ceiling.
+ */
+const SELF_STATUS_REPLY_TTL_MS = 5_000
 
 const TLS_TRUST_CODES = new Set([
   'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_UNTRUSTED', 'DEPTH_ZERO_SELF_SIGNED_CERT',
@@ -115,6 +143,8 @@ export class MqttAccess {
    * @param {string} [options.routeEnvironment] managed environment.
    * @param {number} [options.routeGeneration] durable monotonic route generation.
    * @param {Uint8Array} [options.routeNoisePublicKey] Host Noise public key.
+   * @param {string} [options.displayName] bounded Host directory label.
+   * @param {string} [options.osFamily] bounded Host directory OS family.
    * @param {import('../protocol.js').ProtoCodec} [options.codec]
    * @param {string|object} [options.transportProfile] packaged profile id or budget.
    */
@@ -122,6 +152,8 @@ export class MqttAccess {
     url,
     hostId,
     token,
+    displayName = '',
+    osFamily = '',
     authorizationPublicKey = null,
     authorizationPrivateKey = null,
     routeNodeId = '',
@@ -159,6 +191,10 @@ export class MqttAccess {
     this.url = url
     this.hostId = hostId
     this.token = token
+    // Display metadata is sanitized once at the transport boundary. It is
+    // neither logged nor used for topics, the route proof or the Host id.
+    this.displayName = sanitizeReadyDisplayName(displayName)
+    this.osFamily = sanitizeReadyOsFamily(osFamily)
     this.topics = topics(hostId)
     this.reconnectMinMs = reconnectMinMs
     this.reconnectMaxMs = reconnectMaxMs
@@ -239,15 +275,20 @@ export class MqttAccess {
 
   #verifyControlEnvelopes() {
     const envelopeLimit = this.budget.envelope_bytes
+    const readySample = {
+      host_id: this.hostId, connected_at_unix_ms: 1,
+      receive: {
+        profile: this.profile, budget: this.budget,
+        connection_generation: 1, relay_version: RELAY_VERSION,
+      },
+      relay_version: RELAY_VERSION,
+    }
+    // The HostReady budget check covers exactly the optional fields the live
+    // publish may add; empty metadata is absent on the wire.
+    if (this.displayName !== '') readySample.display_name = this.displayName
+    if (this.osFamily !== '') readySample.os_family = this.osFamily
     const samples = [
-      ['host_ready', 'whalerein.v1.HostReady', {
-        host_id: this.hostId, connected_at_unix_ms: 1,
-        receive: {
-          profile: this.profile, budget: this.budget,
-          connection_generation: 1, relay_version: RELAY_VERSION,
-        },
-        relay_version: RELAY_VERSION,
-      }],
+      ['host_ready', 'whalerein.v1.HostReady', readySample],
       ['channel_ready', 'whalerein.v1.ChannelReady', {
         host_id: this.hostId, device_id: 'device', protocol_version: PROTOCOL_VERSION,
         capabilities: { capabilities: ['sessions', 'events'], protocol_version: PROTOCOL_VERSION },
@@ -510,7 +551,7 @@ export class MqttAccess {
     this.logger?.info('mqtt_connected', { reconnects: this.#reconnects, generation })
     try {
       await new Promise((resolve, reject) => {
-        client.subscribe([this.topics.request, this.topics.presence], { qos: 1 }, (error, grants) => (error || grants?.some((grant) => grant.qos >= 128) ? reject(error ?? new Error('subscription rejected')) : resolve()))
+        client.subscribe([this.topics.request, this.topics.selfStatusRequest, this.topics.presence], { qos: 1 }, (error, grants) => (error || grants?.some((grant) => grant.qos >= 128) ? reject(error ?? new Error('subscription rejected')) : resolve()))
       })
     } catch {
       this.#lastErrorCode = 'unavailable'
@@ -558,6 +599,8 @@ export class MqttAccess {
       relay_version: RELAY_VERSION,
     }
     if (this.authorizationPublicKey) ready.authorization_public_key = this.authorizationPublicKey
+    if (this.displayName !== '') ready.display_name = this.displayName
+    if (this.osFamily !== '') ready.os_family = this.osFamily
     if (closing) ready.route_closing = true
     const route = this.route
     if (route.generation > 0 && route.nodeId && route.incarnation && route.service && route.environment &&
@@ -613,6 +656,15 @@ export class MqttAccess {
       try { this.#handlers.onPresence?.(event) } catch { /* presence must not break the MQTT loop */ }
       return
     }
+    // The private self-status request is decoded by the same complete-message
+    // transport and dispatched on its own bounded handler. It never enters the
+    // ordinary request kind router.
+    if (topic === this.topics.selfStatusRequest) {
+      this.#transport.receiveRequest(payload)
+        .then((request) => this.#dispatchSelfStatus(request))
+        .catch((error) => this.#onReceiveFailed(error, payload))
+      return
+    }
     if (topic !== this.topics.request) return
     const receivedAt = this.now()
     this.#transport.receiveRequest(payload)
@@ -625,12 +677,24 @@ export class MqttAccess {
         }
         return this.#dispatchRequest(request)
       })
-      .catch((error) => this.logger?.warn('transport_receive_failed', {
-        code: typeof error?.code === 'string' ? error.code : 'invalid_argument',
-        bytes: payload?.length ?? 0,
-        limit: this.budget.packet_bytes,
-        generation: this.#generation,
-      }))
+      .catch((error) => this.#onReceiveFailed(error, payload))
+  }
+
+  #onReceiveFailed(error, payload) {
+    this.logger?.warn('transport_receive_failed', {
+      code: typeof error?.code === 'string' ? error.code : 'invalid_argument',
+      bytes: payload?.length ?? 0,
+      limit: this.budget.packet_bytes,
+      generation: this.#generation,
+    })
+  }
+
+  #dispatchSelfStatus(request) {
+    // Same bounded containment as an ordinary request handler: a throwing
+    // handler is one failed reply, never a broken MQTT loop.
+    return Promise.resolve()
+      .then(() => this.#handlers.onSelfStatus?.(request))
+      .catch(() => this.logger?.error('self_status_handler_failed', { code: 'internal' }))
   }
 
   #dispatchRequest(request) {
@@ -785,6 +849,31 @@ export class MqttAccess {
       this.#observePublish(measurement, 'failed')
       throw error
     })
+  }
+
+  /**
+   * Publish one complete self-status result on the private service reply
+   * topic.
+   *
+   * The reply is always inline: Access resolves this lane from the message
+   * body only and never from a relay reference. It is bounded by the envelope
+   * budget, sent at QoS 1 and carries the fixed short exchange expiry.
+   */
+  async publishSelfStatusReply(payload) {
+    if (!(payload instanceof Uint8Array) || payload.length === 0) {
+      throw new PluginError('invalid_argument', 'self-status reply payload invalid')
+    }
+    const now = this.now()
+    const expirySeconds = messageExpirySeconds(now + SELF_STATUS_REPLY_TTL_MS, now)
+    const { properties } = replyProperties({ expirySeconds })
+    const measurement = { request: '', attempt: 1, kind: 'result', bytes: payload.length }
+    try {
+      await this.#publish(this.topics.selfStatusReply, payload, { qos: 1, properties })
+      this.#observePublish(measurement, 'accepted')
+    } catch (error) {
+      this.#observePublish(measurement, 'failed')
+      throw error
+    }
   }
 
   /** Publish one complete control EventEnvelope, inline or as a ready reference. */

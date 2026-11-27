@@ -14,10 +14,8 @@ import { createInterface } from 'node:readline'
 import {
   NoiseXX,
   generateKeypair,
-  deriveChannelKeys,
   fingerprint,
-  seal,
-  open,
+  requestAad,
   hex,
 } from '../../host/runtime/src/security/noise.js'
 
@@ -80,13 +78,21 @@ try {
   check(ready[1] === fingerprint(device.publicKey), 'rust remote fingerprint mismatch')
   check(ready[3] === channelId, 'channel id mismatch')
 
-  const keys = deriveChannelKeys(initiator.handshakeHash, prologue)
-  check(hex(keys.c2h) === ready[4], 'c2h mismatch')
-  check(hex(keys.h2c) === ready[5], 'h2c mismatch')
+  // The application keys come from the secret Noise Split outputs, so the
+  // Node and snow implementations must agree on the non-reversible fingerprint.
+  const cipher = initiator.takeChannelCipher()
+  check(ready[4] === cipher.keyFingerprint(), 'split key fingerprint mismatch')
 
-  const aad = Buffer.from('whalerein/v1/request|req-1|host-1|device-1|REQUEST_KIND_QUERY||1700000000000')
+  const aad = requestAad({
+    requestId: 'req-1',
+    hostId: 'host-1',
+    deviceId: 'device-1',
+    kind: 'REQUEST_KIND_QUERY',
+    commandId: '',
+    expiresAt: 1700000000000,
+  })
   const request = Buffer.from('fixed request payload')
-  const sealed = seal(keys.c2h, aad, request)
+  const sealed = cipher.seal('c2h', aad, request)
   send(`open ${hex(aad)} ${hex(sealed.nonce)} ${hex(sealed.ciphertext)}`)
   const opened = await nextLine()
   check(opened === `opened ${hex(request)}`, `rust open mismatch: ${opened}`)
@@ -96,8 +102,8 @@ try {
   const sealedLine = await nextLine()
   check(sealedLine.startsWith('sealed '), `expected sealed, got ${sealedLine}`)
   const [, nonceHex, ciphertextHex] = sealedLine.split(' ')
-  const decrypted = open(keys.h2c, aad, Buffer.from(nonceHex, 'hex'), Buffer.from(ciphertextHex, 'hex'))
-  check(decrypted !== null && hex(decrypted) === hex(reply), 'node open mismatch')
+  const decrypted = cipher.open('h2c', aad, Buffer.from(nonceHex, 'hex'), Buffer.from(ciphertextHex, 'hex'))
+  check(hex(decrypted) === hex(reply), 'node open mismatch')
 
   send('quit')
   console.log('rust-node noise xx interop: ok')

@@ -1,12 +1,19 @@
-// Diagnostics presentation: redacted preview, per-Host HTTPS/MQTT stages, and a
-// two-step share flow that writes the exported file only after confirmation.
+// Diagnostics presentation: one immutable redacted capture from Core, a
+// summary that only groups facts from those bytes, an always-available full
+// report rendered from the same bytes, and one explicit Share tap that stages a
+// protected copy and opens the system picker once.
+//
+// Local directory names and OS families are decoration resolved separately from
+// the capture. They never enter the document, the shared file, logs or metrics.
 
 import Foundation
 import Observation
 
 struct DiagnosticsShareFile: Identifiable, Hashable {
-    let id = UUID()
     let url: URL
+
+    /// The file URL is the identity so a redraw cannot restart the sheet.
+    var id: URL { url }
 }
 
 @MainActor
@@ -22,8 +29,13 @@ final class DiagnosticsModel {
     /// One state value for the screen; the legacy names below project from it.
     private(set) var state = DiagnosticsState()
 
-    private(set) var report: DiagnosticsReport?
-    private(set) var previewText = ""
+    /// The exact immutable capture. Every summary row parses `capture.text`,
+    /// the full report renders it, and share writes `capture.bytes`; nothing
+    /// else is serialized.
+    private(set) var capture: DiagnosticsCapture?
+    private(set) var summary = DiagnosticsSummary.empty
+    /// Local-only decoration keyed by the capture's anonymous label.
+    private(set) var localHosts: [String: DiagnosticsLocalHost] = [:]
 
     var loadState: LoadState {
         switch state.load {
@@ -39,78 +51,197 @@ final class DiagnosticsModel {
     }
 
     var statusKey: L10nKey? {
-        if case .cancelled = state.share { return .diagnosticsCancelled }
-        if case .ready = state.share { return .diagnosticsExported }
-        return nil
+        switch state.share {
+        case .finished(true): return .diagnosticsExported
+        case .finished(false): return .diagnosticsCancelled
+        default: return nil
+        }
     }
 
     var shareFile: DiagnosticsShareFile? {
         state.share.fileURL.map(DiagnosticsShareFile.init(url:))
     }
 
-    var exportCount: Int { state.exportCount }
+    var shareCount: Int { state.shareCount }
+
+    /// Always the captured document, verbatim.
+    var fullReport: String { capture?.text ?? "" }
+
+    var canShare: Bool {
+        capture != nil && state.isLoaded && state.share.allowsNewShare
+    }
 
     private let service: any SessionService
-    /// App-owned staging directory for the redacted report. A file is written
-    /// only after the user confirms, and never into a shared temporary area.
+    private let fileManager: FileManager
+    /// App-owned staging directory for the protected temporary copy.
     private let stagingDirectory: URL
 
-    init(service: any SessionService, stagingDirectory: URL? = nil) {
+    private static let fileNamePrefix = "WhaleRein-diagnostics-"
+
+    init(
+        service: any SessionService,
+        stagingDirectory: URL? = nil,
+        fileManager: FileManager = .default
+    ) {
         self.service = service
+        self.fileManager = fileManager
         self.stagingDirectory = stagingDirectory
-            ?? FileManager.default
-                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            ?? fileManager.temporaryDirectory
                 .appendingPathComponent("WhaleRein/diagnostics", isDirectory: true)
     }
 
-    var stages: [DiagnosticStage] { report?.stages ?? [] }
-    var lastFailureCode: String? { report?.lastFailureCode }
-    var coreRevision: String { report?.coreVersion ?? service.coreRevision }
-    var appVersion: String { report?.appVersion ?? service.appVersion }
-    var redactionFields: [String] { report?.redactionFields ?? [] }
+    func localHost(for label: String) -> DiagnosticsLocalHost? { localHosts[label] }
 
+    // MARK: - Capture
+
+    /// Initial load. An existing capture is kept until the user refreshes, so a
+    /// reappearing sheet does not silently replace the inspected document.
     func load() async {
+        guard loadState == .idle else { return }
+        await captureNow(refresh: false)
+    }
+
+    /// Explicit refresh: always produces a new capture. The previous document
+    /// and any prepared share file are discarded first.
+    func refresh() async {
+        guard loadState != .loading else { return }
+        await captureNow(refresh: true)
+    }
+
+    private func captureNow(refresh: Bool) async {
+        discardPreparedFile()
+        removeStagedFiles()
         state = DiagnosticsReduce.reduce(state, .loadStarted)
+        let generation = state.captureGeneration
+        capture = nil
+        summary = .empty
+        localHosts = [:]
         do {
-            let loaded = try await service.diagnosticsPreview()
-            report = loaded
-            previewText = DiagnosticsRedactor.preview(report: loaded)
+            let fresh = try await service.diagnosticsCapture(refresh: refresh)
+            guard generation == state.captureGeneration else { return }
+            let parsed = DiagnosticsSummaryParser.parse(fresh.text)
+            capture = fresh
+            summary = parsed
+            // The report is inspectable immediately; local decoration resolves
+            // separately and never delays or alters the captured bytes.
             state = DiagnosticsReduce.reduce(state, .loadSucceeded)
+            let decoration = await Self.uniqueLocalHosts(
+                await service.diagnosticsLocalHosts(for: fresh),
+                for: parsed.hosts.map(\.label)
+            )
+            guard generation == state.captureGeneration else { return }
+            localHosts = decoration
         } catch {
+            guard generation == state.captureGeneration else { return }
             let code = (error as? SessionServiceError)?.code ?? .internalError
+            capture = nil
+            summary = .empty
+            localHosts = [:]
             state = DiagnosticsReduce.reduce(state, .loadFailed(code))
         }
     }
 
-    /// Call when the user cancels the confirmation. Nothing is exported.
-    func cancelShare() {
-        state = DiagnosticsReduce.reduce(state, .shareCancelled)
+    // MARK: - Local decoration
+
+    static func uniqueLocalHosts(
+        _ candidates: [DiagnosticsLocalHost],
+        for labels: [String]
+    ) -> [String: DiagnosticsLocalHost] {
+        let known = Set(labels)
+        var counts: [String: Int] = [:]
+        for candidate in candidates {
+            counts[candidate.label, default: 0] += 1
+        }
+        var result: [String: DiagnosticsLocalHost] = [:]
+        for candidate in candidates {
+            let name = candidate.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard known.contains(candidate.label),
+                  counts[candidate.label] == 1,
+                  !name.isEmpty else {
+                continue
+            }
+            let os = candidate.osFamily?.trimmingCharacters(in: .whitespacesAndNewlines)
+            result[candidate.label] = DiagnosticsLocalHost(
+                label: candidate.label,
+                displayName: name,
+                osFamily: (os?.isEmpty ?? true) ? nil : os
+            )
+        }
+        return result
     }
 
-    /// Exports the redacted file into app-owned staging and returns it for the
-    /// system share sheet. Nothing is written before this confirmation.
-    func confirmShare() async {
-        guard let report else { return }
+    // MARK: - Share
+
+    /// One explicit Share tap. Stages a unique protected copy of the inspected
+    /// bytes and presents the system sheet once. A write failure opens nothing.
+    func share() async {
+        guard let capture, canShare else { return }
         state = DiagnosticsReduce.reduce(state, .shareStarted)
-        let url = stagingDirectory.appendingPathComponent("WhaleRein-diagnostics.json")
         do {
-            try FileManager.default.createDirectory(
-                at: stagingDirectory,
-                withIntermediateDirectories: true
-            )
-            _ = try await service.exportDiagnostics(to: url)
-            // Re-write locally with the same redaction so the exported file is
-            // guaranteed to match the preview even for a future live adapter.
-            let text = DiagnosticsRedactor.exportText(report: report)
-            try Data(text.utf8).write(to: url, options: [.atomic, .completeFileProtection])
-            state = DiagnosticsReduce.reduce(state, .shareExported(url))
+            let url = try stage(bytes: capture.bytes)
+            state = DiagnosticsReduce.reduce(state, .shareStaged(url))
         } catch {
-            let code = (error as? SessionServiceError)?.code ?? .internalError
-            state = DiagnosticsReduce.reduce(state, .shareFailed(code))
+            state = DiagnosticsReduce.reduce(state, .shareFailed(.internalError))
         }
     }
 
+    /// The system sheet finished (or was cancelled). Cleanup is idempotent.
+    func shareCompleted(completed: Bool) {
+        discardPreparedFile()
+        state = DiagnosticsReduce.reduce(state, .shareFinished(completed: completed))
+    }
+
+    /// The sheet was dismissed without a completion callback.
     func dismissShare() {
+        discardPreparedFile()
         state = DiagnosticsReduce.reduce(state, .shareDismissed)
+    }
+
+    private func stage(bytes: Data) throws -> URL {
+        try prepareStagingDirectory()
+        removeStagedFiles()
+        let url = stagingDirectory.appendingPathComponent(
+            Self.fileNamePrefix + UUID().uuidString + ".json"
+        )
+        do {
+            try bytes.write(
+                to: url,
+                options: [.atomic, .completeFileProtection]
+            )
+            try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return url
+        } catch {
+            try? fileManager.removeItem(at: url)
+            throw error
+        }
+    }
+
+    private func prepareStagingDirectory() throws {
+        try fileManager.createDirectory(
+            at: stagingDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? fileManager.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: stagingDirectory.path
+        )
+    }
+
+    private func discardPreparedFile() {
+        guard let url = state.share.fileURL else { return }
+        try? fileManager.removeItem(at: url)
+    }
+
+    /// Removes staged copies left by an earlier capture or launch. Only files
+    /// this model created are touched.
+    private func removeStagedFiles() {
+        let contents = (try? fileManager.contentsOfDirectory(
+            at: stagingDirectory,
+            includingPropertiesForKeys: nil
+        )) ?? []
+        for url in contents where url.lastPathComponent.hasPrefix(Self.fileNamePrefix) {
+            try? fileManager.removeItem(at: url)
+        }
     }
 }

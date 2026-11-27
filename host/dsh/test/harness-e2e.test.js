@@ -134,6 +134,62 @@ test('when FakeDSH requests approval, the client reads it and the host reports i
   }
 })
 
+test('an incomplete or unavailable review is approvable over the wire and its digest still binds', async () => {
+  const harness = await startHarness({
+    sessions: [{ sessionId: 's1', running: true }],
+    behavior: crashFree,
+  })
+  try {
+    const device = await harness.newPairedDevice('device-1')
+    const resolve = (approval, decision, commandId) => device.command({
+      resolve_approval: {
+        approval_id: approval.approvalId,
+        decision,
+        expected_digest: approval.digest,
+        expected_version: approval.version,
+      },
+    }, { commandId })
+
+    // Native DSH 0.2.2-rc.1 shape: toolName only, so no target is derivable
+    // and the review is incomplete. Allow is still accepted; the digest binds
+    // the projected facts that a client may display.
+    const approval = harness.adapter.requestApproval({ sessionId: 's1', toolName: 'write', reason: 'no call facts' })
+    assert.equal(approval.reviewAvailability, 'incomplete')
+    const stale = await device.command({
+      resolve_approval: {
+        approval_id: approval.approvalId,
+        decision: 'APPROVAL_DECISION_APPROVE',
+        expected_digest: new Uint8Array(32),
+        expected_version: approval.version,
+      },
+    }, { commandId: 'cmd-stale' })
+    assert.equal(stale.status, 'failed')
+    assert.equal(stale.errorCode, 'approval_version_mismatch')
+
+    const approved = await resolve(approval, 'APPROVAL_DECISION_APPROVE', 'cmd-approve')
+    assert.equal(approved.status, 'succeeded')
+    const now = await device.query({ get_approval: { approval_id: approval.approvalId } })
+    assert.equal(now.response.approval.state, 'APPROVAL_STATE_APPROVED')
+    const again = await resolve(approval, 'APPROVAL_DECISION_APPROVE', 'cmd-approve-again')
+    assert.equal(again.status, 'failed')
+    assert.equal(again.errorCode, 'approval_already_resolved')
+
+    // An unknown tool projects no review facts at all; Allow still settles.
+    const opaque = harness.adapter.requestApproval({ sessionId: 's1', toolName: 'acme_unknown_tool' })
+    assert.equal(opaque.reviewAvailability, 'unavailable')
+    assert.equal((await resolve(opaque, 'APPROVAL_DECISION_APPROVE', 'cmd-opaque')).status, 'succeeded')
+
+    // Reject stays available on the same incomplete shape.
+    const rejectable = harness.adapter.requestApproval({ sessionId: 's1', toolName: 'write' })
+    assert.equal(rejectable.reviewAvailability, 'incomplete')
+    assert.equal((await resolve(rejectable, 'APPROVAL_DECISION_REJECT', 'cmd-reject')).status, 'succeeded')
+    const rejected = await device.query({ get_approval: { approval_id: rejectable.approvalId } })
+    assert.equal(rejected.response.approval.state, 'APPROVAL_STATE_REJECTED')
+  } finally {
+    await harness.stop()
+  }
+})
+
 test('after reconnect, the host establishes a fresh channel and rejects old-channel frames', async () => {
   const harness = await startHarness({
     sessions: [{ sessionId: 's1', running: false }],
@@ -216,7 +272,10 @@ test('when a two MiB command crosses a 64 KiB broker frame limit, exact committe
       assert.equal(message.blocks[0].text.text,payload)
       assert.equal(message.blocks.some(block=>block.notice),false)
     }
-    const repeated=await device.send(sent.request)
+    // A retry is a fresh authenticated request with the same immutable command
+    // ID, not a replay of the old ciphertext. The Host must suppress the second
+    // native execution and replay the bound receipt.
+    const repeated=await device.command({send_message:{session_id:'s',text:payload}},{commandId:'large-once',expiresAt:sent.request.expires_at_unix_ms})
     assert.equal(repeated.status,'succeeded')
     assert.deepEqual(repeated.response,sent.response)
     const source=await harness.adapter.getSessionSnapshot('s')

@@ -11,9 +11,9 @@ import { TestSource } from './support/source.js'
 import { codec } from '../src/protocol.js'
 import { testConfig } from './support/config.js'
 import { silentLogger } from '../src/log.js'
-import { generateKeypair, open, requestAad, seal } from '../src/security/noise.js'
+import { generateKeypair, requestAad } from '../src/security/noise.js'
 import { sha256Bytes } from '../src/security/digest.js'
-import { DEFAULT_CONNECTION_REF, establishChannel } from './support/channel.js'
+import { DEFAULT_CONNECTION_REF, establishChannel, openFrame } from './support/channel.js'
 import { ed25519 } from '@noble/curves/ed25519.js'
 import { authorityCanonical, sessionProofCanonical } from '../src/security/authority.js'
 
@@ -120,7 +120,7 @@ function encryptedQuery({ security, store, channel, payload, plaintext: rawPaylo
     expiresAt,
   })
   const plaintext = rawPayload ?? proto.encode('whalerein.v1.RequestPayload', payload)
-  const sealed = seal(channel.c2h, aad, plaintext)
+  const sealed = channel.cipher.seal('c2h', aad, plaintext)
   const frame = proto.encode('whalerein.v1.EncryptedFrame', {
     channel_id: channelId,
     nonce: sealed.nonce,
@@ -312,7 +312,7 @@ test('when the host router receives an encrypted query, it maps adapter errors a
       expiresAt: request.expires_at_unix_ms,
     })
     const frame = proto.decode('whalerein.v1.EncryptedFrame', result.result_body)
-    const plaintext = open(channel.h2c, aad, frame.nonce, frame.ciphertext)
+    const plaintext = openFrame({ cipher: channel.cipher, direction: 'h2c', aad: aad, nonce: frame.nonce, ciphertext: frame.ciphertext })
     const response = proto.decode('whalerein.v1.ResponsePayload', plaintext)
     assert.equal(response.session_list.sessions.length, 1)
 
@@ -544,9 +544,17 @@ test('a command response sealing failure reports unknown and replays the durable
     assert.equal(JSON.stringify(result).includes('synthetic sealing failure'),false)
     assert.equal(calls,1)
     ctx.host.security.sealResult=original
+    // A retransmitted frame reuses its monotonic counter, so the channel
+    // rejects it as a replay before any native work. Recovery uses a fresh
+    // authenticated lookup, not resubmission of the captured frame.
     await ctx.access.handlers.onRequest(request)
     result=ctx.access.lastResult()
-    assert.equal(result.status,'succeeded')
+    assert.equal(result.status,'rejected')
+    assert.equal(calls,1,'the duplicate frame never re-executes')
+    const lookup=encryptedQuery({security:ctx.host.security,store:ctx.store,channel,payload:{get_command_result:{command_id:'queue-seal'}}})
+    await ctx.access.handlers.onRequest(lookup)
+    result=ctx.access.lastResult()
+    assert.equal(result.status,'succeeded','a fresh lookup returns the journaled receipt')
     assert.ok(result.result_body?.length)
     assert.equal(calls,1)
   } finally {await ctx.host.stop();ctx.store.close();rmSync(ctx.dir,{recursive:true,force:true})}
@@ -685,7 +693,7 @@ test('question reads enforce the complete encrypted HostResult budget without le
           const aad = requestAad({ requestId: lastRequest.request_id, hostId: 'host-1', deviceId: 'd1',
             kind: lastRequest.kind, commandId: '', expiresAt: lastRequest.expires_at_unix_ms })
           const frame = proto.decode('whalerein.v1.EncryptedFrame', result.result_body)
-          const response = proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, aad, frame.nonce, frame.ciphertext))
+          const response = proto.decode('whalerein.v1.ResponsePayload', openFrame({ cipher: channel.cipher, direction: 'h2c', aad: aad, nonce: frame.nonce, ciphertext: frame.ciphertext }))
           assert.equal(response.question_page.batches[0].content_unavailable, true)
           assert.equal(response.question_page.batches[0].questions.length, 0)
         } else {
@@ -717,7 +725,7 @@ test('question pages use authenticated device cursors that resume across a sourc
       const aad = requestAad({ requestId: request.request_id, hostId: 'host-1', deviceId: 'd1', kind: request.kind,
         commandId: '', expiresAt: request.expires_at_unix_ms })
       const frame = proto.decode('whalerein.v1.EncryptedFrame', result.result_body)
-      return { result, page: proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, aad, frame.nonce, frame.ciphertext)).question_page }
+      return { result, page: proto.decode('whalerein.v1.ResponsePayload', openFrame({ cipher: channel.cipher, direction: 'h2c', aad: aad, nonce: frame.nonce, ciphertext: frame.ciphertext })).question_page }
     }
     const first = (await query('')).page
     assert.deepEqual(first.batches.map(batch => batch.batch_id), ['one'])
@@ -1175,7 +1183,7 @@ test('canonical history packing is delivered whole by reference above the receiv
       kind: retried.request.kind, commandId: '', expiresAt: retried.request.expires_at_unix_ms,
     })
     const frame = proto.decode('whalerein.v1.EncryptedFrame', retried.result.result_body)
-    const response = proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, aad, frame.nonce, frame.ciphertext))
+    const response = proto.decode('whalerein.v1.ResponsePayload', openFrame({ cipher: channel.cipher, direction: 'h2c', aad: aad, nonce: frame.nonce, ciphertext: frame.ciphertext }))
     assert.deepEqual(response.history_page.batch.from_cursor, 'bookmark:a')
     assert.deepEqual(response.history_page.batch.to_cursor, 'bookmark:b')
     assert.equal(response.history_page.batch.changes[0].message.blocks[0].text.text.length, 4096,
@@ -1242,7 +1250,7 @@ test('typed send replies are scoped to the request and attachment transfers fail
     assert.equal(replyResult.status, 'succeeded')
     const aad = requestAad({ requestId: read.request_id, hostId: 'host-1', deviceId: 'd1', kind: read.kind, commandId: '', expiresAt: read.expires_at_unix_ms })
     const frame = proto.decode('whalerein.v1.EncryptedFrame', replyResult.result_body)
-    const response = proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, aad, frame.nonce, frame.ciphertext))
+    const response = proto.decode('whalerein.v1.ResponsePayload', openFrame({ cipher: channel.cipher, direction: 'h2c', aad: aad, nonce: frame.nonce, ciphertext: frame.ciphertext }))
     assert.equal(response.message_reply.session_id, 's1')
     assert.equal(response.message_reply.submitted_message_id, 'submitted-1')
     assert.equal(response.message_reply.state, 'MESSAGE_REPLY_COMMITTED')
@@ -1264,7 +1272,7 @@ test('typed send replies are scoped to the request and attachment transfers fail
     assert.equal(secondResult.status, 'succeeded')
     const secondAad = requestAad({ requestId: second.request_id, hostId: 'host-1', deviceId: 'd1', kind: second.kind, commandId: '', expiresAt: second.expires_at_unix_ms })
     const secondFrame = proto.decode('whalerein.v1.EncryptedFrame', secondResult.result_body)
-    const secondReply = proto.decode('whalerein.v1.ResponsePayload', open(channel.h2c, secondAad, secondFrame.nonce, secondFrame.ciphertext)).message_reply
+    const secondReply = proto.decode('whalerein.v1.ResponsePayload', openFrame({ cipher: channel.cipher, direction: 'h2c', aad: secondAad, nonce: secondFrame.nonce, ciphertext: secondFrame.ciphertext })).message_reply
     assert.equal(secondReply.session_id, 's1')
     assert.equal(secondReply.submitted_message_id, 'submitted-2')
 

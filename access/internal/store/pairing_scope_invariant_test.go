@@ -215,7 +215,7 @@ func TestPairingRecoveryFailsClosedWhenTransactionCannotStart(t *testing.T) {
 	if outcome, err := pairingOutcome(ctx, begin, "claim", "device"); outcome.Active || outcome.HostConfirmed || outcome.ClaimID != "" || !errors.Is(err, errFenceTest) {
 		t.Fatal("failed transaction reported a committed outcome")
 	}
-	if confirmed, err := confirmPairingHost(ctx, begin, "claim", "host", "device", "request", time.Time{}); confirmed || !errors.Is(err, errFenceTest) {
+	if confirmed, err := confirmPairingHost(ctx, begin, "claim", "host", "device", "request", "", time.Time{}); confirmed || !errors.Is(err, errFenceTest) {
 		t.Fatal("failed transaction reported Host confirmation")
 	}
 	if applied, err := applyHostResult(ctx, begin, HostResultUpdate{Status: whalereinv1.OnlineStatus_succeeded}); applied || !errors.Is(err, errFenceTest) {

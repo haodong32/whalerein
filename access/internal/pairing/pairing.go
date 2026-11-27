@@ -18,6 +18,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,7 +60,7 @@ type Store interface {
 	PairingOperation(ctx context.Context, claimID string) (store.PairingOperation, error)
 	PairingFenced(ctx context.Context, claimID, hostID, deviceID string) (bool, error)
 	PairingOutcome(ctx context.Context, claimID, deviceID string) (store.PairingOutcome, error)
-	ConfirmPairingHost(ctx context.Context, claimID, hostID, deviceID, requestID string, at time.Time) (bool, error)
+	ConfirmPairingHost(ctx context.Context, claimID, hostID, deviceID, requestID, grantID string, at time.Time) (bool, error)
 	GetRequest(ctx context.Context, requestID string) (store.Request, error)
 	GetHost(ctx context.Context, hostID string) (store.Host, error)
 	CreatePairingToken(ctx context.Context, tokenHash []byte, hostID string, expiresAt time.Time, at time.Time) error
@@ -119,6 +120,15 @@ type completedClaim struct {
 }
 
 // Service implements invitation and claim flows.
+// hostGrantIDPattern bounds the opaque Host-owned grant identity accepted from
+// a Host COMMIT acknowledgement. Access never derives it; it only refuses an
+// obviously malformed value instead of persisting it as an authority.
+var hostGrantIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
+
+func validHostGrantID(value string) bool {
+	return value == "" || hostGrantIDPattern.MatchString(value)
+}
+
 type Service struct {
 	store     Store
 	policy    PolicySink
@@ -192,6 +202,14 @@ func advertisedURL(raw string) string {
 	return parsed.String()
 }
 
+// HashInvitationToken returns the stored digest of a one-time invitation
+// token. The pre-pair directory read and the pairing flow must hash the same
+// way; both call this helper.
+func HashInvitationToken(token string) []byte {
+	digest := sha256.Sum256([]byte(token))
+	return digest[:]
+}
+
 // CreateInvitation creates a one-time token bound to one host. The database
 // stores only SHA-256(token).
 func (s *Service) CreateInvitation(ctx context.Context, hostID string) (*whalereinv1.PairingInvitation, error) {
@@ -209,10 +227,10 @@ func (s *Service) CreateInvitation(ctx context.Context, hostID string) (*whalere
 		return nil, fmt.Errorf("generate pairing token: %w", err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
-	hash := sha256.Sum256([]byte(token))
+	hash := HashInvitationToken(token)
 	now := s.now()
 	expires := now.Add(s.cfg.InvitationTTL)
-	if err := s.store.CreatePairingToken(ctx, hash[:], hostID, expires, now); err != nil {
+	if err := s.store.CreatePairingToken(ctx, hash, hostID, expires, now); err != nil {
 		return nil, fmt.Errorf("create pairing token: %w", err)
 	}
 	uri := fmt.Sprintf("whalerein://pair?v=1&access=%s",
@@ -268,8 +286,7 @@ func (s *Service) claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 		return nil, fmt.Errorf("%w: fingerprint confirmation is required", ErrInvalidClaim)
 	}
 
-	digest := sha256.Sum256([]byte(request.GetToken()))
-	hash := digest[:]
+	hash := HashInvitationToken(request.GetToken())
 	if scope != nil {
 		hash = scope.tokenHash()
 	}
@@ -411,6 +428,13 @@ func (s *Service) claim(ctx context.Context, request *whalereinv1.PairingClaimRe
 			}
 			var storedCommit whalereinv1.PairingClaimResult
 			ready := notice.Status == whalereinv1.OnlineStatus_succeeded && proto.Unmarshal(notice.ResultBody, &storedCommit) == nil && storedCommit.Authorized && storedCommit.DeviceId == request.DeviceId
+			if ready {
+				grantID := storedCommit.GetGrantId()
+				if !validHostGrantID(grantID) {
+					return nil, ErrHostRejected
+				}
+				response.GrantId = grantID
+			}
 			done := &completedClaim{ready: ready, cloud: scope != nil, managed: scope != nil && scope.SessionID != "", response: &response, commit: &whalereinv1.HostRequest{
 				RequestId: notice.RequestID, HostId: notice.HostID, DeviceId: notice.DeviceID, Kind: notice.Kind,
 				ProtocolVersion: notice.ProtocolVersion, Body: notice.RequestBody, ExpiresAtUnixMs: notice.ExpiresAt.UnixMilli()}}
@@ -485,7 +509,11 @@ func (s *Service) committedOutcome(ctx context.Context, request *whalereinv1.Pai
 	}
 	return &whalereinv1.PairingClaimResponse{ClaimId: outcome.ClaimID, HostId: outcome.HostID, DeviceId: outcome.DeviceID,
 		Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DevicePublicKey: outcome.DevicePublicKey,
-		DeviceToken: request.DeviceToken, ProtocolVersion: outcome.ProtocolVersion}, nil
+		DeviceToken: request.DeviceToken, ProtocolVersion: outcome.ProtocolVersion,
+		// The durable outcome carries the exact Host grant, so a retry after a
+		// lost response needs no new Host round trip. Empty stays empty when the
+		// Host predates grant IDs.
+		GrantId: outcome.GrantID}, nil
 }
 
 func (s *Service) hello(ctx context.Context, request *whalereinv1.PairingClaimRequest, token store.PairingToken, hashHex string, now time.Time, deviceGeneration, hostGeneration int64, scope *CloudScope) (*whalereinv1.PairingClaimResponse, error) {
@@ -653,6 +681,10 @@ func (s *Service) finish(ctx context.Context, request *whalereinv1.PairingClaimR
 	commit.TokenHash = ""
 	body, _ := proto.Marshal(commit)
 	notice := &whalereinv1.HostRequest{RequestId: "pair-commit-" + hex.EncodeToString(sha256SumCommit(token.HostID, request.DeviceId, request.ClaimId)), HostId: token.HostID, DeviceId: request.DeviceId, Kind: whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE, Body: body, ExpiresAtUnixMs: now.Add(s.cfg.ClaimTTL).UnixMilli(), ProtocolVersion: s.cfg.ProtocolVersion, TraceId: diagnostics.TraceID(ctx)}
+	// This operation receipt is written before the Host COMMIT, so it cannot
+	// name the grant yet. The committed Host grant ID is persisted with the
+	// durable outcome at confirmation (pairing_outcomes.grant_id) and returned
+	// by committedOutcome, which is the retry/lost-response path.
 	durableResponse := &whalereinv1.PairingClaimResponse{ClaimId: request.ClaimId, HostId: token.HostID,
 		Phase: whalereinv1.PairingPhase_PAIRING_PHASE_FINISH, DeviceId: request.DeviceId,
 		DevicePublicKey: claimResult.DevicePublicKey, ExpiresAtUnixMs: token.ExpiresAt.UnixMilli(), ProtocolVersion: request.ProtocolVersion}
@@ -758,10 +790,18 @@ func (s *Service) completeClaim(ctx context.Context, done *completedClaim) (*wha
 		if err != nil || result.GetStatus() != whalereinv1.OnlineStatus_succeeded || !committed.Authorized || committed.DeviceId != done.response.DeviceId || result.GetHostId() != done.response.HostId || result.GetDeviceId() != done.response.DeviceId || result.GetRequestId() != done.commit.RequestId {
 			return nil, ErrHostRejected
 		}
+		// The Host's COMMIT acknowledgement names the committed grant. Keep it
+		// on the response returned to the Device and persist it with the
+		// confirmation so a retry/lost-response path returns the same value.
+		grantID := committed.GetGrantId()
+		if !validHostGrantID(grantID) {
+			return nil, ErrHostRejected
+		}
+		done.response.GrantId = grantID
 		done.ready = true
 		s.logger.Info("pairing finished", "host", s.masker.Host(done.response.HostId), "device", s.masker.Device(done.response.DeviceId), "trace_id", diagnostics.TraceID(ctx))
 	}
-	confirmed, err := s.store.ConfirmPairingHost(ctx, done.response.ClaimId, done.response.HostId, done.response.DeviceId, done.commit.RequestId, s.now())
+	confirmed, err := s.store.ConfirmPairingHost(ctx, done.response.ClaimId, done.response.HostId, done.response.DeviceId, done.commit.RequestId, done.response.GrantId, s.now())
 	if err != nil {
 		return nil, ErrHostUnavailable
 	}

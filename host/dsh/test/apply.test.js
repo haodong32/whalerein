@@ -43,7 +43,7 @@ test('when a profile has a host ID, apply preserves it; otherwise it generates o
       },
       effect,
     }, { ...base, state_dir: dirs[1] })
-    assert.match(generated.config.hostId, /^[a-z0-9_.:-]+-[abcdefghjkmnpqrstuvwxyz23456789]{4}$/)
+    assert.match(generated.config.hostId, /^host-[abcdefghjkmnpqrstuvwxyz23456789]{20}$/)
     assert.equal(committed.length, 1)
     assert.equal(committed[0].event, 'internal/commit')
     assert.equal(committed[0].hostId, generated.config.hostId)
@@ -55,7 +55,7 @@ test('when a profile has a host ID, apply preserves it; otherwise it generates o
       },
       effect,
     }, { ...base, host_id: '   ', state_dir: dirs[2] })
-    assert.match(started.config.hostId, /^[a-z0-9_.:-]+-[abcdefghjkmnpqrstuvwxyz23456789]{4}$/)
+    assert.match(started.config.hostId, /^host-[abcdefghjkmnpqrstuvwxyz23456789]{20}$/)
     assert.equal(committed.length, 1)
   } finally {
     for (const dispose of disposers.reverse()) await dispose()
@@ -173,7 +173,7 @@ test('configuration helpers tolerate schemastery getters, plain errors and faili
   const directory = mkdtempSync(join(tmpdir(), 'whalerein-no-fiber-'))
   try {
     const generated = apply({ emit() {} }, { service: 'standalone', adapter: 'fake', mqtt_url: 'mqtts://127.0.0.1:1', host_token: 'token', state_dir: directory, host_id: '' })
-    assert.match(generated.config.hostId, /^[a-z0-9_.:-]+-[abcdefghjkmnpqrstuvwxyz23456789]{4}$/)
+    assert.match(generated.config.hostId, /^host-[abcdefghjkmnpqrstuvwxyz23456789]{20}$/)
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }

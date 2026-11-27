@@ -277,6 +277,10 @@ extension ConversationModel {
 
     func restartApprovalTimer(fastVerification: Bool = true) {
         stopApprovalTimer()
+        // Visible rendering is paused for an inactive or shielded scene. A
+        // pending expiry must not keep redrawing the covered screen; the timer
+        // restarts when the scene becomes active again.
+        guard !isRenderingPaused else { return }
         let pending = approvals.filter { $0.state == .pending }
         guard !pending.isEmpty else { return }
         let current = now()

@@ -91,6 +91,7 @@ pub use proto_compat::{
 };
 pub use types::{
     ApprovalInfo, Cancellation, CommandDiagnostics, CommandHandle, CreateSessionInput,
+    DiagnosticExportMode, DiagnosticExportTarget, DiagnosticsHost, DiagnosticsSnapshot,
     DoctorReport, ExportManifest, HistoryContinuity, HistorySnapshot, HostCapabilities, HostInfo,
     InputKind, LifecycleReceipt, ModelCatalog, ModelChoice, ModelSelectionReceipt,
     ObservationInterests, OnlineStatus, PairingHistoryRecord, PairingOutcome, PairingPrompt,

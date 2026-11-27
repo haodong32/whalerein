@@ -26,12 +26,17 @@ struct RootView: View {
                     .zIndex(1)
             }
         }
+        // Presented sheets live in their own window, so they receive the same
+        // flag through the environment and each sheet content shields itself.
+        .environment(\.privacyShieldVisible, app.isPrivacyShieldVisible)
         .task {
             await runtime.start()
         }
-        .onChange(of: scenePhase) { _, phase in
-            let mapped = AppScenePhase(phase)
-            Task { await app.handleScenePhase(mapped) }
+        // The shell applies the shield and the rendering pause synchronously
+        // inside this call, before the system can snapshot the app. No Task hop
+        // may delay the inactive transition.
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            runtime.scenePhaseDidChange(AppScenePhase(phase))
         }
         .sheet(isPresented: sheet(.settings)) {
             SettingsView(
@@ -48,9 +53,11 @@ struct RootView: View {
                 onSignOutCloud: { Task { await app.signOutCloud() } },
                 onAddHost: { app.openManualPairing() }
             )
+            .privacyShield(app.isPrivacyShieldVisible)
         }
         .sheet(isPresented: sheet(.diagnostics)) {
             DiagnosticsView(model: app.diagnostics)
+                .privacyShield(app.isPrivacyShieldVisible)
         }
         .sheet(isPresented: sheet(.invitation)) {
             NavigationStack {
@@ -61,16 +68,19 @@ struct RootView: View {
                     onDismiss: { app.dismissInvitationSheet() }
                 )
             }
+            .privacyShield(app.isPrivacyShieldVisible)
         }
         .sheet(isPresented: sheet(.sessionSwitcher)) {
             SessionSwitcherView(
                 models: switcherModels,
                 actions: switcherActions
             )
+            .privacyShield(app.isPrivacyShieldVisible)
         }
         #if DEBUG
         .sheet(isPresented: Bindable(runtime.router).showsStateGallery) {
             StateGalleryView()
+                .privacyShield(app.isPrivacyShieldVisible)
         }
         #endif
     }

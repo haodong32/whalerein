@@ -27,8 +27,12 @@ pub fn pairing_prologue(host_id: &str, token_hash_hex: &str, claim_id: &str) -> 
 }
 
 /// Secure-channel prologue bound to both peers and the negotiation channel id.
+///
+/// The `whalerein/v2` suite epoch separates Split-key application traffic from
+/// the retired transcript-derived `whalerein/v1` suite: the prologue is mixed
+/// into the Noise transcript, so a v1 peer fails the handshake itself.
 pub fn channel_prologue(host_id: &str, device_id: &str, channel_id: &str) -> String {
-    format!("whalerein/v1/channel|{host_id}|{device_id}|{channel_id}")
+    format!("whalerein/v2/channel|{host_id}|{device_id}|{channel_id}")
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +53,12 @@ pub enum SecurityError {
     ChannelMismatch,
     #[error("invalid nonce")]
     InvalidNonce,
+    #[error("record counter was already accepted")]
+    ReplayDetected,
+    #[error("record counter is older than the receive window")]
+    StaleCounter,
+    #[error("nonce counter exhausted; a fresh handshake is required")]
+    NonceExhausted,
     #[error("invalid message")]
     InvalidMessage,
     #[error("secret storage failed: {0}")]
@@ -67,7 +77,7 @@ mod tests {
         );
         assert_eq!(
             channel_prologue("host", "device", "nego"),
-            "whalerein/v1/channel|host|device|nego"
+            "whalerein/v2/channel|host|device|nego"
         );
     }
 }

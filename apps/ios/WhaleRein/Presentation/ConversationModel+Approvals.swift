@@ -4,6 +4,50 @@ import Foundation
 
 @MainActor
 extension ConversationModel {
+    // MARK: - Approval review context
+
+    /// Review facts the Host projected for this exact variant. Details are
+    /// shown only while the call is still reviewable; terminal cards and
+    /// projections the Host marked unavailable expose nothing.
+    func approvalReview(_ approval: Approval) -> ApprovalReviewDetails? {
+        guard let review = approval.review,
+              review.availability != .unavailable else {
+            return nil
+        }
+        switch approval.state {
+        case .pending, .changed: return review
+        default: return nil
+        }
+    }
+
+    /// A pending approval stays allow-able even when the Host cannot describe
+    /// every review fact. DSH 0.2.2-rc.1 projects only tool name, call id and
+    /// reason, so requiring a complete projection would make real remote
+    /// approval impossible. Allow still needs an actionable card (pending,
+    /// unexpired, online, no decision in flight); the decision itself stays
+    /// bound to the reviewed version/digest by `resolveApproval`, and the Host
+    /// remains the authority on the device's approval right.
+    func canAllowApproval(_ approval: Approval) -> Bool {
+        isApprovalActionable(approval)
+    }
+
+    /// The limitation the card states alongside Allow, or `nil` when the
+    /// reviewed context is complete.
+    func approvalReviewLimitationKey(_ approval: Approval) -> L10nKey? {
+        switch approval.state {
+        case .pending, .changed:
+            break
+        default:
+            return nil
+        }
+        guard let review = approval.review else { return .approvalReviewMissing }
+        switch review.availability {
+        case .complete: return review.isComplete ? nil : .approvalReviewIncomplete
+        case .incomplete: return .approvalReviewIncomplete
+        case .unavailable: return .approvalDetailsHidden
+        }
+    }
+
     // MARK: - Approvals
 
     func resolveApproval(_ approval: Approval, allow: Bool) async {
@@ -13,7 +57,21 @@ extension ConversationModel {
             }
             return
         }
-        let review = ApprovalReview(approval: approval)
+        // Bind the decision to the exact facts on screen. A newer card, a
+        // changed version/digest or changed review facts require a fresh
+        // review instead of silently submitting the old intent.
+        guard let current = approvals.first(where: { $0.approvalId == approval.approvalId }),
+              current.version == approval.version,
+              current.digestHex.caseInsensitiveCompare(approval.digestHex) == .orderedSame,
+              current.review == approval.review else {
+            approvalErrorKey = .approvalStale
+            return
+        }
+        // An incomplete or unavailable projection does not block Allow: the
+        // card has already stated the limitation, and the fresh version/digest
+        // above is the only binding the decision needs. The Host still rejects
+        // a decision from a device without the current approval right.
+        let review = ApprovalReview(approval: current)
         resolvingApprovalId = approval.approvalId
         approvalErrorKey = nil
         defer { resolvingApprovalId = nil }
@@ -202,6 +260,14 @@ extension ConversationModel {
         isReconnecting = true
         watchEnded = false
         defer { isReconnecting = false }
+        await startWatchConnection()
+    }
+
+    /// Starts exactly one Core watch and refreshes the authoritative facets for
+    /// the selected session. Callers own the reconnect guard and any cursor
+    /// reset; Core continues a restarted watch from its own committed cursor.
+    func startWatchConnection() async {
+        guard !isClosed, !isSuspended else { return }
         do {
             // The draft is owned by this model and its DraftService lease.
             // Restarting the watch must not re-read and overwrite in-memory
@@ -212,6 +278,13 @@ extension ConversationModel {
             }
             try await service.startWatch(hostId: hostId, sessionId: sessionId)
             guard !isClosed else { return }
+            // A background entry may have suspended the model while the watch
+            // was starting. Release it instead of leaving an observation alive
+            // behind the shield; the foreground resume starts it once again.
+            guard !isSuspended else {
+                service.stopWatch()
+                return
+            }
             await refreshConversationCapabilities()
             await refreshApprovals()
             await queue.refresh()

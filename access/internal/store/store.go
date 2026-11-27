@@ -29,6 +29,10 @@ var ErrNotFound = errors.New("not found")
 // command replay.
 var ErrConflict = errors.New("conflict")
 
+// ErrInvalidHostDirectory is returned when Host display metadata exceeds its
+// wire bound or contains control characters.
+var ErrInvalidHostDirectory = errors.New("invalid host directory")
+
 // ErrPairingFenced proves an unfinished pairing intent cannot commit.
 var ErrPairingFenced = errors.New("pairing intent invalidated")
 
@@ -354,6 +358,15 @@ type Host struct {
 	ProtocolVersion uint32
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+}
+
+// HostDirectory is the Host-owned display metadata returned by a pre-pair
+// directory read. It never carries authority, routing, account or credential
+// state.
+type HostDirectory struct {
+	HostID      string
+	DisplayName string
+	OSFamily    string
 }
 
 // Device is one registered device.

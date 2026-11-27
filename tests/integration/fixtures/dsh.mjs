@@ -251,7 +251,7 @@ createInterface({input:process.stdin}).on('line',async line=>{
     else if(method==='hold_question_answer') { adapter.holdFixtureQuestion(session_id); value=true }
     else if(method==='release_question_answer') { adapter.releaseFixtureQuestionHold(session_id); value=true }
     else if(method==='question_answer_waiting') value=adapter.fixtureQuestionWaiting(session_id)
-    else if(method==='request_approval') {adapter.setRunning(session_id,true);value=adapter.requestApproval({sessionId:session_id,toolName:typeof tool_name==='string'&&tool_name!==''?tool_name:'fixture-tool',...(typeof reason==='string'?{reason}:{}),...(Number.isSafeInteger(ttl_ms)&&ttl_ms>0?{ttlMs:ttl_ms}:{})})}
+    else if(method==='request_approval') {adapter.setRunning(session_id,true);value=adapter.requestApproval({sessionId:session_id,toolName:typeof tool_name==='string'&&tool_name!==''?tool_name:'bash',arguments:{command:'npm test'},...(typeof reason==='string'?{reason}:{}),...(Number.isSafeInteger(ttl_ms)&&ttl_ms>0?{ttlMs:ttl_ms}:{})})}
     else if(method==='hang_next') { if(typeof method_name!=='string'||!method_name) throw new Error('invalid_argument'); adapter.hangNext(method_name); value=true }
     else if(method==='approval') value=await adapter.getApproval(approval_id)
     else if(method==='forget_approval') value=adapter.forgetApproval(approval_id)

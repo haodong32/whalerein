@@ -14,11 +14,14 @@ and the Rust binary as the other participant. It checks:
 - `Noise_XX_25519_ChaChaPoly_SHA256` handshake with the WhaleRein channel
   prologue,
 - SHA-256 fingerprint of the remote static key,
-- HKDF `c2h` / `h2c` channel keys,
-- one ChaCha20-Poly1305 frame in each direction with a request AAD.
+- Noise Split `c2h` / `h2c` application keys (a non-reversible split
+  fingerprint is printed on the `ready` line; raw keys are never logged),
+- one ChaCha20-Poly1305 record in each direction with a request AAD and the
+  v2 monotonic record-counter nonce.
 
 The binary also accepts `initiator` and can be driven by other peers. Its line
-protocol is documented at the top of `src/main.rs`.
+protocol is documented at the top of `src/main.rs`; `ready` is
+`ready <fingerprint> <handshake-hash> <channel-id> <split-fingerprint>`.
 
 The Core dependency opts into `protocol-testing` and imports only its explicit
 `testing` exports. `tests/integration/drivers/noise/rust-peer/` is a different,

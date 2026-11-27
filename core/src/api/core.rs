@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-#[cfg(all(test, unix))]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -14,7 +14,7 @@ use whalerein_proto::{
     ResolveApproval, ResponsePayload, SendMessage,
 };
 
-use super::config::{self, ConfigStore, PersistedConfig};
+use super::config::{ConfigStore, PersistedConfig};
 use super::error::{CoreError, CoreResult};
 use super::instance::{ClientConfig, ClientService, Instance, InstanceSecrets};
 use super::types::{
@@ -24,8 +24,11 @@ use super::types::{
     QuestionAnswer, QuestionBatchInfo, QuestionPageInfo, QuestionPhase, RevocationOutcome,
     RevocationRetention, SessionList, SessionModel, SessionSummary,
 };
-use crate::access::{AccessClient, MqttSettings};
-use crate::api::{Cancellation, ConnectionSnapshot};
+use crate::access::{AccessClient, HostDirectoryPreview, MqttSettings};
+use crate::api::{
+    Cancellation, ConnectionSnapshot, DiagnosticExportMode, DiagnosticExportTarget,
+    DiagnosticsSnapshot,
+};
 use crate::cache::Cache;
 use crate::commands::CommandService;
 use crate::diagnostics;
@@ -67,57 +70,6 @@ pub struct ForkOutcome {
     /// Why the directory could not be resolved; the fork itself still
     /// succeeded and must not be retried or deleted.
     pub working_directory_error: Option<String>,
-}
-
-/// Refuse to write a diagnostic bundle through a symbolic link.
-///
-/// The check runs before any create/write so the target is untouched. On Unix
-/// the write itself also uses `O_NOFOLLOW`, closing the check-then-write race.
-fn ensure_export_target_is_not_a_symlink(path: &Path) -> CoreResult<()> {
-    if std::fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        return Err(CoreError::InvalidInput(
-            "diagnostic export target must not be a symbolic link".into(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn export_symlink_error() -> CoreError {
-    CoreError::InvalidInput("diagnostic export target must not be a symbolic link".into())
-}
-
-fn write_private_bundle(path: &Path, bytes: &[u8]) -> CoreResult<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|error| {
-                if error.raw_os_error() == Some(libc::ELOOP) {
-                    export_symlink_error()
-                } else {
-                    CoreError::Internal("diagnostic bundle could not be written".into())
-                }
-            })?;
-        file.write_all(bytes)
-            .map_err(|_| CoreError::Internal("diagnostic bundle could not be written".into()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        ensure_export_target_is_not_a_symlink(path)?;
-        std::fs::write(path, bytes)
-            .map_err(|_| CoreError::Internal("diagnostic bundle could not be written".into()))?;
-    }
-    Ok(())
 }
 
 /// Whether a Host path is absolute under either POSIX or Windows rules.
@@ -175,6 +127,10 @@ pub struct Core {
     pub(crate) config: Arc<RwLock<Option<PersistedConfig>>>,
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) diagnostics: Arc<Diagnostics>,
+    /// The one immutable redacted capture consumed by preview, save and share.
+    diagnostic_capture: Arc<Mutex<Option<Arc<DiagnosticsSnapshot>>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    fail_diagnostic_capture: Arc<AtomicBool>,
     identity: Arc<Mutex<Option<Arc<crate::security::device::DeviceIdentity>>>>,
     identity_init: Arc<Mutex<()>>,
     cache: Arc<Mutex<Option<Arc<Cache>>>>,
@@ -198,6 +154,9 @@ pub struct Core {
     /// focused epoch-5 tests call `use_mqtt_queries` to exercise the real lane.
     #[cfg(test)]
     legacy_http_queries: Arc<AtomicBool>,
+    /// Test-only shortening of the advisory directory read bound.
+    #[cfg(test)]
+    directory_timeout: Arc<Mutex<Option<Duration>>>,
 }
 
 impl Core {
@@ -370,7 +329,7 @@ impl Core {
         match &self.instance {
             Some(instance) => instance.ca_pem.clone(),
             #[cfg(test)]
-            None => config::ca_pem_from_env(),
+            None => crate::api::config::ca_pem_from_env(),
             #[cfg(not(test))]
             None => None,
         }
@@ -381,7 +340,7 @@ impl Core {
         {
             self.instance
                 .is_none()
-                .then(config::mqtt_url_from_env)
+                .then(crate::api::config::mqtt_url_from_env)
                 .flatten()
         }
         #[cfg(not(test))]
@@ -404,6 +363,9 @@ impl Core {
             config: Arc::new(RwLock::new(config)),
             runtime,
             diagnostics,
+            diagnostic_capture: Arc::new(Mutex::new(None)),
+            #[cfg(any(test, feature = "test-support"))]
+            fail_diagnostic_capture: Arc::new(AtomicBool::new(false)),
             identity: Arc::new(Mutex::new(None)),
             identity_init: Arc::new(Mutex::new(())),
             cache: Arc::new(Mutex::new(None)),
@@ -420,6 +382,8 @@ impl Core {
             fail_waiting_marker: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             legacy_http_queries: Arc::new(AtomicBool::new(true)),
+            #[cfg(test)]
+            directory_timeout: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -579,6 +543,11 @@ impl Core {
     pub fn new_command_id() -> String {
         crate::util::random_id(16)
     }
+    #[cfg(test)]
+    pub(crate) fn set_directory_timeout(&self, timeout: Duration) {
+        *self.directory_timeout.lock().unwrap() = Some(timeout);
+    }
+
     #[cfg(test)]
     pub fn new(mut options: CoreOptions) -> CoreResult<Self> {
         let root = options.data_dir.clone();
@@ -751,12 +720,21 @@ impl Core {
                 .data_dir
                 .join(diagnostics::journal::FAILURE_FILE),
         ) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(CoreError::Internal(
-                "diagnostic file could not be removed".into(),
-            )),
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(CoreError::Internal(
+                    "diagnostic file could not be removed".into(),
+                ))
+            }
         }
+        // Clearing retained failure history is an explicit state change: the
+        // next preview captures fresh facts instead of showing removed data.
+        *self
+            .diagnostic_capture
+            .lock()
+            .expect("diagnostic capture lock") = None;
+        Ok(())
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -780,6 +758,10 @@ impl Core {
     }
 
     /// Local enforcement evidence. This check does not contact Cloud or Access.
+    ///
+    /// A `pending:` marker is a durable observation that service admission was
+    /// denied or that an explicit revoke has begun; it is surfaced as
+    /// `revocation_pending` and never as a completed local revocation.
     pub fn local_revocation_state(&self) -> CoreResult<Option<&'static str>> {
         if !self.options.data_dir.is_dir() {
             return Ok(None);
@@ -1138,6 +1120,16 @@ impl Core {
         }
         crate::security::device::forget(&self.options.secrets, &self.options.data_dir)?;
         self.clear_cloud_pairing_material()?;
+        // Explicit local forget retires an unconfirmed observation or
+        // revocation intent: no local material remains to reconcile, and the
+        // user must be able to pair again without manual cleanup. A confirmed
+        // cleanup marker stays as historical evidence and is resolved by the
+        // next pairing's existing generation guards.
+        if let Some(marker) = revoked_commands::marker_in(_admission.directory())? {
+            if marker.starts_with("pending:") {
+                revoked_commands::remove_marker_in(_admission.directory())?;
+            }
+        }
         *self.identity.lock().expect("identity mutex") = None;
         Ok(())
     }
@@ -1447,6 +1439,15 @@ impl Core {
         })
     }
 
+    /// The Host-owned grant identity bound to `host_id`, when the profile
+    /// carries one. Absent means a legacy pairing and is not an error.
+    #[cfg(test)]
+    fn confirmed_host_grant_id(&self, host_id: &str) -> Option<String> {
+        self.current_config()?
+            .host_grant_id_for(host_id)
+            .map(str::to_owned)
+    }
+
     /// A broker can refuse a connection while its Access policy source is
     /// unreachable. Resolve a refusal against the authority that owns the grant.
     pub(crate) async fn wait_host_transport(
@@ -1504,6 +1505,7 @@ impl Core {
             let identity = self.device_identity()?;
             let access = self.access_client().await?;
             let expected = self.confirmed_host_fingerprint(host_id)?;
+            let grant_id = self.confirmed_host_grant_id(host_id);
             return crate::runtime::channel::ensure_channel(
                 &self.runtime,
                 &access,
@@ -1512,6 +1514,7 @@ impl Core {
                 &config.device_id,
                 force_new,
                 Some(&expected),
+                grant_id.as_deref(),
             )
             .await;
         }
@@ -1520,6 +1523,10 @@ impl Core {
             let identity = self.device_identity()?;
             let access = self.access_client().await?;
             let expected = self.confirmed_host_fingerprint(host_id)?;
+            // The grant identity is read once at handshake start and travels
+            // inside the authenticated Noise hello; the Host checks it against
+            // its own active snapshot. A legacy profile sends nothing.
+            let grant_id = config.host_grant_id_for(host_id).map(str::to_owned);
             // Ordering: the authorized MQTT subscription and receive-budget
             // readiness come first; pinned Noise then travels on the same
             // connection's query/reply lane.
@@ -1544,6 +1551,7 @@ impl Core {
                     &config.device_id,
                     stale,
                     Some(&expected),
+                    grant_id.as_deref(),
                 )
                 .await
             } else {
@@ -1556,6 +1564,7 @@ impl Core {
                     &config.device_id,
                     force_new,
                     Some(&expected),
+                    grant_id.as_deref(),
                 )
                 .await
             }
@@ -2116,6 +2125,28 @@ impl Core {
             }
         }
         let device_id = identity.device_id.clone();
+        // The preview is advisory only. Read it before the prompt (including
+        // the resume prompt) and fall back to empty fields on any failure so
+        // unavailable, malformed or slow Access metadata never blocks pairing.
+        let access = AccessClient::with_trust(
+            parsed.access_url.clone(),
+            None,
+            self.ca_pem().as_deref(),
+            self.platform_roots().as_deref(),
+            self.diagnostics.clone(),
+        )?;
+        #[cfg(test)]
+        let access = {
+            let mut access = access;
+            if let Some(timeout) = *self.directory_timeout.lock().unwrap() {
+                access.set_directory_timeout(timeout);
+            }
+            access
+        };
+        let directory = access
+            .host_directory(parsed.access_url.as_str(), &parsed.host_id, &parsed.token)
+            .await
+            .unwrap_or_else(|_| HostDirectoryPreview::default());
         if let Some(pending) = self.load_pending_pairing(&device_id)? {
             if pending.config.access_url != parsed.access_url.as_str()
                 || pending.config.host_id != parsed.host_id
@@ -2145,6 +2176,8 @@ impl Core {
                     access_url: parsed.access_url.to_string(),
                     fingerprint: fingerprint.clone(),
                     fingerprint_display: crate::util::format_fingerprint(&fingerprint),
+                    display_name: directory.display_name.clone(),
+                    os_family: directory.os_family.clone(),
                 });
                 if !decision.approve {
                     return Err(CoreError::PairingCancelled);
@@ -2167,10 +2200,16 @@ impl Core {
         let pairing_epoch = revoked_commands::ensure_pairing_epoch_in(pairing_guard.directory())?;
         drop(pairing_guard);
         if let Some(marker) = pairing_marker.as_deref() {
-            if !matches!(
-                revoked_commands::confirmed_phase(marker),
-                Some("saved" | "lost")
-            ) || self.config_store().load()?.is_some()
+            // A service-denial observation never authorizes cleanup and does
+            // not block the user's explicit new pairing. It is cleared only
+            // after the new profile commits; an explicit revoke intent or a
+            // confirmed cleanup still requires its own reconciliation.
+            let service_denial = marker.starts_with("pending:observe:");
+            if !service_denial
+                && (!matches!(
+                    revoked_commands::confirmed_phase(marker),
+                    Some("saved" | "lost")
+                ) || self.config_store().load()?.is_some())
             {
                 return Err(CoreError::Revoked);
             }
@@ -2183,15 +2222,6 @@ impl Core {
             display_name,
         )?;
 
-        let ca = self.ca_pem();
-        let roots = self.platform_roots();
-        let access = AccessClient::with_trust(
-            parsed.access_url.clone(),
-            None,
-            ca.as_deref(),
-            roots.as_deref(),
-            self.diagnostics.clone(),
-        )?;
         let hello_response = access
             .pair_claim(&hello)
             .await
@@ -2215,6 +2245,8 @@ impl Core {
             access_url: confirmation.access_url.clone(),
             fingerprint: confirmation.fingerprint.clone(),
             fingerprint_display: confirmation.fingerprint_display.clone(),
+            display_name: directory.display_name,
+            os_family: directory.os_family,
         };
         let decision = decide(&prompt);
         if !decision.approve {
@@ -2267,6 +2299,13 @@ impl Core {
             }
         }
 
+        // Commit the Host-owned grant identity with the profile it belongs to.
+        // The value is opaque and copied from the authenticated FINISH reply;
+        // an empty legacy answer leaves it unset.
+        persisted.set_host_grant_id(&parsed.host_id, &completion.grant_id);
+        let host_grant_id = persisted
+            .host_grant_id_for(&parsed.host_id)
+            .map(str::to_owned);
         self.finish_pairing_config(
             persisted,
             &completion.device_token,
@@ -2279,6 +2318,7 @@ impl Core {
             device_id,
             fingerprint: completion.host_fingerprint,
             access_url: parsed.access_url.to_string(),
+            host_grant_id,
         };
         self.complete_standalone_pairing(&outcome)?;
         Ok(outcome)
@@ -3658,8 +3698,11 @@ impl Core {
     /// `revoked_identity_retention_unverified` after success to surface a
     /// possibly incomplete unconfirmed-command snapshot.
     ///
-    /// A token Access already rejects uses the same terminal path as any other
-    /// device-token call and returns `revoked` after the local files are gone.
+    /// This is an explicit user action, so it completes the local cleanup even
+    /// when Access already rejects the stored device token; that rejection
+    /// only confirms the remote grant is gone. Ordinary device-token calls
+    /// never clean up on the same rejection. A service-denial observation left
+    /// by an earlier call is superseded by this explicit intent.
     pub async fn revoke(&self) -> CoreResult<RevocationOutcome> {
         let config = self.require_config()?;
         let device_id = config.device_id.clone();
@@ -3686,7 +3729,12 @@ impl Core {
             match revoked_commands::marker_in(_admission.directory())? {
                 Some(id) if id.starts_with("pending:revoke:") => id,
                 Some(id) if id.starts_with("pending:observe:") => {
-                    return Err(CoreError::Unavailable("authorization verification is pending; run hosts to reconcile before revocation".into()));
+                    // A denied service check is an observation, not a
+                    // revocation. The explicit revoke supersedes it and the
+                    // new intent fences the stale observation.
+                    let id = format!("pending:revoke:{}", crate::util::random_id(16));
+                    revoked_commands::write_marker_in(_admission.directory(), &id)?;
+                    id
                 }
                 _ => {
                     let id = format!("pending:revoke:{}", crate::util::random_id(16));
@@ -3726,19 +3774,7 @@ impl Core {
                     .clear_local_pairing_async(&device_id, &revocation_intent)
                     .await
                 {
-                    let cleanup_only = matches!(
-                        error,
-                        CoreError::Cache(_)
-                            | CoreError::Unavailable(_)
-                            | CoreError::RevokedRetentionUnverified
-                    ) || (cfg!(windows)
-                        && matches!(
-                            &error,
-                            CoreError::Internal(message)
-                                if message == "pairing cleanup incomplete"
-                                    || message.starts_with("sensitive credentials were cleared")
-                        ));
-                    if !cleanup_only {
+                    if !Self::revocation_cleanup_only(&error) {
                         return Err(error);
                     }
                 }
@@ -3752,25 +3788,72 @@ impl Core {
                 })
             }
             Err(error) => {
-                let rejected: CoreResult<()> = self.settle(Err(CoreError::from(error))).await;
-                rejected?;
-                Ok(RevocationOutcome {
-                    device_id,
-                    retention: if self.revoked_identity_retention_unverified()? {
-                        RevocationRetention::Unverified
-                    } else {
-                        RevocationRetention::Recorded
-                    },
+                let error = CoreError::from(error);
+                if self.cloud_session_id()?.is_some() {
+                    // A managed credential rejection does not establish Device
+                    // removal or authorize local cleanup.
+                    let rejected: CoreResult<()> = self.settle(Err(error)).await;
+                    rejected?;
+                    return Ok(RevocationOutcome {
+                        device_id,
+                        retention: if self.revoked_identity_retention_unverified()? {
+                            RevocationRetention::Unverified
+                        } else {
+                            RevocationRetention::Recorded
+                        },
+                    });
+                }
+                if !error.device_authorization_lost() {
+                    return Err(error);
+                }
+                // Explicit revoke: Access rejecting the stored token confirms
+                // that the remote grant is already gone. Finish the same local
+                // cleanup as a confirmed delete. This is the only rejection
+                // path allowed to clean up, because the user asked for it.
+                self.runtime.revoke();
+                if let Err(cleanup) = self
+                    .clear_local_pairing_async(&device_id, &revocation_intent)
+                    .await
+                {
+                    if !Self::revocation_cleanup_only(&cleanup) {
+                        return Err(cleanup);
+                    }
+                }
+                Err(if self.revoked_identity_retention_unverified()? {
+                    CoreError::RevokedRetentionUnverified
+                } else {
+                    CoreError::Revoked
                 })
             }
         }
     }
 
+    /// Errors that mean sensitive credentials were cleared but the pending
+    /// identity snapshot or cache release must be retried.
+    fn revocation_cleanup_only(error: &CoreError) -> bool {
+        matches!(
+            error,
+            CoreError::Cache(_) | CoreError::Unavailable(_) | CoreError::RevokedRetentionUnverified
+        ) || (cfg!(windows)
+            && matches!(
+                error,
+                CoreError::Internal(message)
+                    if message == "pairing cleanup incomplete"
+                        || message.starts_with("sensitive credentials were cleared")
+            ))
+    }
+
     /// One exit for Access calls made with the stored device token.
     ///
     /// Host result codes can describe a lost channel rather than a lost grant.
-    /// Clear local identity only after Access independently rejects the stored
-    /// token on its host-list endpoint. An unavailable check preserves identity.
+    /// Access rejecting the stored token on its host-list endpoint is service
+    /// admission loss, not a Host-confirmed revocation. It retains the pinned
+    /// Hosts, device identity, cache keys and rows, drafts, pending command
+    /// identities and configuration, and records only the durable observation
+    /// marker that `status` reports as `revocation_pending`. Automatic cleanup
+    /// remains forbidden; only an explicit local revoke/forget or a future
+    /// Host-authenticated confirmation for this exact enrollment may retire
+    /// the local grant. An unavailable check also preserves identity.
     async fn settle<T>(&self, result: CoreResult<T>) -> CoreResult<T> {
         let Err(error) = result else {
             return result;
@@ -3792,7 +3875,7 @@ impl Core {
             ));
         }
         let access = self.access_client().await?;
-        let (observed_intent, observed_marker) = {
+        let (observed_marker, observed_config) = {
             let _admission = crate::security::device::ProfileLock::acquire_admission_async(
                 &self.options.data_dir,
                 std::time::Instant::now() + Duration::from_secs(30),
@@ -3800,25 +3883,8 @@ impl Core {
             .await
             .map_err(|_| CoreError::Config("profile admission lock unavailable".into()))?;
             self.verify_access_generation(&access)?;
-            #[cfg(any(unix, windows))]
-            {
-                let deadline = tokio::time::Instant::now()
-                    + Duration::from_millis(crate::commands::REQUEST_TTL_MS as u64);
-                while !self.try_prepare_revocation_cache(_admission.directory()) {
-                    if tokio::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            }
-            match revoked_commands::marker_in(_admission.directory())? {
-                None => {
-                    let id = format!("pending:observe:{}", crate::util::random_id(16));
-                    revoked_commands::write_marker_in(_admission.directory(), &id)?;
-                    (Some(id.clone()), id)
-                }
-                Some(id) => (None, id),
-            }
+            let config = self.config_store().load()?.ok_or(CoreError::NotPaired)?;
+            (revoked_commands::marker_in(_admission.directory())?, config)
         };
         self.diagnostics
             .record_stage("access", "authorization_check", "started", error.code());
@@ -3827,9 +3893,33 @@ impl Core {
                 self.diagnostics.record_stage(
                     "access",
                     "authorization_check",
-                    "revoked",
+                    "revocation_pending",
                     error.code(),
                 );
+                let _admission = crate::security::device::ProfileLock::acquire_admission_async(
+                    &self.options.data_dir,
+                    std::time::Instant::now() + Duration::from_secs(30),
+                )
+                .await
+                .map_err(|_| CoreError::Config("profile admission lock unavailable".into()))?;
+                // A pairing or token that replaced the one under observation
+                // owns its own state; a stale denial must not mark it.
+                self.verify_access_generation(&access)?;
+                if self.config_store().load()? != Some(observed_config) {
+                    return Err(CoreError::Conflict(
+                        "pairing changed while checking authorization".into(),
+                    ));
+                }
+                // Record the durable pending observation on the current
+                // generation. An explicit revocation intent or a completed
+                // cleanup marker already owns the state and is left intact.
+                if revoked_commands::marker_in(_admission.directory())?.is_none() {
+                    let id = format!("pending:observe:{}", crate::util::random_id(16));
+                    revoked_commands::write_marker_in(_admission.directory(), &id)?;
+                }
+                // Release admission before any observer pause so another
+                // explicit action is not blocked by a retained observation.
+                drop(_admission);
                 #[cfg(feature = "protocol-testing")]
                 if let Some(path) = std::env::var_os("WHALEREIN_TEST_OBSERVED_REVOKED_BARRIER") {
                     let path = std::path::PathBuf::from(path);
@@ -3854,8 +3944,14 @@ impl Core {
                 .await
                 .map_err(|_| CoreError::Config("profile admission lock unavailable".into()))?;
                 self.verify_access_generation(&access)?;
-                if let Some(id) = observed_intent {
-                    revoked_commands::clear_owned_pending_in(_admission.directory(), &id)?;
+                // A successful service check reconciles the pending
+                // observation. An explicit revoke intent or a confirmed
+                // cleanup marker is never cleared here.
+                if let Some(marker) = observed_marker
+                    .as_deref()
+                    .filter(|marker| marker.starts_with("pending:observe:"))
+                {
+                    revoked_commands::clear_owned_pending_in(_admission.directory(), marker)?;
                 }
                 return Err(error);
             }
@@ -3868,11 +3964,6 @@ impl Core {
                 );
                 return Err(error);
             }
-        }
-        if let Some(config) = self.current_config() {
-            self.runtime.revoke();
-            self.clear_local_pairing_async(&config.device_id, &observed_marker)
-                .await?;
         }
         Err(if self.revoked_identity_retention_unverified()? {
             CoreError::RevokedRetentionUnverified
@@ -4485,14 +4576,47 @@ impl Core {
         }
     }
 
-    /// JSON preview for an in-app diagnostic share. It reads only local state:
-    /// no file is written and no channel is opened. The payload preserves the
-    /// existing export redaction policy (schema/versions, Access address,
-    /// redacted Host labels with in-memory connection state, command counts,
-    /// metrics, last failure code and the field/redaction manifest) and never
-    /// contains message or draft text, tool arguments, credentials, invitation
-    /// or device tokens, private keys or full invitation URIs.
-    pub fn diagnostics_preview(&self) -> CoreResult<String> {
+    /// The current immutable diagnostic capture.
+    ///
+    /// The first call builds one capture from allowlisted local facts; later
+    /// calls return exactly those bytes even after connection state, command
+    /// counts or the last failure changed. Nothing is written or uploaded.
+    /// Only [`Core::refresh_diagnostics`] replaces the capture explicitly.
+    pub fn diagnostics_snapshot(&self) -> CoreResult<DiagnosticsSnapshot> {
+        let mut capture = self
+            .diagnostic_capture
+            .lock()
+            .expect("diagnostic capture lock");
+        if let Some(snapshot) = capture.as_ref() {
+            return Ok((**snapshot).clone());
+        }
+        let snapshot = Arc::new(self.build_diagnostic_snapshot()?);
+        *capture = Some(snapshot.clone());
+        Ok((*snapshot).clone())
+    }
+
+    /// Take a new capture, replacing any previous snapshot.
+    ///
+    /// A failed capture clears the previous snapshot before returning the
+    /// error, so no stale preview or share action can expose older bytes.
+    pub fn refresh_diagnostics(&self) -> CoreResult<DiagnosticsSnapshot> {
+        let mut capture = self
+            .diagnostic_capture
+            .lock()
+            .expect("diagnostic capture lock");
+        *capture = None;
+        let snapshot = Arc::new(self.build_diagnostic_snapshot()?);
+        *capture = Some(snapshot.clone());
+        Ok((*snapshot).clone())
+    }
+
+    fn build_diagnostic_snapshot(&self) -> CoreResult<DiagnosticsSnapshot> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.fail_diagnostic_capture.load(Ordering::Relaxed) {
+            return Err(CoreError::Internal(
+                "diagnostic capture could not be produced".into(),
+            ));
+        }
         let (report, cache_warning) = self.doctor_with_cache_status()?;
         let failure = diagnostics::journal::load_failure(&self.options.data_dir);
         let config = self.current_config();
@@ -4503,54 +4627,72 @@ impl Core {
         }
         host_ids.sort();
         host_ids.dedup();
+        // Only ordinal labels leave this scope; the Host IDs are join keys for
+        // the in-process runtime state and never enter the captured bytes.
         let hosts = host_ids
             .iter()
             .enumerate()
             .map(|(index, host_id)| diagnostics::PreviewHost {
                 label: format!("host-{}", index + 1),
+                host_ref: host_id.clone(),
                 connection_state: self.runtime.state(host_id).as_str().to_owned(),
             })
             .collect::<Vec<_>>();
-        diagnostics::render_preview(
-            &report,
+        diagnostics::capture(diagnostics::CaptureInput {
+            report: &report,
             cache_warning,
-            failure.as_ref(),
-            &hosts,
-            &self.metrics(),
-            config.as_ref().map(|config| config.protocol_version),
-        )
+            failure: failure.as_ref(),
+            hosts: &hosts,
+            metrics: &self.metrics(),
+            protocol_version: config.as_ref().map(|config| config.protocol_version),
+        })
     }
 
-    /// Write a redacted JSON diagnostic bundle. The caller must confirm first.
+    /// Full report view for an in-app diagnostic preview.
     ///
-    /// A symbolic-link target is refused before anything is written: following
-    /// the link would apply the private permissions to, and overwrite, a file
-    /// the user did not name.
+    /// This is the captured document decoded without rewriting it. It reads
+    /// local state only the first time a capture is taken; it never writes a
+    /// file and never opens a channel.
+    pub fn diagnostics_preview(&self) -> CoreResult<String> {
+        Ok(self.diagnostics_snapshot()?.text)
+    }
+
+    /// Classify a diagnostic export destination without following links.
+    pub fn diagnostic_export_target(&self, path: &Path) -> CoreResult<DiagnosticExportTarget> {
+        diagnostics::export::inspect_target(path)
+    }
+
+    /// Write one captured snapshot safely.
+    ///
+    /// `CreateNew` never replaces a file that appears at the destination.
+    /// `ReplaceExisting` stages the whole write in the same directory and only
+    /// renames over the explicitly authorized regular file after the staged
+    /// bytes are durable; a failed write preserves the previous contents.
+    pub fn write_diagnostics_snapshot(
+        &self,
+        snapshot: &DiagnosticsSnapshot,
+        path: &Path,
+        mode: DiagnosticExportMode,
+    ) -> CoreResult<ExportManifest> {
+        diagnostics::export::write_snapshot(snapshot, path, mode)
+    }
+
+    /// Write the current redacted snapshot to `path`.
+    ///
+    /// Bindings that stage a unique path use this; the CLI chooses the mode
+    /// explicitly after an overwrite decision. A symbolic link or directory is
+    /// refused before anything is written.
     pub fn export_diagnostics(&self, path: &Path) -> CoreResult<ExportManifest> {
-        ensure_export_target_is_not_a_symlink(path)?;
-        let (report, cache_warning) = self.doctor_with_cache_status()?;
-        let mut manifest = diagnostics::render_export(&report);
-        let bundle = serde_json::json!({
-            "schema": "whalerein/v1",
-            "generated_at_unix_ms": crate::util::now_unix_ms(),
-            "report": report,
-            "cache_warning": cache_warning,
-            "last_failure": diagnostics::journal::load_failure(&self.options.data_dir),
-            "fields": manifest.fields,
-            "redactions": manifest.redactions,
-        });
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|_| {
-                CoreError::Internal("diagnostic directory could not be created".into())
-            })?;
-        }
-        let bytes = serde_json::to_vec_pretty(&bundle)
-            .map_err(|_| CoreError::Internal("diagnostic bundle could not encode".into()))?;
-        write_private_bundle(path, &bytes)?;
-        config::set_private_permissions(path)?;
-        manifest.path = path.display().to_string();
-        manifest.bytes = bytes.len() as u64;
-        Ok(manifest)
+        let snapshot = self.diagnostics_snapshot()?;
+        self.write_diagnostics_snapshot(&snapshot, path, DiagnosticExportMode::ReplaceExisting)
+    }
+
+    /// Test-only failure switch for the capture builder. Available only with
+    /// Core's `test-support` feature or in Core unit tests.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn force_diagnostic_capture_failure_for_tests(&self, fail: bool) {
+        self.fail_diagnostic_capture.store(fail, Ordering::Relaxed);
     }
 
     /// Fetch the cached session list without a network call.
@@ -4628,6 +4770,10 @@ impl Core {
         tool_name: &str,
         call_id: &str,
         reason: &str,
+        review_action: &str,
+        review_target: &str,
+        review_impact: &str,
+        review_availability: &str,
         version: i64,
         expires_at_unix_ms: i64,
     ) -> String {
@@ -4637,6 +4783,10 @@ impl Core {
             tool_name,
             call_id,
             reason,
+            review_action,
+            review_target,
+            review_impact,
+            review_availability,
             version,
             expires_at_unix_ms,
         ))

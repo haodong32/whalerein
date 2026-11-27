@@ -176,7 +176,13 @@ enum FixtureCatalog {
             version: 3,
             expiresAtUnixMs: expiresAt,
             digestHex: "9f2c41d7b83a05e6c9d1f4a7b2e8c0d3a5f7b9c1e3d5f7a9b1c3d5e7f9a1b3c5",
-            state: state
+            state: state,
+            review: ApprovalReviewDetails(
+                action: "Run the release verification script",
+                target: "tools/release/verify.sh",
+                impact: "Executes the local verification checks and writes reports under .data/.",
+                availability: .complete
+            )
         )
     }
 
@@ -219,42 +225,85 @@ enum FixtureCatalog {
         )
     }
 
-    static func diagnostics(now: Date = Date()) -> DiagnosticsReport {
-        let json = """
+    static func diagnostics(now: Date = Date()) -> DiagnosticsCapture {
+        // Mirrors Core's consolidated capture document: anonymous Host labels,
+        // a retained failure with stable stage facts, the field/redaction
+        // manifest and no content, credentials or directory decoration.
+        let capturedAt = Int(now.timeIntervalSince1970 * 1000)
+        let text = """
         {
-          "schema": "whalerein.diagnostics/1",
-          "generatedAtUnixMs": \(Int(now.timeIntervalSince1970 * 1000)),
-          "appVersion": "0.1.0",
-          "coreRevision": "\(coreRevision)",
-          "connection": {
-            "https": {"status": "ok", "correlationId": "corr-https-0001"},
-            "mqtt": {"status": "failed", "failureCode": "mqtt_subscription_failed", "correlationId": "corr-mqtt-0007"}
+          "schema": "whalerein/v1",
+          "core_version": "\(coreRevision)",
+          "protocol_version": 1,
+          "capture_id": "capture-fixture-0001",
+          "captured_at_unix_ms": \(capturedAt),
+          "report": {
+            "schema": "whalerein/v1",
+            "address": "https://studio-mac.access.whalerein.test",
+            "commands": {"non_terminal": 1, "unknown": 0}
           },
-          "invitation": "whalerein://pair?token=inv_SENSITIVE_VALUE",
-          "token": "inv_SENSITIVE_VALUE",
-          "deviceKey": "PRIVATE_KEY_MATERIAL",
-          "messageContent": "Do not export this sentence",
-          "toolArguments": "echo SENSITIVE_ARGUMENT"
+          "cache_warning": null,
+          "hosts": [
+            {"label": "host-1", "connection_state": "connected"},
+            {"label": "host-2", "connection_state": "offline"}
+          ],
+          "metrics": [],
+          "last_failure": {
+            "trace_id": "trace-fixture-0001",
+            "recorded_at_unix_ms": \(capturedAt),
+            "code": "mqtt_subscription_failed",
+            "events": [
+              {"time_unix_ms": \(capturedAt), "layer": "mqtt", "stage": "subscribe", "outcome": "failed", "code": "mqtt_subscription_failed"}
+            ]
+          },
+          "fields": [
+            "schema",
+            "core_version",
+            "protocol_version",
+            "captured_at_unix_ms",
+            "report.address",
+            "report.commands.non_terminal",
+            "report.commands.unknown",
+            "cache_warning",
+            "hosts.label",
+            "hosts.connection_state",
+            "metrics",
+            "last_failure.code",
+            "last_failure.events"
+          ],
+          "redactions": [
+            "message content",
+            "tool arguments",
+            "draft text",
+            "private keys",
+            "device tokens",
+            "pairing tokens",
+            "full ciphertext",
+            "host and device ids",
+            "directory names and local host identities"
+          ]
         }
         """
-        return DiagnosticsReport(
-            json: json,
-            redactionFields: ["invitation", "token", "deviceKey", "messageContent", "toolArguments"],
-            lastFailureCode: "mqtt_subscription_failed",
+        return DiagnosticsCapture(
+            text: text,
+            bytes: Data(text.utf8),
+            // The fixture has no verified directory binding, so rows stay
+            // anonymous just like an unauthorized or offline live profile.
+            localHostRefs: [:],
+            redactionFields: [
+                "message content",
+                "tool arguments",
+                "draft text",
+                "private keys",
+                "device tokens",
+                "pairing tokens",
+                "full ciphertext",
+                "host and device ids",
+                "directory names and local host identities",
+            ],
             appVersion: "0.1.0",
-            coreVersion: coreRevision,
-            stages: stages(),
-            generatedAt: now
+            coreVersion: coreRevision
         )
-    }
-
-    static func stages() -> [DiagnosticStage] {
-        [
-            DiagnosticStage(hostId: "studio-mac", kind: .https, status: .ok, correlationId: "corr-https-0001", failureCode: nil),
-            DiagnosticStage(hostId: "studio-mac", kind: .mqtt, status: .failed, correlationId: "corr-mqtt-0007", failureCode: "mqtt_subscription_failed"),
-            DiagnosticStage(hostId: "travel-laptop", kind: .https, status: .ok, correlationId: "corr-https-0002", failureCode: nil),
-            DiagnosticStage(hostId: "travel-laptop", kind: .mqtt, status: .idle, correlationId: nil, failureCode: nil),
-        ]
     }
 
     // MARK: - Transcript generation

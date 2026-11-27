@@ -832,7 +832,7 @@ async fn an_incomplete_host_listing_fails_unqualified_resolution() {
 
 // PAIR-16
 #[tokio::test]
-async fn unqualified_resolution_aborts_when_revocation_lands_mid_resolution() {
+async fn unqualified_resolution_aborts_when_service_denial_lands_mid_resolution() {
     let access = FakeAccess::start().await;
     let dir = tempfile::tempdir().unwrap();
     let client = paired(&access, &dir).await;
@@ -844,23 +844,84 @@ async fn unqualified_resolution_aborts_when_revocation_lands_mid_resolution() {
     client.config_store().save(&config).unwrap();
     *client.config.write().unwrap() = Some(config);
 
-    // Discovery succeeds with two Hosts; the device is revoked before the first
-    // per-Host session listing can complete.
+    // Discovery succeeds with two Hosts; Access then rejects the device token
+    // before the first per-Host session listing can complete.
     access.host.lock().unwrap().revoke_after_hosts = true;
     let error = client.session_key("session-1").await.unwrap_err();
     assert!(
         matches!(
             error,
-            CoreError::Revoked
-                | CoreError::RevokedRetentionUnverified
-                | CoreError::NotPaired
-                | CoreError::Unauthorized
+            CoreError::Revoked | CoreError::RevokedRetentionUnverified
         ),
-        "a revoked resolve must not return a key or an ambiguity hint: {error:?}"
+        "a denied resolve must not return a key or an ambiguity hint: {error:?}"
     );
-    assert!(matches!(
-        error,
-        CoreError::Revoked | CoreError::RevokedRetentionUnverified | CoreError::NotPaired
-    ));
-    assert!(!client.is_paired(), "confirmed revocation clears pairing");
+    // Service denial is not a confirmed revocation: both pins and the local
+    // grant survive, and the UI sees a pending observation rather than a
+    // completed local revoke.
+    assert!(client.is_paired(), "service denial retains local trust");
+    assert_eq!(
+        client.local_revocation_state().unwrap(),
+        Some("revocation_pending")
+    );
+    assert!(!client.runtime().is_revoked());
+
+    access.host.lock().unwrap().revoked = false;
+    assert_eq!(client.hosts().await.unwrap().len(), 2);
+    assert_eq!(client.local_revocation_state().unwrap(), None);
+}
+
+#[tokio::test]
+async fn service_denial_retains_independent_host_pins_and_both_cache_partitions() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = paired(&access, &dir).await;
+    access.host.lock().unwrap().extra_host = true;
+    let mut config = client.current_config().unwrap();
+    config
+        .host_fingerprints
+        .insert("host-2".into(), config.host_fingerprint.clone().unwrap());
+    client.config_store().save(&config).unwrap();
+    *client.config.write().unwrap() = Some(config.clone());
+    // Publish both pins and prime each Host's cache partition.
+    assert_eq!(client.hosts().await.unwrap().len(), 2);
+    assert_eq!(
+        client.sessions("host-1").await.unwrap().sessions[0].session_id,
+        "session-1"
+    );
+    assert_eq!(
+        client.sessions("host-2").await.unwrap().sessions[0].session_id,
+        "session-1"
+    );
+
+    // Access denies the device token. The denial is device-wide but retires
+    // neither pin nor either Host's cached rows.
+    access.revoke();
+    assert!(matches!(client.hosts().await, Err(CoreError::Revoked)));
+    let retained = client.current_config().unwrap();
+    assert_eq!(retained.host_fingerprint, config.host_fingerprint);
+    assert_eq!(
+        retained.host_fingerprints.get("host-2"),
+        config.host_fingerprints.get("host-2")
+    );
+    assert_eq!(
+        client.local_revocation_state().unwrap(),
+        Some("revocation_pending")
+    );
+    {
+        let cache = client.cache().unwrap();
+        let hosts = cache.load_hosts().unwrap();
+        assert!(hosts.iter().any(|host| host.host_id == "host-1"));
+        assert!(hosts.iter().any(|host| host.host_id == "host-2"));
+        assert!(!cache.load_sessions("host-1").unwrap().is_empty());
+        assert!(!cache.load_sessions("host-2").unwrap().is_empty());
+    }
+
+    // Both independent grants work again after service admission recovers,
+    // without re-pairing either Host. The fake Host serves one channel at a
+    // time, so drop cached channels first as an ordinary reconnect would.
+    access.host.lock().unwrap().revoked = false;
+    assert_eq!(client.hosts().await.unwrap().len(), 2);
+    client.runtime().accept_pairing();
+    assert_eq!(client.sessions("host-1").await.unwrap().source, "remote");
+    assert_eq!(client.sessions("host-2").await.unwrap().source, "remote");
 }

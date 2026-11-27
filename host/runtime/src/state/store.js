@@ -8,8 +8,12 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { PluginError } from '../errors.js'
+import { migrateGrantsSchema } from './grants-schema.js'
 
-const SCHEMA_VERSION = 6
+const SCHEMA_VERSION = 7
+// Versions this module can upgrade in place. A version outside this list and
+// below SCHEMA_VERSION is not guessed at.
+const LEGACY_SCHEMA_VERSIONS = ['1', '2', '3', '4', '5', '6']
 
 function blob(value) {
   if (value === null || value === undefined) return null
@@ -102,7 +106,7 @@ export class StateStore {
     const hasMeta=this.#db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'").get()
     if (hasMeta) {
       const current=this.getMeta('schema_version')
-      if (current!==null && !['1','2','3','4','5'].includes(current) && current!==String(SCHEMA_VERSION)) throw new PluginError('internal','unsupported state schema')
+      if (current!==null && !LEGACY_SCHEMA_VERSIONS.includes(current) && current!==String(SCHEMA_VERSION)) throw new PluginError('internal','unsupported state schema')
     }
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS meta (
@@ -168,6 +172,15 @@ export class StateStore {
     if (!peerColumns.some((column) => column.name === 'os')) {
       this.#db.exec(`ALTER TABLE peer_keys ADD COLUMN os TEXT NOT NULL DEFAULT ''`)
     }
+    // The Host-owned grant is the enrollment identity. These columns only
+    // mirror the durable grant row for this device key; the grant table stays
+    // the authority and every authorization re-reads it.
+    if (!peerColumns.some((column) => column.name === 'grant_id')) {
+      this.#db.exec('ALTER TABLE peer_keys ADD COLUMN grant_id TEXT')
+    }
+    if (!peerColumns.some((column) => column.name === 'grant_revision')) {
+      this.#db.exec('ALTER TABLE peer_keys ADD COLUMN grant_revision INTEGER')
+    }
     for (const table of ['peer_keys','applied_revocations']) {
       if (!this.#db.prepare(`PRAGMA table_info(${table})`).all().some(column=>column.name==='grant_generation')) {
         this.#db.exec(`ALTER TABLE ${table} ADD COLUMN grant_generation INTEGER NOT NULL DEFAULT 0`)
@@ -205,8 +218,12 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS event_outbox_device ON event_outbox (device_id, id);
     `)
     this.#db.exec('DROP TABLE IF EXISTS session_seqs; DROP TABLE IF EXISTS session_seq_points;')
+    // Host-owned device trust: grants, enrollment decisions, recovery
+    // verifiers/challenges and the Host-wide command journal. Additive to the
+    // same connection so every trust write shares one IMMEDIATE transaction.
+    migrateGrantsSchema(this.#db)
     const current = this.getMeta('schema_version')
-    if (current === null || ['1','2','3','4','5'].includes(current)) this.setMeta('schema_version', String(SCHEMA_VERSION))
+    if (current === null || LEGACY_SCHEMA_VERSIONS.includes(current)) this.setMeta('schema_version', String(SCHEMA_VERSION))
     else if (Number(current) !== SCHEMA_VERSION) {
       throw new PluginError('internal', 'state schema version unsupported')
     }
@@ -234,6 +251,17 @@ export class StateStore {
     } catch {
       // closing twice is not an error
     }
+  }
+
+  /**
+   * Narrow integration hook for the Host-owned device trust module. It exposes
+   * the shared SQLite handle and the store's IMMEDIATE transaction boundary so
+   * grants, enrollment decisions and the command journal share one writer and
+   * one durability guarantee with the rest of the state store. It is not a
+   * general-purpose database accessor.
+   */
+  trustStore() {
+    return { db: this.#db, transaction: (fn) => this.#tx(fn) }
   }
 
   // --- meta ---------------------------------------------------------------
@@ -284,13 +312,19 @@ export class StateStore {
 
   deletePendingPeer(claimId) { this.#db.prepare('DELETE FROM pending_peers WHERE claim_id=?').run(claimId) }
 
+  /** Fence every unfinished pairing for one device after its grant is revoked. */
+  deletePendingPeersForDevice(deviceId) {
+    const info = this.#db.prepare('DELETE FROM pending_peers WHERE device_id=?').run(deviceId)
+    return Number(info.changes)
+  }
+
   // --- peer keys ----------------------------------------------------------
 
-  upsertPeerKey({ deviceId, publicKey, fingerprint, claimId = null, grantGeneration = 0, pairedAt = this.#now(), displayName = '', os = '' }) {
+  upsertPeerKey({ deviceId, publicKey, fingerprint, claimId = null, grantGeneration = 0, grantId = null, grantRevision = null, pairedAt = this.#now(), displayName = '', os = '' }) {
     this.#tx(() => {
       this.#db.prepare(`
-        INSERT INTO peer_keys (device_id, public_key, fingerprint, claim_id, paired_at, display_name, os, grant_generation)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO peer_keys (device_id, public_key, fingerprint, claim_id, paired_at, display_name, os, grant_generation, grant_id, grant_revision)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(device_id) DO UPDATE SET
           public_key = excluded.public_key,
           fingerprint = excluded.fingerprint,
@@ -298,14 +332,16 @@ export class StateStore {
           paired_at = excluded.paired_at,
           display_name = excluded.display_name,
           os = excluded.os,
-          grant_generation = excluded.grant_generation
-      `).run(deviceId, blob(publicKey), fingerprint, claimId, pairedAt, displayName, os, grantGeneration)
+          grant_generation = excluded.grant_generation,
+          grant_id = excluded.grant_id,
+          grant_revision = excluded.grant_revision
+      `).run(deviceId, blob(publicKey), fingerprint, claimId, pairedAt, displayName, os, grantGeneration, grantId, grantRevision)
       // Revocation watermarks survive repair, so delayed COMMIT cannot resurrect an old grant.
     })
   }
 
   getPeerKey(deviceId) {
-    const row = this.#db.prepare('SELECT device_id, public_key, fingerprint, claim_id, paired_at, display_name, os, grant_generation FROM peer_keys WHERE device_id = ?').get(deviceId)
+    const row = this.#db.prepare('SELECT device_id, public_key, fingerprint, claim_id, paired_at, display_name, os, grant_generation, grant_id, grant_revision FROM peer_keys WHERE device_id = ?').get(deviceId)
     if (!row) return null
     return {
       deviceId: row.device_id,
@@ -313,6 +349,8 @@ export class StateStore {
       fingerprint: row.fingerprint,
       claimId: row.claim_id ?? null,
       grantGeneration: row.grant_generation,
+      grantId: row.grant_id ?? null,
+      grantRevision: row.grant_revision ?? null,
       pairedAt: row.paired_at,
       displayName: row.display_name ?? '',
       os: row.os ?? '',
@@ -321,13 +359,15 @@ export class StateStore {
 
   listPeerKeys() {
     return this.#db.prepare(`
-      SELECT device_id, fingerprint, paired_at, display_name, os FROM peer_keys ORDER BY paired_at DESC, device_id ASC
+      SELECT device_id, fingerprint, paired_at, display_name, os, grant_id, grant_revision FROM peer_keys ORDER BY paired_at DESC, device_id ASC
     `).all().map((row) => ({
       deviceId: row.device_id,
       fingerprint: row.fingerprint,
       pairedAt: row.paired_at,
       displayName: row.display_name ?? '',
       os: row.os ?? '',
+      grantId: row.grant_id ?? null,
+      grantRevision: row.grant_revision ?? null,
     }))
   }
 

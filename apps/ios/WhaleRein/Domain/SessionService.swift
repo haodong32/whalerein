@@ -93,8 +93,16 @@ protocol SessionService: AnyObject {
     func clearDraft(hostId: String, sessionId: String) async throws
 
     // Diagnostics
-    func diagnosticsPreview() async throws -> DiagnosticsReport
-    func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport
+    /// One capture of Core's immutable redacted diagnostic document.
+    ///
+    /// `refresh == false` returns the current capture (building it on the first
+    /// call); `refresh == true` replaces it with a new explicit capture. Reads
+    /// local Core state only: it never writes a file, uploads anything or opens
+    /// a channel.
+    func diagnosticsCapture(refresh: Bool) async throws -> DiagnosticsCapture
+    /// Local-only decoration for the capture's anonymous Host labels. See the
+    /// default implementation for the privacy contract.
+    func diagnosticsLocalHosts(for capture: DiagnosticsCapture) async -> [DiagnosticsLocalHost]
     /// Clears Core's bounded diagnostic journal for this instance.
     func clearDiagnostics() async throws
 
@@ -106,4 +114,13 @@ protocol SessionService: AnyObject {
 
 extension SessionService {
     func acceptsWatchEvent(_ envelope: SessionEventEnvelope) -> Bool { true }
+
+    /// Local-only decoration for the capture's anonymous Host labels.
+    ///
+    /// An implementation resolves the selected profile's currently authorized
+    /// directory entries and its verified Host binding. It returns only labels
+    /// it can associate unambiguously; the default returns nothing so every row
+    /// stays anonymous. Directory names, OS families and join keys must never
+    /// be written into the capture document, logs or telemetry.
+    func diagnosticsLocalHosts(for capture: DiagnosticsCapture) async -> [DiagnosticsLocalHost] { [] }
 }

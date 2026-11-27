@@ -204,6 +204,65 @@ only work bound to that reference, including when a sibling remains online.
 Snapshot reconciliation includes managed sessions and preserves closures newer
 than the snapshot boundary.
 
+## Self-status bootstrap
+
+A Device that lost the last grant-revocation receipt can submit one bounded
+status exchange at `POST /v1/hosts/{host_id}/self-status` on the existing
+verified HTTPS ingress. The route needs no bearer token, App session, Cloud
+login, renewable ticket or ordinary broker admission. It is not a submission
+path: the JSON body is a `HostRequest` whose `kind` must be
+`REQUEST_KIND_SELF_STATUS`, whose inline `body` is one `SelfStatusRequest`, and
+whose routing, identity, reference, transport and generation fields must be
+absent. Access re-encodes the decoded `SelfStatusRequest` into a fresh envelope
+with its own single-use correlation id, the bounded HTTP trace id, a
+five-second expiry and `relay_version=5`, so a caller cannot supply an identity
+or an ordinary request.
+
+Access publishes that envelope on the private service topic
+`whalerein/v1/h/{host_id}/svc/self-status/request` at QoS 1 with the correlation
+data and the exact
+`whalerein/v1/h/{host_id}/svc/self-status/reply` response topic. The addressed
+Host is the only subscriber; only that Host may publish the reply. Access
+subscribes to `whalerein/v1/h/+/svc/self-status/reply`. Devices get no entry for
+either topic from durable policy or the fixed Access ACL, so a Device cannot
+address the lane even with an active grant. Access never subscribes to the
+request topic and never publishes the reply.
+
+A reply is accepted only when the topic Host, `request_id`, `grant_id` and
+challenge all match the one live waiter that created it. A match settles the
+waiter in one step and the reply is returned as the Host-produced `SelfStatus`
+(`grant_id`, `challenge`, `active`, `revoked_at_unix_ms`). Access never
+synthesizes a status. `HostResult.status=rejected` maps to the same
+indistinguishable `404 not_found` answer as an unknown Host or foreign tuple;
+every other non-success reply maps to a bounded `503 unavailable` pending
+answer. A stale, duplicated, foreign or malformed reply is dropped without a
+second answer and without changing the waiter.
+
+The lane is transient and bounded: at most 256 in-flight exchanges per node, 32
+per Host and 8 per caller; a 512-byte decoded frame inside a 2 KiB JSON
+envelope; a 16–64 byte challenge; a 128-byte grant claim; a five-second
+exchange timeout; and a 10-minute, 4,096-entry challenge replay set. Reusing a
+challenge inside that window is `409 conflict`; a frame that never reached the
+Host does not consume the challenge. Access restart drops every waiter, and the
+caller retries as pending.
+
+The Host contract is the security boundary this lane depends on. Access forwards
+one `HostRequest{kind=SELF_STATUS, request_id=<Access random>, host_id=<path>,
+body=SelfStatusRequest{grant_id, challenge}, expires_at_unix_ms=<now+5s>,
+protocol_version=1, relay_version=5, trace_id=<bounded HTTP trace>}` with no
+`device_id`, command id, channel id, reference or transport metadata; the Host
+resolves the device from its retained grant row. The Host must treat the service
+topic as purpose-only, bind the fresh challenge to the device-possession proof
+it authenticates, match the proven device key against that row, answer only the
+exact tuple, and expose no session, grant-edit, enrollment, ticket-renewal or
+escalation operation from this dispatcher. A successful reply is one
+`HostResult{request_id=<echo>, host_id=<Host>, status=succeeded,
+result_body=SelfStatus{grant_id, challenge, active, revoked_at_unix_ms}}`; a
+tuple the Host will not disclose is `status=rejected` with no body. Access
+cannot verify device possession or Host authorship of the status bytes; it only
+enforces the purpose, the tuple correlation, the bounds and the private topic. A
+Host that answers without those checks would make the relay an oracle.
+
 ## Exact request liveness and cancellation
 
 A non-terminal one-shot request owns one client lease on its existing request
@@ -420,7 +479,9 @@ for granted Devices. Access publishes the request, device event, device notice
 and device reply topics and subscribes to results, events, device queries and
 device advertisements. Device previews are QoS 0; control and query topics stay
 QoS 1. The plugin policy is topic-based, so Access, Host and Core select the QoS
-by topic. Per-connection receive advertisements are keyed by the broker-derived
+by topic. The service-only self-status subtree is never projected to a Device:
+only Access publishes its request and only the addressed Host publishes its
+reply. Per-connection receive advertisements are keyed by the broker-derived
 connection generation, so a sibling reconnect never clears another receiver's
 budget; a grant or App-session revocation fences all of them.
 

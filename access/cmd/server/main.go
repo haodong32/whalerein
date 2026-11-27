@@ -41,6 +41,7 @@ import (
 	"github.com/whalerein/whalerein/access/internal/relay"
 	"github.com/whalerein/whalerein/access/internal/requests"
 	"github.com/whalerein/whalerein/access/internal/route"
+	"github.com/whalerein/whalerein/access/internal/selfstatus"
 	"github.com/whalerein/whalerein/access/internal/serverready"
 	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
@@ -455,6 +456,17 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 	service.SetQueryHandler(queryService)
 	relayService.SetQueryScopes(queryService)
 
+	selfStatusService, err := selfstatus.New(selfstatus.Dependencies{
+		Presence:  presence,
+		Publisher: service,
+		Metrics:   metrics,
+		Logger:    logger,
+	})
+	if err != nil {
+		return fmt.Errorf("self-status relay: %w", err)
+	}
+	service.SetSelfStatusHandler(selfStatusService)
+
 	requestDeps := requests.Dependencies{
 		Store:    db,
 		Broker:   service,
@@ -561,14 +573,14 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		logger.Warn("restore pending route operations failed", "error", err.Error())
 	}
 	service.SetReadyHandler(func(ctx context.Context, hostID string, ready *whalereinv1.HostReady) error {
-		return processHostReady(ctx, hostID, ready, routeService,
+		return processHostReady(ctx, hostID, ready, routeService, db.SetHostDirectory,
 			authService.ReplayPendingRevocations,
 			func(ctx context.Context, hostID string) error {
 				if externalService == nil {
 					return nil
 				}
 				return externalService.HandleHostReady(ctx, hostID)
-			})
+			}, logger)
 	})
 
 	dependencies := httpapi.Dependencies{
@@ -578,6 +590,9 @@ func runServerWithStore(ctx context.Context, cfg config.Config, logger *slog.Log
 		Auth:                     authService,
 		Pairing:                  pairingService,
 		Requests:                 requestService,
+		Directory:                db,
+		SelfStatus:               selfStatusService,
+		SelfStatusMaxBytes:       selfstatus.MaxRequestBytes,
 		Readiness:                readiness,
 		Metrics:                  metrics,
 		Masker:                   masker,
@@ -722,8 +737,18 @@ func observeRoute(metrics *diagnostics.Metrics, operation string, ok bool) {
 
 // processHostReady runs readiness side effects in a fixed order. A graceful
 // close is terminal for the route and does not advance enrollment readiness.
+// Display metadata is Host-owned and metadata-only, so persisting it is
+// non-fatal to readiness and logs only a stable code: neither the values nor
+// the storage error may reach a log.
 func processHostReady(ctx context.Context, hostID string, ready *whalereinv1.HostReady, routes *route.Service,
-	replayRevocations func(context.Context, string) error, handleEnrollment func(context.Context, string) error) error {
+	setDirectory func(context.Context, string, string, string) error,
+	replayRevocations func(context.Context, string) error, handleEnrollment func(context.Context, string) error,
+	logger *slog.Logger) error {
+	if setDirectory != nil {
+		if err := setDirectory(ctx, hostID, ready.GetDisplayName(), ready.GetOsFamily()); err != nil && logger != nil {
+			logger.Warn("host directory persist failed", "code", "host_directory_persist_failed")
+		}
+	}
 	if ready.GetRouteClosing() {
 		return routes.Close(ctx, hostID, ready)
 	}

@@ -337,6 +337,8 @@ final class LiveSessionService: SessionService {
             accessURL: accessURL,
             fingerprint: view.fingerprint,
             fingerprintDisplay: view.fingerprintDisplay,
+            displayName: view.displayName,
+            osFamily: view.osFamily,
             expiresAt: Date().addingTimeInterval(120)
         )
     }
@@ -739,20 +741,63 @@ final class LiveSessionService: SessionService {
 
     // MARK: - Diagnostics
 
-    func diagnosticsPreview() async throws -> DiagnosticsReport {
+    func diagnosticsCapture(refresh: Bool) async throws -> DiagnosticsCapture {
         let core = self.core
-        let view = try await call { try core.diagnosticsPreview() }
-        return Self.map(diagnostics: view)
+        // Core owns one immutable capture. `diagnosticsSnapshot` returns the
+        // existing bytes; only `refreshDiagnostics` replaces them. The model
+        // parses and shares exactly these bytes; there is no second export or
+        // Swift-side redaction pass.
+        let view = try await call {
+            if refresh {
+                return try core.refreshDiagnostics()
+            }
+            return try core.diagnosticsSnapshot()
+        }
+        return DiagnosticsCapture(
+            text: view.text,
+            bytes: Data(view.bytes),
+            localHostRefs: view.hosts.reduce(into: [:]) { refs, host in
+                // Duplicate labels are impossible from Core; last-write-wins
+                // keeps a malformed binding from trapping.
+                refs[host.label] = host.hostRef
+            },
+            redactionFields: view.redactionFields,
+            appVersion: view.appVersion,
+            coreVersion: view.coreVersion
+        )
     }
 
     func clearDiagnostics() async throws {
         try core.clearDiagnostics()
     }
 
-    func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {
-        let core = self.core
-        let view = try await call { try core.exportDiagnostics(path: url.path) }
-        return Self.map(diagnostics: view)
+    /// Local-only Host decoration for the captured labels.
+    ///
+    /// The capture carries the profile-scoped `host_ref` per anonymous label.
+    /// Only a currently signed-in managed profile can resolve a confirmed
+    /// directory name; a standalone profile, missing entitlement, an offline
+    /// directory or an ambiguous/foreign reference stays anonymous. The OS
+    /// family is included once the verified directory exposes it; today the
+    /// binding has no such field, so only the name is decorated.
+    func diagnosticsLocalHosts(for capture: DiagnosticsCapture) async -> [DiagnosticsLocalHost] {
+        guard !capture.localHostRefs.isEmpty else { return [] }
+        guard let directory = try? await cloudHosts() else { return [] }
+        var byID: [String: CloudDirectoryHost] = [:]
+        for host in directory {
+            byID[host.hostId] = host
+        }
+        return capture.localHostRefs.compactMap { label, ref in
+            guard let host = byID[ref],
+                  case .authorized = host.access,
+                  !host.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            return DiagnosticsLocalHost(
+                label: label,
+                displayName: host.displayName,
+                osFamily: nil
+            )
+        }
     }
 
     // MARK: - Device lifecycle
@@ -1017,7 +1062,7 @@ final class LiveSessionService: SessionService {
         )
     }
 
-    private static func map(approval view: ApprovalView) -> Approval {
+    static func map(approval view: ApprovalView) -> Approval {
         Approval(
             approvalId: view.approvalId,
             sessionId: view.sessionId,
@@ -1027,8 +1072,25 @@ final class LiveSessionService: SessionService {
             version: Int(view.version),
             expiresAtUnixMs: view.expiresAtUnixMs,
             digestHex: view.digestHex,
-            state: map(approvalState: view.state)
+            state: map(approvalState: view.state),
+            // The Host already bounded and masked these facts; carry them
+            // through verbatim. An empty fact stays absent instead of being
+            // guessed from the tool name or reason, and an unknown
+            // availability fails closed as `.unavailable`.
+            review: ApprovalReviewDetails(
+                action: nilIfEmpty(view.reviewAction),
+                target: nilIfEmpty(view.reviewTarget),
+                impact: nilIfEmpty(view.reviewImpact),
+                availability: ApprovalReviewAvailability(
+                    bindingLabel: view.reviewAvailability
+                )
+            )
         )
+    }
+
+    /// A Host-supplied review fact is absent when its bounded value is empty.
+    static func nilIfEmpty(_ value: String) -> String? {
+        value.isEmpty ? nil : value
     }
 
     static func map(message view: MessageView) -> ConversationMessage {
@@ -1173,109 +1235,6 @@ final class LiveSessionService: SessionService {
 
     private static func staticMessage(for code: AppErrorCode) -> String {
         L10nKey.errorKey(for: code).string
-    }
-
-    // MARK: - Diagnostics mapping
-
-    private static func map(diagnostics view: DiagnosticsReportView) -> DiagnosticsReport {
-        let object = (try? JSONSerialization.jsonObject(with: Data(view.json.utf8))) as? [String: Any]
-        let hosts = object?["hosts"] as? [[String: Any]] ?? []
-        let address = (object?["report"] as? [String: Any])?["address"] as? String
-        let lastFailure = view.lastFailureCode
-            ?? ((object?["last_failure"] as? [String: Any])?["code"] as? String)
-            ?? lastFailureFromEvents(object)
-        let generatedAt = generatedDate(from: object)
-        let failureStage = failureStage(for: lastFailure)
-        var stages: [DiagnosticStage] = []
-
-        for (index, host) in hosts.enumerated() {
-            let label = host["label"] as? String ?? "host-\(index + 1)"
-            let state = (host["connection_state"] as? String ?? "unknown").lowercased()
-            let https: DiagnosticStageStatus
-            if failureStage == .https {
-                https = .failed
-            } else if address?.isEmpty == false {
-                https = .ok
-            } else {
-                https = .idle
-            }
-            let mqtt: DiagnosticStageStatus
-            if failureStage == .mqtt {
-                mqtt = .failed
-            } else {
-                switch state {
-                case "connected": mqtt = .ok
-                case "offline", "revoked": mqtt = .failed
-                default: mqtt = .idle
-                }
-            }
-            stages.append(
-                DiagnosticStage(
-                    hostId: label,
-                    kind: .https,
-                    status: https,
-                    correlationId: "https-\(label)",
-                    failureCode: failureStage == .https ? lastFailure : nil
-                )
-            )
-            stages.append(
-                DiagnosticStage(
-                    hostId: label,
-                    kind: .mqtt,
-                    status: mqtt,
-                    correlationId: "mqtt-\(label)",
-                    failureCode: failureStage == .mqtt ? lastFailure : nil
-                )
-            )
-        }
-
-        if stages.isEmpty, let lastFailure {
-            let kind: DiagnosticStageKind = failureStage == .https ? .https : .mqtt
-            stages = [
-                DiagnosticStage(
-                    hostId: "local",
-                    kind: kind,
-                    status: .failed,
-                    correlationId: "core-local",
-                    failureCode: lastFailure
-                )
-            ]
-        }
-
-        return DiagnosticsReport(
-            json: view.json,
-            redactionFields: view.redactionFields,
-            lastFailureCode: lastFailure,
-            appVersion: view.appVersion,
-            coreVersion: view.coreVersion,
-            stages: stages,
-            generatedAt: generatedAt
-        )
-    }
-
-    private static func lastFailureFromEvents(_ object: [String: Any]?) -> String? {
-        guard let events = (object?["last_failure"] as? [String: Any])?["events"] as? [[String: Any]] else {
-            return nil
-        }
-        return events.last?["code"] as? String
-    }
-
-    private static func generatedDate(from object: [String: Any]?) -> Date {
-        if let value = object?["generated_at_unix_ms"] as? NSNumber {
-            return Date(timeIntervalSince1970: value.doubleValue / 1000)
-        }
-        return Date()
-    }
-
-    private static func failureStage(for code: String?) -> DiagnosticStageKind? {
-        guard let code = code?.lowercased() else { return nil }
-        if code.contains("mqtt") || code.contains("broker") || code.contains("subscription") {
-            return .mqtt
-        }
-        if code.contains("https") || code.contains("tls") || code.contains("access") || code.contains("http") {
-            return .https
-        }
-        return nil
     }
 }
 

@@ -128,6 +128,21 @@ impl NoiseSession {
             .map_err(|_| SecurityError::Crypto)
     }
 
+    /// Secret Noise Split outputs after the final handshake message.
+    ///
+    /// Returns `(k1, k2)` exactly as `snow` computes them: `k1` protects
+    /// initiator-to-responder records (the device `c2h` key) and `k2` protects
+    /// responder-to-initiator records (the host `h2c` key). These keys are
+    /// secret handshake outputs; only [crate::security::SecureChannel] exposes
+    /// them through its framing operations, and no error or debug output
+    /// includes them.
+    pub fn split_keys(&mut self) -> Result<([u8; 32], [u8; 32]), SecurityError> {
+        if !self.state.is_handshake_finished() {
+            return Err(SecurityError::HandshakeIncomplete);
+        }
+        Ok(self.state.dangerously_get_raw_split())
+    }
+
     /// Remote static public key learned during a completed handshake.
     pub fn remote_static(&self) -> Option<[u8; 32]> {
         self.state
@@ -190,11 +205,67 @@ mod tests {
     }
 
     #[test]
+    fn split_keys_agree_between_roles_and_change_per_handshake() {
+        let client = StaticIdentity::generate();
+        let host = StaticIdentity::generate();
+        let (mut first_client, mut first_host) = complete_pair(&client, &host);
+        let (mut second_client, mut second_host) = complete_pair(&client, &host);
+
+        let first = first_client.split_keys().unwrap();
+        assert_eq!(first, first_host.split_keys().unwrap());
+        assert_ne!(first.0, first.1, "directional split keys must differ");
+
+        let second = second_client.split_keys().unwrap();
+        assert_eq!(second, second_host.split_keys().unwrap());
+        assert_ne!(
+            first, second,
+            "fresh ephemerals must yield different split keys"
+        );
+        // The transcript hash stays public and identical on both sides.
+        assert_eq!(
+            first_client.handshake_hash().unwrap(),
+            first_host.handshake_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn split_keys_are_unavailable_before_completion() {
+        let client = StaticIdentity::generate();
+        let mut session = NoiseSession::initiator(&client, PROLOGUE).unwrap();
+        assert!(matches!(
+            session.split_keys(),
+            Err(SecurityError::HandshakeIncomplete)
+        ));
+        session.write(b"").unwrap();
+        assert!(matches!(
+            session.split_keys(),
+            Err(SecurityError::HandshakeIncomplete)
+        ));
+    }
+
+    #[test]
     fn different_prologue_breaks_handshake() {
         let client = StaticIdentity::generate();
         let host = StaticIdentity::generate();
         let mut initiator = NoiseSession::initiator(&client, "one").unwrap();
         let mut responder = NoiseSession::responder(&host, "two").unwrap();
+        let msg1 = initiator.write(b"hello").unwrap();
+        assert_eq!(responder.read(&msg1).unwrap(), b"hello");
+        let msg2 = responder.write(b"ready").unwrap();
+        assert!(matches!(
+            initiator.read(&msg2),
+            Err(SecurityError::AuthenticationFailed)
+        ));
+    }
+
+    #[test]
+    fn retired_v1_prologue_cannot_complete_a_v2_handshake() {
+        let client = StaticIdentity::generate();
+        let host = StaticIdentity::generate();
+        let mut initiator =
+            NoiseSession::initiator(&client, "whalerein/v1/channel|h|d|nego").unwrap();
+        let mut responder =
+            NoiseSession::responder(&host, "whalerein/v2/channel|h|d|nego").unwrap();
         let msg1 = initiator.write(b"hello").unwrap();
         assert_eq!(responder.read(&msg1).unwrap(), b"hello");
         let msg2 = responder.write(b"ready").unwrap();

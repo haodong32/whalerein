@@ -258,10 +258,30 @@ settlement of a failed submission never re-arms or acts on a newer intent.
 
 ## Diagnostics visibility
 
+Core produces one immutable, redacted capture per explicit request. The iOS
+screen (`DiagnosticsModel`) renders three views of those exact bytes: a grouped
+summary, an always-available expandable full report, and the file offered to the
+system share sheet. Swift does not filter, re-serialize or re-redact the
+document, and no path uploads it. "New capture" is the only way to replace the
+inspected snapshot; loading or previewing writes no file. A capture failure
+clears the snapshot and offers no share action.
+
+Tapping Share once stages a unique app-private temporary copy with file
+protection, opens the system destination picker once (no intervening in-app
+confirmation) and deletes the copy after completion or dismissal. A staging
+failure opens no picker. Cancelling the system sheet sends nothing from the app.
+
+Authorized local rows may show the selected profile's confirmed directory name
+and OS family as decoration resolved from the verified Host binding. This
+decoration lives only in the view model: the anonymous Host labels, the full
+report, the shared file, logs and metrics never contain directory names, OS
+families or the join key. A missing, ambiguous, switched-profile or
+unauthorized binding falls back to the anonymous label.
+
 The diagnostics entry point in the conversation toolbar is compiled only in
-`DEBUG` builds. Release builds keep the Core-side redacted report and its
-tests, but do not ship a toolbar shortcut for it; a release build should expose
-support tooling through an explicit support channel instead.
+`DEBUG` builds. Release builds reach the same screen through the explicit
+Settings support entry (`Settings > Diagnostics`), so support tooling does not
+depend on a debug-only shortcut.
 
 ## CI
 

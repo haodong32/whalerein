@@ -80,7 +80,7 @@ function payloads(ctx) {
   const out = []
   for (const bytes of ctx.access.published) {
     const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
-    out.push(openEventEnvelope({ envelope: outer, channel: ctx.channel, hostId: 'h', deviceId: 'd' }))
+    out.push(openEventEnvelope({ envelope: outer, cipher: ctx.channel.cipher, hostId: 'h', deviceId: 'd' }))
   }
   return out
 }

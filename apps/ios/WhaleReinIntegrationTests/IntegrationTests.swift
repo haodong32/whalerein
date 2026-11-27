@@ -1259,9 +1259,13 @@ extension IntegrationTestCase {
         let sessions = try await live.service.sessions(hostId: environment.hostId)
         XCTAssertTrue(sessions.contains { $0.sessionId == environment.sessionId })
 
-        let report = try await live.service.diagnosticsPreview()
-        XCTAssertTrue(report.stages.contains { $0.kind == .https && $0.status == .ok })
-        XCTAssertTrue(report.stages.contains { $0.kind == .mqtt && $0.status != .ok })
+        let capture = try await live.service.diagnosticsCapture(refresh: false)
+        let summary = DiagnosticsSummaryParser.parse(capture.text)
+        XCTAssertFalse(summary.hosts.isEmpty, "the capture must keep the anonymous Host row")
+        XCTAssertTrue(
+            summary.hosts.contains { $0.connectionState != "connected" },
+            "the capture must record the degraded Host connection"
+        )
 
         try await live.control.startBroker()
         let recovered = await watch.wait(timeout: 40) { lastConnection(in: $0) == .connected }
@@ -1283,31 +1287,49 @@ extension IntegrationTestCase {
             text: draft
         )
 
-        let report = try await live.service.diagnosticsPreview()
-        XCTAssertFalse(report.json.isEmpty)
-        XCTAssertFalse(report.redactionFields.isEmpty)
-        XCTAssertFalse(report.json.contains(draft), "diagnostics leaked the draft text")
+        let capture = try await live.service.diagnosticsCapture(refresh: false)
+        XCTAssertFalse(capture.text.isEmpty)
+        XCTAssertFalse(capture.redactionFields.isEmpty)
+        XCTAssertFalse(capture.text.contains(draft), "diagnostics leaked the draft text")
 
         // The contract invitation token must never appear in diagnostics.
-        if let components = URLComponents(string: environment.invitation),
-           let token = components.queryItems?.first(where: { $0.name == "token" })?.value,
-           !token.isEmpty {
-            XCTAssertFalse(report.json.contains(token), "diagnostics leaked the invitation token")
+        let invitationToken: String? = {
+            guard let components = URLComponents(string: environment.invitation),
+                  let token = components.queryItems?.first(where: { $0.name == "token" })?.value,
+                  !token.isEmpty else { return nil }
+            return token
+        }()
+        if let invitationToken {
+            XCTAssertFalse(
+                capture.text.contains(invitationToken),
+                "diagnostics leaked the invitation token"
+            )
         }
-        XCTAssertFalse(report.json.contains("fixture output"), "diagnostics leaked message text")
+        XCTAssertFalse(capture.text.contains("fixture output"), "diagnostics leaked message text")
 
-        let exportURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("WhaleReinIntegrationDiagnostics-\(UUID().uuidString).json")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: exportURL.path))
-        // Preview alone must not write a file.
-        XCTAssertFalse(FileManager.default.fileExists(atPath: exportURL.path))
-        _ = try await live.service.exportDiagnostics(to: exportURL)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: exportURL.path))
-        if let exported = try? String(contentsOf: exportURL, encoding: .utf8) {
-            XCTAssertFalse(exported.contains(draft))
-            XCTAssertFalse(exported.contains("fixture output"))
-        }
-        try? FileManager.default.removeItem(at: exportURL)
+        // The full report and the staged share file are the exact capture
+        // bytes. Loading the screen writes nothing by itself.
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "WhaleReinIntegrationDiagnostics-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        let model = DiagnosticsModel(service: live.service, stagingDirectory: staging)
+        await model.load()
+        XCTAssertEqual(model.fullReport, model.capture?.text)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staging.path))
+        await model.share()
+        let shared = try XCTUnwrap(model.shareFile, "share must stage the inspected bytes")
+        let sharedData = try Data(contentsOf: shared.url)
+        XCTAssertEqual(sharedData, model.capture?.bytes)
+        let sharedBytes = String(decoding: sharedData, as: UTF8.self)
+        XCTAssertEqual(sharedBytes, model.fullReport)
+        XCTAssertFalse(sharedBytes.contains(draft))
+        XCTAssertFalse(sharedBytes.contains("fixture output"))
+        XCTAssertFalse(sharedBytes.contains(invitationToken ?? UUID().uuidString))
+        model.shareCompleted(completed: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: shared.url.path))
+        try? FileManager.default.removeItem(at: staging)
     }
 }
 

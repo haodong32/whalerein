@@ -11,6 +11,15 @@ import (
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"google.golang.org/protobuf/proto"
 	"time"
+	"unicode"
+	"unicode/utf8"
+)
+
+// Host display metadata wire bounds, shared by the HostReady write and the
+// pre-pair directory read.
+const (
+	maxHostDisplayNameBytes = 64
+	maxHostOSFamilyBytes    = 16
 )
 
 // EnsureHost inserts a host on its first broker authentication and refreshes
@@ -49,6 +58,66 @@ func (s *Store) UpdateHostMetadata(ctx context.Context, hostID, fingerprint stri
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetHostDirectory persists the Host-owned display metadata reported in
+// HostReady. The values are bounded and control-character-free, and an empty
+// value is stored as given so the Host can clear its own directory entry.
+// A missing host returns ErrNotFound.
+func (s *Store) SetHostDirectory(ctx context.Context, hostID, displayName, osFamily string) error {
+	if !validHostDirectoryText(displayName, maxHostDisplayNameBytes) ||
+		!validHostDirectoryText(osFamily, maxHostOSFamilyBytes) {
+		return fmt.Errorf("set host directory: %w", ErrInvalidHostDirectory)
+	}
+	cmd, err := s.db.Exec(ctx, `
+		UPDATE hosts SET display_name = $2, os_family = $3, updated_at = now()
+		WHERE host_id = $1`, hostID, displayName, osFamily)
+	if err != nil {
+		return fmt.Errorf("set host directory: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// HostDirectory returns the display metadata for the exact unfinished
+// invitation identified by tokenHash. It reads hosts and pairing_tokens only:
+// no grant, route, account or credential state is touched or returned. A
+// used, expired, wrong-host or unknown token returns ErrNotFound.
+func (s *Store) HostDirectory(ctx context.Context, hostID string, tokenHash []byte, now time.Time) (HostDirectory, error) {
+	if hostID == "" || len(tokenHash) != sha256.Size {
+		return HostDirectory{}, ErrNotFound
+	}
+	var directory HostDirectory
+	err := s.db.QueryRow(ctx, `
+		SELECT h.host_id, h.display_name, h.os_family
+		FROM hosts h
+		JOIN pairing_tokens t ON t.host_id = h.host_id
+		WHERE t.token_hash = $1
+		  AND t.host_id = $2
+		  AND t.used_at IS NULL
+		  AND t.expires_at > $3`,
+		tokenHash, hostID, now).Scan(&directory.HostID, &directory.DisplayName, &directory.OSFamily)
+	if err != nil {
+		return HostDirectory{}, wrapRequestScan(err)
+	}
+	return directory, nil
+}
+
+// validHostDirectoryText enforces the display-metadata contract: a byte
+// bound, valid UTF-8 and no control characters. Empty is valid because a Host
+// may not have set a display name yet.
+func validHostDirectoryText(value string, maxBytes int) bool {
+	if len(value) > maxBytes || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 // SetHostAuthorizationKey stores the host Ed25519 public key once.

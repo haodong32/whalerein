@@ -39,17 +39,34 @@ function escapeApprovalField(value) {
  * and the shared vectors in `proto/v1/approval_digest_vectors.json`.
  * @param {object} approval approval fields; `approval_id` and camelCase aliases accepted.
  */
+export const APPROVAL_DIGEST_DOMAIN = 'whalerein/v2/approval'
+
+/** Normalize a review availability to the canonical lowercase token. */
+export function approvalReviewAvailability(value) {
+  const text = String(value ?? '').trim().toLowerCase()
+  if (text === 'complete' || text === 'approval_review_complete' || text === '1') return 'complete'
+  if (text === 'incomplete' || text === 'approval_review_incomplete' || text === '2') return 'incomplete'
+  return 'unavailable'
+}
+
 export function approvalDigest(approval) {
   const id = escapeApprovalField(approval.approvalId ?? approval.approval_id ?? '')
   const sessionId = escapeApprovalField(approval.sessionId ?? approval.session_id ?? '')
   const toolName = escapeApprovalField(approval.toolName ?? approval.tool_name ?? '')
   const callId = escapeApprovalField(approval.callId ?? approval.call_id ?? '')
   const reason = escapeApprovalField(approval.reason ?? '')
+  const action = escapeApprovalField(approval.reviewAction ?? approval.review_action ?? '')
+  const target = escapeApprovalField(approval.reviewTarget ?? approval.review_target ?? '')
+  const impact = escapeApprovalField(approval.reviewImpact ?? approval.review_impact ?? '')
+  const availability = escapeApprovalField(approvalReviewAvailability(
+    approval.reviewAvailability ?? approval.review_availability,
+  ))
   const version = approval.version ?? 0
   const expiresAt = approval.expiresAtUnixMs ?? approval.expires_at_unix_ms
     ?? approval.expiresAt ?? approval.expires_at ?? 0
   return sha256Text(
-    `whalerein/v1/approval|${id}|${sessionId}|${toolName}|${callId}|${reason}|${version}|${expiresAt}`,
+    `${APPROVAL_DIGEST_DOMAIN}|${id}|${sessionId}|${toolName}|${callId}|${reason}` +
+    `|${action}|${target}|${impact}|${availability}|${version}|${expiresAt}`,
   )
 }
 

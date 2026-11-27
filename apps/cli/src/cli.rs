@@ -48,7 +48,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub full: bool,
 
-    /// Consent to confirmation prompts (pairing, revoke, forget, diagnostic export).
+    /// Consent to confirmation prompts (pairing, revoke, forget, diagnostic overwrite).
     #[arg(long, global = true)]
     pub yes: bool,
 
@@ -78,7 +78,9 @@ enum AccountArgs {
         /// Remove the last failure's local diagnostic metadata.
         #[arg(long, conflicts_with = "export")]
         clear_diagnostics: bool,
-        /// Write a redacted diagnostic bundle after confirmation.
+        /// Write the captured redacted diagnostic report. A new file is created
+        /// without a second prompt; an existing regular file needs --yes or an
+        /// interactive overwrite confirmation.
         #[arg(long, value_name = "FILE")]
         export: Option<PathBuf>,
     },
@@ -927,7 +929,9 @@ pub enum Command {
     Doctor {
         /// Remove the last failure's local diagnostic metadata.
         clear_diagnostics: bool,
-        /// Write a redacted diagnostic bundle after confirmation.
+        /// Write the captured redacted diagnostic report. A new file is created
+        /// without a second prompt; an existing regular file needs --yes or an
+        /// interactive overwrite confirmation.
         export: Option<PathBuf>,
     },
     Connect {

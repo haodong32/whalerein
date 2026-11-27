@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -669,6 +670,139 @@ func TestFinishAuthorizesDeviceBeforeReturningTransportToken(t *testing.T) {
 	}
 }
 
+// The Host's COMMIT acknowledgement carries the exact Host-owned grant. Access
+// must return it to the Device and keep it on the durable outcome so a retry
+// after a lost response replays the same ID without a new Host round trip.
+func TestFinishPersistsAndReplaysHostGrantID(t *testing.T) {
+	const grantID = "grant_01HOSTOWNEDDEVICETRUSTACK"
+	f := newFixture(t)
+	ctx := context.Background()
+	_, token := f.invite(t)
+	answer := func(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+		var claim whalereinv1.PairingClaim
+		if err := proto.Unmarshal(req.GetBody(), &claim); err != nil {
+			return nil, err
+		}
+		result, err := defaultPairingAnswers(req)
+		if err != nil {
+			return nil, err
+		}
+		if claim.GetPhase() == whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT {
+			var ack whalereinv1.PairingClaimResult
+			if err := proto.Unmarshal(result.GetResultBody(), &ack); err != nil {
+				return nil, err
+			}
+			ack.GrantId = grantID
+			result.ResultBody, err = proto.Marshal(&ack)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return result, nil
+	}
+	f.transport.awaitFn = answer
+	if _, err := f.service.Claim(ctx, helloRequest(token, "grant-claim", "d1")); err != nil {
+		t.Fatal(err)
+	}
+	response, err := f.service.Claim(ctx, finishRequest(token, "grant-claim", "d1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetGrantId() != grantID {
+		t.Fatalf("response grant = %q, want %q", response.GetGrantId(), grantID)
+	}
+	outcome := f.store.outcomes["grant-claim"]
+	if outcome.GrantID != grantID || !outcome.HostConfirmed {
+		t.Fatalf("durable outcome = %+v, want the confirmed Host grant", outcome)
+	}
+
+	// An exact FINISH retry must replay the durable grant without contacting
+	// the Host again.
+	hostCalls := len(f.transport.requests)
+	retried, err := f.service.Claim(ctx, finishRequest(token, "grant-claim", "d1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.GetGrantId() != grantID {
+		t.Fatalf("retry grant = %q, want %q", retried.GetGrantId(), grantID)
+	}
+	if len(f.transport.requests) != hostCalls {
+		t.Fatalf("retry contacted the Host again: %d -> %d", hostCalls, len(f.transport.requests))
+	}
+	// A fresh service recovering from the same durable state returns the same
+	// grant after a restart.
+	restarted, err := New(Dependencies{Store: f.store, Policy: f.policy, Transport: f.transport,
+		Presence: f.presence, Config: f.service.cfg, Now: func() time.Time { return f.now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := restarted.Claim(ctx, finishRequest(token, "grant-claim", "d1"))
+	if err != nil || again.GetGrantId() != grantID {
+		t.Fatalf("restart grant = %q err = %v", again.GetGrantId(), err)
+	}
+}
+
+// A malformed Host grant identity is refused at the acknowledgement boundary
+// instead of being persisted or returned to the Device.
+func TestFinishRejectsMalformedHostGrantID(t *testing.T) {
+	for _, grantID := range []string{"with space", "slash/id", strings.Repeat("a", 129), "grant\nline"} {
+		t.Run(grantID[:min(len(grantID), 12)], func(t *testing.T) {
+			f := newFixture(t)
+			ctx := context.Background()
+			_, token := f.invite(t)
+			f.transport.awaitFn = func(req *whalereinv1.HostRequest) (*whalereinv1.HostResult, error) {
+				var claim whalereinv1.PairingClaim
+				if err := proto.Unmarshal(req.GetBody(), &claim); err != nil {
+					return nil, err
+				}
+				result, err := defaultPairingAnswers(req)
+				if err != nil {
+					return nil, err
+				}
+				if claim.GetPhase() == whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT {
+					var ack whalereinv1.PairingClaimResult
+					if err := proto.Unmarshal(result.GetResultBody(), &ack); err != nil {
+						return nil, err
+					}
+					ack.GrantId = grantID
+					result.ResultBody, err = proto.Marshal(&ack)
+					if err != nil {
+						return nil, err
+					}
+				}
+				return result, nil
+			}
+			if _, err := f.service.Claim(ctx, helloRequest(token, "bad-grant", "d1")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.service.Claim(ctx, finishRequest(token, "bad-grant", "d1")); !errors.Is(err, ErrHostRejected) {
+				t.Fatalf("grant %q error = %v, want ErrHostRejected", grantID, err)
+			}
+		})
+	}
+}
+
+// An old Host that predates Host-owned grants returns an empty grant ID. Access
+// must preserve that empty value without failing the pairing.
+func TestFinishKeepsEmptyGrantIDForOldHost(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, token := f.invite(t)
+	if _, err := f.service.Claim(ctx, helloRequest(token, "old-host", "d1")); err != nil {
+		t.Fatal(err)
+	}
+	response, err := f.service.Claim(ctx, finishRequest(token, "old-host", "d1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.GetGrantId() != "" {
+		t.Fatalf("old Host grant = %q, want empty", response.GetGrantId())
+	}
+	if outcome := f.store.outcomes["old-host"]; outcome.GrantID != "" || !outcome.HostConfirmed {
+		t.Fatalf("old Host outcome = %+v", outcome)
+	}
+}
+
 func sha256Sum(value []byte) []byte {
 	hash := sha256.Sum256(value)
 	return hash[:]
@@ -1173,10 +1307,13 @@ func (f *fakeStore) PairingGenerations(ctx context.Context, hash []byte, _ strin
 	return 0, 0, err
 }
 
-func (f *fakeStore) ConfirmPairingHost(_ context.Context, claimID, _, _, _ string, _ time.Time) (bool, error) {
+func (f *fakeStore) ConfirmPairingHost(_ context.Context, claimID, _, _, _, grantID string, _ time.Time) (bool, error) {
 	f.confirmCalls++
 	if outcome, ok := f.outcomes[claimID]; ok {
 		outcome.HostConfirmed = true
+		if grantID != "" {
+			outcome.GrantID = grantID
+		}
 		f.outcomes[claimID] = outcome
 	}
 	return true, nil

@@ -30,7 +30,7 @@ hkdf = "0.12"
 prost = "0.14"
 rand = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
-snow = { version = "0.9", features = ["default-resolver"] }
+snow = { version = "0.9", features = ["default-resolver", "risky-raw-split"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

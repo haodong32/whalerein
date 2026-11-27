@@ -46,6 +46,7 @@ fn fixture_approval(id: &str, state: whalerein_proto::ApprovalState) -> whalerei
         expires_at_unix_ms: 1_700_000_000_000,
         state: state as i32,
         decision: whalerein_proto::ApprovalDecision::Unspecified as i32,
+        ..Default::default()
     }
 }
 

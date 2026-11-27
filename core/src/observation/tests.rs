@@ -1468,6 +1468,7 @@ fn pending_approval(approval_id: &str) -> whalerein_proto::Approval {
         expires_at_unix_ms: 9_000_000_000_000,
         state: whalerein_proto::ApprovalState::Pending as i32,
         decision: whalerein_proto::ApprovalDecision::Unspecified as i32,
+        ..Default::default()
     }
 }
 

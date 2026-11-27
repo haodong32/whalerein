@@ -69,7 +69,7 @@ func confirmCloudGrant(t *testing.T, s *store.Store, workspace, hostID, deviceID
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, hostID, deviceID, notice.RequestId, now); err != nil || !confirmed {
+	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, hostID, deviceID, notice.RequestId, "", now); err != nil || !confirmed {
 		t.Fatalf("grant confirmation for %s/%s failed: %v", hostID, deviceID, err)
 	}
 }

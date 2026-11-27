@@ -49,6 +49,9 @@ func TestCloudPairingSeparatesInvitationTokensAndRequiresAnExactReplay(t *testin
 			return nil, err
 		}
 		reply.HostPublicKey = scope.HostKey
+		if claim.GetPhase() == whalereinv1.PairingPhase_PAIRING_PHASE_COMMIT {
+			reply.GrantId = "grant_cloud_hostowned"
+		}
 		result.ResultBody, err = proto.Marshal(&reply)
 		return result, err
 	}
@@ -103,6 +106,9 @@ func TestCloudPairingSeparatesInvitationTokensAndRequiresAnExactReplay(t *testin
 	reply, err := f.service.ClaimCloud(ctx, finish, scope)
 	if err != nil || reply.GetDeviceId() != scope.DeviceID || reply.GetClaimId() != scope.OperationID {
 		t.Fatalf("Cloud recovery lost original identity: %v", err)
+	}
+	if reply.GetGrantId() != "grant_cloud_hostowned" || f.store.outcomes[scope.OperationID].GrantID != "grant_cloud_hostowned" {
+		t.Fatalf("Cloud response grant = %q", reply.GetGrantId())
 	}
 	if f.store.confirmCalls != 1 {
 		t.Fatalf("Host activation count %d, want 1", f.store.confirmCalls)

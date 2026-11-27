@@ -2,6 +2,7 @@ package policy
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/whalerein/whalerein/access/internal/store"
@@ -15,11 +16,14 @@ func TestBuildHostPolicyListsOnlyItsOwnScopedTopics(t *testing.T) {
 	want := []Entry{
 		{Access: "read", Filter: "whalerein/v1/h/h1/presence"},
 		{Access: "read", Filter: "whalerein/v1/h/h1/request"},
+		{Access: "read", Filter: "whalerein/v1/h/h1/svc/self-status/request"},
 		{Access: "subscribe", Filter: "whalerein/v1/h/h1/presence"},
 		{Access: "subscribe", Filter: "whalerein/v1/h/h1/request"},
+		{Access: "subscribe", Filter: "whalerein/v1/h/h1/svc/self-status/request"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/d/+/live"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/event"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/result"},
+		{Access: "write", Filter: "whalerein/v1/h/h1/svc/self-status/reply"},
 	}
 	if !reflect.DeepEqual(connection.Entries, want) {
 		t.Fatalf("entries = %+v", connection.Entries)
@@ -35,11 +39,14 @@ func TestBuildHostPolicyEmitsGrantScopedDirectPreviewWrites(t *testing.T) {
 	want := []Entry{
 		{Access: "read", Filter: "whalerein/v1/h/h1/presence"},
 		{Access: "read", Filter: "whalerein/v1/h/h1/request"},
+		{Access: "read", Filter: "whalerein/v1/h/h1/svc/self-status/request"},
 		{Access: "subscribe", Filter: "whalerein/v1/h/h1/presence"},
 		{Access: "subscribe", Filter: "whalerein/v1/h/h1/request"},
+		{Access: "subscribe", Filter: "whalerein/v1/h/h1/svc/self-status/request"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/d/+/live"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/event"},
 		{Access: "write", Filter: "whalerein/v1/h/h1/result"},
+		{Access: "write", Filter: "whalerein/v1/h/h1/svc/self-status/reply"},
 		{Access: "write", Revision: 1, HostID: "h1", Filter: "whalerein/v1/h/h1/d/d1/live"},
 	}
 	if !reflect.DeepEqual(connection.Entries, want) {
@@ -128,11 +135,14 @@ func TestFormatRendersTheVersionedHostAndDevicePolicy(t *testing.T) {
 			want: "whalerein/1\nok\nkind host\nhost h1\nrevision 0\nready 1\n" +
 				"acl read 0 - whalerein/v1/h/h1/presence\n" +
 				"acl read 0 - whalerein/v1/h/h1/request\n" +
+				"acl read 0 - whalerein/v1/h/h1/svc/self-status/request\n" +
 				"acl subscribe 0 - whalerein/v1/h/h1/presence\n" +
 				"acl subscribe 0 - whalerein/v1/h/h1/request\n" +
+				"acl subscribe 0 - whalerein/v1/h/h1/svc/self-status/request\n" +
 				"acl write 0 - whalerein/v1/h/h1/d/+/live\n" +
 				"acl write 0 - whalerein/v1/h/h1/event\n" +
-				"acl write 0 - whalerein/v1/h/h1/result\n",
+				"acl write 0 - whalerein/v1/h/h1/result\n" +
+				"acl write 0 - whalerein/v1/h/h1/svc/self-status/reply\n",
 		},
 		{
 			name: "device",
@@ -204,5 +214,33 @@ func TestControlMessagesRenderTheSetRequest(t *testing.T) {
 	}
 	if got := ControlMessages(connection, "whalerein-device-d1", 10000); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ControlMessages() = %#v", got)
+	}
+}
+
+// TestDevicePolicyNeverContainsTheSelfStatusServiceSubtree pins the privacy
+// requirement: no Device, with or without a live grant, can address the
+// bootstrap service lane that Access and the Host use.
+func TestDevicePolicyNeverContainsTheSelfStatusServiceSubtree(t *testing.T) {
+	connection := Build(KindDevice, "", "d1", []store.AdmissionGrant{
+		{HostID: "h1", DeviceID: "d1", Active: true, GrantGeneration: 9},
+		{HostID: "h2", DeviceID: "d1", Active: true, GrantGeneration: 2},
+	})
+	for _, entry := range connection.Entries {
+		if strings.Contains(entry.Filter, "/svc/") {
+			t.Fatalf("device policy contains a service topic: %+v", entry)
+		}
+	}
+	host := Build(KindHost, "h1", "", nil)
+	var requestSubscribe, replyPublish bool
+	for _, entry := range host.Entries {
+		switch entry.Filter {
+		case "whalerein/v1/h/h1/svc/self-status/request":
+			requestSubscribe = requestSubscribe || (entry.Access == "subscribe" || entry.Access == "read")
+		case "whalerein/v1/h/h1/svc/self-status/reply":
+			replyPublish = replyPublish || entry.Access == "write"
+		}
+	}
+	if !requestSubscribe || !replyPublish {
+		t.Fatalf("host policy lacks the service lane: %+v", host.Entries)
 	}
 }

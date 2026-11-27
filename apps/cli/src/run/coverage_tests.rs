@@ -155,7 +155,7 @@ async fn grouped_lifecycle_fork_keeps_child_on_failed_summary() {
         .contains("child still exists and must not be retried or deleted"));
 }
 
-fn approval(id: &str, state: ApprovalState) -> Approval {
+pub(super) fn approval(id: &str, state: ApprovalState) -> Approval {
     Approval {
         approval_id: id.into(),
         session_id: "session-1".into(),
@@ -167,6 +167,11 @@ fn approval(id: &str, state: ApprovalState) -> Approval {
         expires_at_unix_ms: 9,
         state: state as i32,
         decision: ApprovalDecision::Unspecified as i32,
+        review_action: "Change one file".into(),
+        review_target: "Sources/App.swift".into(),
+        review_impact: "Replaces the selected file content.".into(),
+        review_availability: whalerein_proto::ApprovalReviewAvailability::ApprovalReviewComplete
+            as i32,
     }
 }
 
@@ -229,8 +234,261 @@ async fn grouped_approval_reads_scoped_list_and_terminal_states() {
 }
 
 #[tokio::test]
+async fn approval_review_renders_host_facts_and_states_limitation() {
+    let f = Fixture::paired().await;
+    {
+        let mut host = f.access.host.lock().unwrap();
+        host.approvals = vec![
+            approval("complete", ApprovalState::Pending),
+            {
+                let mut review = approval("incomplete", ApprovalState::Pending);
+                review.review_action = "Change [REDACTED] credential scope".into();
+                review.review_target = "Sources/[REDACTED].swift".into();
+                review.review_impact = String::new();
+                review.review_availability =
+                    whalerein_proto::ApprovalReviewAvailability::ApprovalReviewIncomplete as i32;
+                review
+            },
+            {
+                let mut absent = approval("absent", ApprovalState::Pending);
+                absent.review_action = String::new();
+                absent.review_target = String::new();
+                absent.review_impact = String::new();
+                absent.review_availability =
+                    whalerein_proto::ApprovalReviewAvailability::ApprovalReviewUnspecified as i32;
+                absent
+            },
+        ];
+    }
+    let before = f.access.host.lock().unwrap().approval_queries.len();
+    let list = f
+        .run(&["session", "approval", "list", "--session", "session-1"])
+        .await;
+    assert_eq!(list.exit, 0, "{list:?}");
+    // The review facts already arrived with the one list response; rendering
+    // never issues another approval query.
+    assert_eq!(
+        f.access.host.lock().unwrap().approval_queries.len(),
+        before + 1
+    );
+    assert!(list.human.contains("review: complete"), "{}", list.human);
+    assert!(list.human.contains("action: Change one file"));
+    assert!(list
+        .human
+        .contains("impact: Replaces the selected file content."));
+    // Values arrive masked from the Host and are rendered exactly, with no
+    // reconstructed raw argument text.
+    assert!(list
+        .human
+        .contains("action: Change [REDACTED] credential scope"));
+    assert!(list.human.contains("target: Sources/[REDACTED].swift"));
+    // Missing impact and unavailable default are never presented as a full
+    // review, and no fact is guessed from the tool name or reason.
+    assert!(list.human.contains("review: incomplete"), "{}", list.human);
+    assert!(list.human.contains("review: unavailable"), "{}", list.human);
+    // The limitation is advisory: the CLI no longer claims to withhold Allow,
+    // because the resolution is submitted to the Host regardless.
+    assert!(list.human.contains("review limitation:"), "{}", list.human);
+    assert!(list.human.contains("not fully reviewed"), "{}", list.human);
+    assert!(!list.human.contains("Allow is withheld"), "{}", list.human);
+    assert!(!list.human.contains("target: fixture"));
+    assert!(!list.human.contains("action: review"));
+
+    // Reject remains available with the explicit digest/version guard while
+    // approval presence does not change that requirement.
+    let rejected = f
+        .run(&[
+            "session",
+            "approval",
+            "reject",
+            "--request",
+            "absent",
+            "--digest",
+            &"01".repeat(32),
+            "--version",
+            "3",
+            "--host",
+            "host-1",
+        ])
+        .await;
+    assert_eq!(rejected.exit, 0, "{rejected:?}");
+    assert_eq!(
+        f.access.host.lock().unwrap().approval_resolutions.last(),
+        Some(&(
+            "host-1".into(),
+            "absent".into(),
+            ApprovalDecision::Reject as i32
+        ))
+    );
+}
+
+#[tokio::test]
+async fn approval_approve_submits_incomplete_and_complete_reviews_without_a_detail_read() {
+    let f = Fixture::paired().await;
+    {
+        let mut host = f.access.host.lock().unwrap();
+        host.approvals = vec![
+            {
+                // Keep the complete fixture on the digest this test submits,
+                // so the approved resolution matches the review it displays.
+                let mut complete = approval("complete", ApprovalState::Pending);
+                complete.digest = vec![0xab; 32];
+                complete
+            },
+            {
+                let mut incomplete = approval("incomplete", ApprovalState::Pending);
+                incomplete.digest = vec![0xab; 32];
+                incomplete.review_impact = String::new();
+                incomplete.review_availability =
+                    whalerein_proto::ApprovalReviewAvailability::ApprovalReviewIncomplete as i32;
+                incomplete
+            },
+            {
+                let mut unavailable = approval("unavailable", ApprovalState::Pending);
+                unavailable.digest = vec![0xab; 32];
+                unavailable.review_availability =
+                    whalerein_proto::ApprovalReviewAvailability::ApprovalReviewUnavailable as i32;
+                unavailable
+            },
+            {
+                // A `complete` label cannot stand in for an empty essential
+                // fact; the limitation display still calls it out, but it no
+                // longer blocks the resolution.
+                let mut empty_fact = approval("empty-fact", ApprovalState::Pending);
+                empty_fact.digest = vec![0xab; 32];
+                empty_fact.review_target = String::new();
+                empty_fact
+            },
+        ];
+    }
+    let digest = "ab".repeat(32);
+    for request in ["complete", "incomplete", "unavailable", "empty-fact"] {
+        let (commands_before, queries_before, resolutions_before) = {
+            let host = f.access.host.lock().unwrap();
+            (
+                host.commands_seen,
+                host.approval_queries.len(),
+                host.approval_resolutions.len(),
+            )
+        };
+        let outcome = f
+            .run(&[
+                "session",
+                "approval",
+                "approve",
+                "--request",
+                request,
+                "--digest",
+                &digest,
+                "--version",
+                "3",
+                "--host",
+                "host-1",
+            ])
+            .await;
+        assert_eq!(outcome.exit, 0, "{request}: {outcome:?}");
+        let envelope = outcome.to_json();
+        assert_eq!(envelope["command"], "session.approval.approve");
+        assert_eq!(envelope["data"]["status"], "host_accepted");
+        let host = f.access.host.lock().unwrap();
+        // Exactly one resolution carrying the requested approval, decision and
+        // the CLI's digest/version guard. The fake records the resolved
+        // identity; the digest/version travel in the same ResolveApproval
+        // request and are enforced by the Host (see native-dsh approval tests).
+        assert_eq!(host.approval_resolutions.len(), resolutions_before + 1);
+        assert_eq!(
+            host.approval_resolutions.last(),
+            Some(&(
+                "host-1".into(),
+                request.to_owned(),
+                ApprovalDecision::Approve as i32
+            )),
+            "{request}"
+        );
+        assert_eq!(host.commands_seen, commands_before + 1, "{request}");
+        // Approve must not pre-read the detail: review facts belong to the
+        // list/detail read path only.
+        assert_eq!(host.approval_queries.len(), queries_before, "{request}");
+    }
+    assert_eq!(f.access.host.lock().unwrap().approval_resolutions.len(), 4);
+}
+
+#[tokio::test]
+async fn approval_approve_ignores_detail_read_failure_and_keeps_core_error_mapping() {
+    let f = Fixture::paired().await;
+    {
+        let mut host = f.access.host.lock().unwrap();
+        // A pre-read would fail here. Approve has no pre-read, so the
+        // resolution still goes out exactly once.
+        host.approval_error = Some(ErrorCode::Unavailable);
+    }
+    let commands_before = f.access.host.lock().unwrap().commands_seen;
+    let outcome = f
+        .run(&[
+            "session",
+            "approval",
+            "approve",
+            "--request",
+            "request-1",
+            "--digest",
+            &"ab".repeat(32),
+            "--version",
+            "3",
+            "--host",
+            "host-1",
+        ])
+        .await;
+    assert_eq!(outcome.exit, 0, "{outcome:?}");
+    assert_eq!(outcome.to_json()["command"], "session.approval.approve");
+    {
+        let host = f.access.host.lock().unwrap();
+        assert_eq!(
+            host.approval_resolutions,
+            vec![(
+                "host-1".into(),
+                "request-1".into(),
+                ApprovalDecision::Approve as i32
+            )]
+        );
+        assert_eq!(host.commands_seen, commands_before + 1);
+        assert!(
+            host.approval_queries.is_empty(),
+            "{:?}",
+            host.approval_queries
+        );
+    }
+
+    // Core failures keep their normal mapping; there is no special
+    // `approval_unavailable` rewrite left on the approve path.
+    f.access.host.lock().unwrap().host_online = false;
+    let offline = f
+        .run(&[
+            "session",
+            "approval",
+            "approve",
+            "--request",
+            "request-1",
+            "--digest",
+            &"ab".repeat(32),
+            "--version",
+            "3",
+            "--host",
+            "host-1",
+        ])
+        .await;
+    assert_eq!(offline.exit, 5, "{offline:?}");
+    assert_eq!(offline.to_json()["error"]["code"], "host_offline");
+    let host = f.access.host.lock().unwrap();
+    assert_eq!(host.approval_resolutions.len(), 1);
+    assert_eq!(host.commands_seen, commands_before + 1);
+    assert!(host.approval_queries.is_empty());
+}
+
+#[tokio::test]
 async fn grouped_approval_actions_reject_invalid_digest_before_submission() {
     let f = Fixture::paired().await;
+    // Seed a pending approval so both resolutions use the same visible request.
+    f.access.host.lock().unwrap().approvals = vec![approval("request-1", ApprovalState::Pending)];
     let digest = "01".repeat(32);
     for (action, decision) in [
         ("approve", ApprovalDecision::Approve),
@@ -297,9 +555,15 @@ async fn grouped_diagnostics_retains_failure_identity_and_redacts_bundle() {
     let path = f.directory.path().join("diagnostics.json");
     let path = path.to_str().unwrap();
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        // A fresh path needs no second prompt, even noninteractive.
+        let fresh = f.run(&["doctor", "--export", path]).await;
+        assert_eq!(fresh.exit, 0, "{fresh:?}");
+        let first_bytes = std::fs::read(path).unwrap();
+        // Replacing the now-existing regular file needs affirmative consent.
         let denied = f.run(&["doctor", "--export", path]).await;
-        assert_eq!(denied.exit, 2);
-        assert!(!std::path::Path::new(path).exists());
+        assert_eq!(denied.exit, 2, "{denied:?}");
+        assert_eq!(denied.to_json()["error"]["code"], "invalid_argument");
+        assert_eq!(std::fs::read(path).unwrap(), first_bytes);
     }
     let invalid = f
         .run(&[

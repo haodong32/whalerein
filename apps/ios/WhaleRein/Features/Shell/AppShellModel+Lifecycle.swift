@@ -142,63 +142,219 @@ extension AppShellModel {
 
     // MARK: - Scene lifecycle
 
+    /// Ordered owner of process scene transitions. The synchronous part runs
+    /// inside this call: the shield is visible and rendering is paused before
+    /// the system takes its snapshot and before anything is awaited. The
+    /// returned task completes the ordered asynchronous part.
+    ///
+    /// Every notification is accepted by `AppSceneLifecycle`; a repeat for the
+    /// current phase is coalesced. Each accepted transition runs after the
+    /// previous one, so a background suspension always finishes before its
+    /// foreground resume and a stale completion cannot override a newer phase.
+    @discardableResult
+    func scenePhaseDidChange(_ phase: AppScenePhase) -> Task<Void, Never> {
+        guard let transition = shell.scene.accept(phase) else {
+            // A duplicate notification must not perform any side effect twice.
+            // Re-apply the current presentation only; a pending resume keeps
+            // the shield up.
+            reapplyCurrentScenePresentation()
+            return sceneTransitionTask ?? Task {}
+        }
+        applyScenePresentation(
+            for: transition.phase,
+            resumesObservation: transition.resumesObservation
+        )
+        let activation = activationGeneration
+        let previous = sceneTransitionTask
+        let task = Task { [weak self] in
+            // Serialize transitions: the async half of an older notification
+            // completes before the next accepted one starts.
+            await previous?.value
+            guard let self, self.isCurrentActivation(activation) else { return }
+            await self.performSceneTransition(transition)
+        }
+        sceneTransitionTask = task
+        return task
+    }
+
+    /// Awaitable entry used by tests and non-SwiftUI callers. The synchronous
+    /// shield and pause still happen before the first suspension.
     func handleScenePhase(_ phase: AppScenePhase) async {
+        await scenePhaseDidChange(phase).value
+    }
+
+    /// Applies the immediate, non-async part of one accepted phase. The shield
+    /// and the rendering pause are set here so a sensitive surface is covered
+    /// before any awaiting work starts.
+    private func applyScenePresentation(
+        for phase: AppScenePhase,
+        resumesObservation: Bool
+    ) {
         switch phase {
+        case .inactive:
+            // Inactivity only hides the visible surface and stops clock-driven
+            // updates. The watch, its cursor and the event subscription stay.
+            isPrivacyShieldVisible = true
+            conversation?.pauseForInactivity()
+        case .background:
+            isPrivacyShieldVisible = true
+            conversation?.pauseForInactivity()
+            resumeMarker = AppResumeMarker(
+                recordedAt: Date(),
+                hostId: conversation?.hostId ?? selectedHostId,
+                sessionId: conversation?.sessionId
+            )
         case .active:
-            await becomeActive()
-        case .inactive, .background:
-            await enterBackground()
+            if isRevoked {
+                // The revoked screen carries no conversation content.
+                isPrivacyShieldVisible = false
+                return
+            }
+            if resumesObservation {
+                // Keep the last authorized frame covered until the ordered
+                // resume has reconciled it from the retained cursor.
+                isPrivacyShieldVisible = true
+            } else {
+                isPrivacyShieldVisible = false
+                conversation?.resumeForInactivity()
+            }
         }
     }
 
-    /// Hides sensitive content immediately (including during the transition to
-    /// inactive, before the system takes its snapshot), flushes the draft and
-    /// records where the session was when the app was suspended.
-    func enterBackground() async {
-        isPrivacyShieldVisible = true
-        guard !isInBackground else { return }
-        isInBackground = true
-        resumeMarker = AppResumeMarker(
-            recordedAt: Date(),
-            hostId: conversation?.hostId ?? selectedHostId,
-            sessionId: conversation?.sessionId
-        )
+    /// Idempotent presentation for a repeated notification for the current
+    /// phase. Unlike a real transition it never starts or completes a resume,
+    /// and it never reveals content while a background resume is pending.
+    private func reapplyCurrentScenePresentation() {
+        switch shell.scene.phase {
+        case .inactive, .background:
+            isPrivacyShieldVisible = true
+            conversation?.pauseForInactivity()
+        case .active:
+            if isRevoked {
+                isPrivacyShieldVisible = false
+            } else if shell.scene.observationSuspended {
+                isPrivacyShieldVisible = true
+            } else {
+                isPrivacyShieldVisible = false
+                conversation?.resumeForInactivity()
+            }
+        }
+    }
+
+    /// Async half of one accepted transition. Background suspension always
+    /// completes, even when a newer notification superseded it, because losing
+    /// the draft flush or leaving the watch running would break the suspension
+    /// guarantee. A foreground resume, by contrast, is only started by the
+    /// newest transition.
+    private func performSceneTransition(_ transition: AppSceneLifecycle.Transition) async {
+        switch transition.phase {
+        case .inactive:
+            // Nothing to await: the shield, the pause and the retained watch
+            // are entirely synchronous.
+            break
+        case .background:
+            await suspendObservationForBackground()
+        case .active:
+            if transition.resumesObservation {
+                await resumeObservationAfterBackground(transition)
+            } else {
+                await reconcileInterruptedConversationIfNeeded()
+            }
+        }
+    }
+
+    /// Persists the draft normally and stops the watch exactly once for one
+    /// actual background entry. `suspendForBackground` is idempotent, so a
+    /// duplicate notification cannot stop the watch twice.
+    private func suspendObservationForBackground() async {
         if let conversation {
             await conversation.suspendForBackground()
         }
         connectivity.stopMonitoring()
     }
 
-    /// Reconnects the visible session with a fresh watch instead of leaving a
-    /// half-open stream, then refreshes the switcher and cached banner.
-    func becomeActive() async {
-        isPrivacyShieldVisible = false
-        guard isInBackground else { return }
-        isInBackground = false
-        guard isPaired, !isRevoked else { return }
-        let generation = activationGeneration
+    /// A brief interruption keeps the watch. If that watch ended for a real
+    /// reason while inactive (transport loss or Host rejection), reconcile once
+    /// from the cursor instead of presenting a dead conversation.
+    private func reconcileInterruptedConversationIfNeeded() async {
+        guard let conversation, conversation.needsReconnectAfterInterruption else { return }
+        await conversation.reconnectWatch()
+    }
 
+    /// One ordered foreground resume for the currently selected, authorized
+    /// session. The shield stays up until reconciliation completes; every step
+    /// after an await is fenced against a newer transition and a replaced
+    /// runtime, so a stale resume cannot reveal content or reopen work.
+    private func resumeObservationAfterBackground(_ transition: AppSceneLifecycle.Transition) async {
+        guard shell.scene.isCurrent(transition) else { return }
+        let activation = activationGeneration
+        if isRevoked {
+            revealAfterSceneTransition(transition)
+            return
+        }
         if case .failed(.keychainUnavailable) = rootState {
             await retryLaunch()
+            guard shell.scene.isCurrent(transition), isCurrentActivation(activation) else { return }
+            if isRevoked {
+                revealAfterSceneTransition(transition)
+                return
+            }
         }
-        guard isCurrentActivation(generation) else { return }
+        guard isPaired else {
+            revealAfterSceneTransition(transition)
+            return
+        }
         if let conversation {
             await conversation.resumeAfterForeground()
+            guard shell.scene.isCurrent(transition), isCurrentActivation(activation) else { return }
+            guard !isRevoked else {
+                // A revocation surfaced during the resume must not be followed
+                // by switcher or operation refreshes; reveal the blocked state.
+                revealAfterSceneTransition(transition)
+                return
+            }
         } else if case .empty = rootState {
             didBootstrap = false
             await bootstrapConversation()
+            guard shell.scene.isCurrent(transition), isCurrentActivation(activation) else { return }
+            guard !isRevoked else {
+                revealAfterSceneTransition(transition)
+                return
+            }
         }
-        guard isCurrentActivation(generation) else { return }
+        // Reconciled from the retained cursor: the current authorized view may
+        // be shown again.
+        revealAfterSceneTransition(transition)
         await refreshSwitcher()
+        guard shell.scene.isCurrent(transition), isCurrentActivation(activation) else { return }
         updateCachedBanner()
         startHostMonitoringIfNeeded()
         await refreshVisibleOperationResults()
     }
 
+    /// Ends one background suspension and reveals the current content, but only
+    /// while this transition is still the newest. A newer background or
+    /// inactive notification keeps the shield up.
+    private func revealAfterSceneTransition(_ transition: AppSceneLifecycle.Transition) {
+        guard shell.scene.isCurrent(transition) else { return }
+        shell.scene.observationDidResume()
+        isPrivacyShieldVisible = false
+    }
+
+    /// Compatibility entry for tests: one actual background entry.
+    func enterBackground() async {
+        await handleScenePhase(.background)
+    }
+
+    /// Compatibility entry for tests: one foreground resume.
+    func becomeActive() async {
+        await handleScenePhase(.active)
+    }
+
     /// Starts (or restarts) the app-level Host probe for every visible Host.
-    /// Called after launch restore and on every foreground return.
+    /// Called after launch restore and on every completed foreground return.
     func startHostMonitoringIfNeeded() {
-        guard isPaired, !isRevoked, !isInBackground else { return }
+        guard isPaired, !isRevoked, shell.scene.isActiveAndResumed else { return }
         let hostIds = hostList.hosts.map(\.hostId)
         guard !hostIds.isEmpty else { return }
         connectivity.startMonitoring(service: service, hostIds: hostIds)

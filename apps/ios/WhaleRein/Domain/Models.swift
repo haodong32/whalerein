@@ -34,6 +34,9 @@ struct PairingPrompt: Identifiable, Hashable, Sendable {
     let accessURL: URL
     let fingerprint: String
     let fingerprintDisplay: String
+    /// Advisory pre-pair directory preview; empty when Access did not answer.
+    let displayName: String
+    let osFamily: String
     /// Presentation addition: the confirmation window the user can act within.
     let expiresAt: Date
 
@@ -308,12 +311,56 @@ struct Approval: Identifiable, Hashable, Sendable {
     let expiresAtUnixMs: Int64
     let digestHex: String
     var state: ApprovalState
+    /// Bounded, Host-masked review facts for this exact variant. `nil` means
+    /// the Host did not supply a projection, so the card states the
+    /// limitation; Allow remains available but is bound to this exact
+    /// version/digest rather than to the completeness of the facts.
+    var review: ApprovalReviewDetails? = nil
 
     var id: String { approvalId }
 
     var expiresAt: Date { Date(timeIntervalSince1970: Double(expiresAtUnixMs) / 1000) }
 
     var isActionable: Bool { state == .pending }
+}
+
+/// One Host-projected review for a protected tool call. The values are already
+/// bounded and credential-masked on the Host; the client renders them as facts
+/// and never reconstructs or guesses a missing one from the tool name or raw
+/// arguments.
+struct ApprovalReviewDetails: Hashable, Sendable {
+    let action: String?
+    let target: String?
+    let impact: String?
+    let availability: ApprovalReviewAvailability
+
+    /// Every essential fact is present and verified for this variant.
+    var isComplete: Bool {
+        guard availability == .complete else { return false }
+        return !(action ?? "").isEmpty
+            && !(target ?? "").isEmpty
+            && !(impact ?? "").isEmpty
+    }
+}
+
+enum ApprovalReviewAvailability: String, Hashable, Sendable {
+    /// The Host verified every essential fact for this call.
+    case complete
+    /// The Host could not safely establish an essential fact.
+    case incomplete
+    /// The Host released no review details for this device (missing facts or
+    /// no current approval right). The card states the limitation and exposes
+    /// nothing.
+    case unavailable
+
+    init(bindingLabel: String) {
+        switch bindingLabel.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "complete": self = .complete
+        case "incomplete": self = .incomplete
+        case "unavailable", "unauthorized", "forbidden", "revoked": self = .unavailable
+        default: self = .unavailable
+        }
+    }
 }
 
 /// Identifies the exact approval variant the user reviewed. A decision is only
@@ -511,35 +558,36 @@ struct CommandReceipt: Identifiable, Hashable, Sendable {
 
 // MARK: - Diagnostics
 
-enum DiagnosticStageKind: String, Codable, Sendable {
-    case https
-    case mqtt
+/// One immutable redacted diagnostic capture produced by Core.
+///
+/// `document` is the only shareable diagnostic artifact: the summary parses it,
+/// the full-report view renders it verbatim, and share writes exactly these
+/// UTF-8 bytes. Swift never filters, re-serializes or re-redacts it, and it
+/// never contains local directory names, OS families or join keys.
+struct DiagnosticsCapture: Hashable, Sendable {
+    /// The captured document decoded without rewriting it. The full report
+    /// renders this value.
+    let text: String
+    /// Exactly the bytes Core captured. Share writes these bytes verbatim.
+    let bytes: Data
+    /// Local-only label -> profile-scoped Host identity, used only to resolve
+    /// directory decoration. It is never serialized, logged or shared and is
+    /// dropped when the capture is replaced.
+    let localHostRefs: [String: String]
+    let redactionFields: [String]
+    let appVersion: String
+    let coreVersion: String
 }
 
-enum DiagnosticStageStatus: String, Codable, Sendable {
-    case ok
-    case failed
-    case idle
-}
-
-struct DiagnosticStage: Identifiable, Hashable, Sendable {
-    let hostId: String
-    let kind: DiagnosticStageKind
-    let status: DiagnosticStageStatus
-    let correlationId: String?
-    let failureCode: String?
-
-    var id: String { "\(hostId).\(kind.rawValue)" }
-}
-
-struct DiagnosticsReport: Hashable, Sendable {
-    var json: String
-    var redactionFields: [String]
-    var lastFailureCode: String?
-    var appVersion: String
-    var coreVersion: String
-    var stages: [DiagnosticStage]
-    var generatedAt: Date
+/// One local-only decoration for a capture's anonymous Host label. The view
+/// model resolves it from the selected profile's verified directory binding;
+/// these values never enter the captured document or any log.
+struct DiagnosticsLocalHost: Equatable, Sendable {
+    /// The snapshot-local anonymous label the capture assigned, e.g. `host-1`.
+    let label: String
+    let displayName: String
+    /// The confirmed OS family from the directory, when it is available.
+    let osFamily: String?
 }
 
 // MARK: - Events

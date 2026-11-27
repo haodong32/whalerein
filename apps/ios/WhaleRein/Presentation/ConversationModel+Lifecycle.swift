@@ -46,6 +46,10 @@ extension ConversationModel {
     }
 
     private func restoreConversationDraft() async {
+        // A composer edit or an accepted send while the claim is in flight owns
+        // the text now. The stored draft is older than that action and must not
+        // resurrect text the user already sent or replaced.
+        let editAtStart = draftEditID
         do {
             let claim = try await drafts.claim(hostId: hostId, sessionId: sessionId) { [weak self] editID, persisted in
                 self?.applySubmittedDraftClear(editID: editID, persisted: persisted)
@@ -55,7 +59,9 @@ extension ConversationModel {
                 return
             }
             draftLease = claim.lease
-            if draft.isEmpty, clearedDraftBeforeRestore != claim.editID {
+            if draft.isEmpty,
+               draftEditID == editAtStart,
+               clearedDraftBeforeRestore != claim.editID {
                 draft = claim.text
                 draftEditID = claim.editID
             }
@@ -77,26 +83,75 @@ extension ConversationModel {
         if opening, loaded.running, loaded.supportsSteer { delivery = .steer }
     }
 
-    /// Flushes the draft while keeping the single observation alive. Core owns
-    /// continuity even when iOS suspends the app's network execution.
+    /// Stops visible rendering and clock-driven updates for a brief interruption.
+    /// The healthy watch, its cursor and the event subscription stay alive, so
+    /// returning to active renders the current authorized view without a
+    /// resubscription or an artificial offline state.
+    func pauseForInactivity() {
+        guard !isClosed, !isRenderingPaused else { return }
+        isRenderingPaused = true
+        stopApprovalTimer()
+    }
+
+    /// Restores rendering after a brief interruption. This transition performs
+    /// no network work: the watch that stayed alive already delivered the
+    /// latest authorized view.
+    func resumeForInactivity() {
+        guard !isClosed, isRenderingPaused, !isSuspended else { return }
+        isRenderingPaused = false
+        approvalClock = now()
+        restartApprovalTimer()
+    }
+
+    /// True when the retained watch failed or its consumer ended on its own, so
+    /// a foreground return must reconcile it once instead of presenting a dead
+    /// conversation. The phase transition itself never sets this.
+    var needsReconnectAfterInterruption: Bool {
+        !isClosed && (watchEnded || consumeTask == nil)
+    }
+
+    /// Persists the draft before an instance switch. Unlike a background entry
+    /// this does not stop the watch or pause rendering, so a failed switch
+    /// leaves the current conversation live.
+    func flushDraftForInstanceSwitch() async {
+        guard !isClosed else { return }
+        await persistDraftNow()
+    }
+
+    /// Persists the draft and suspends the Core watch exactly once for one
+    /// actual background entry. The app-level event consumer stays alive, so
+    /// the foreground resume starts one watch from the Core cursor without
+    /// duplicating subscriptions. Repeated notifications are guarded here as
+    /// well as by the ordered scene owner.
     func suspendForBackground() async {
-        guard !isSuspended else { return }
+        guard !isClosed, !isSuspended else { return }
         isSuspended = true
+        isRenderingPaused = true
         await persistDraftNow()
         stopApprovalTimer()
         wait.close()
+        service.stopWatch()
     }
 
+    /// One foreground resume for the selected, authorized session. The watch is
+    /// restarted exactly once and continues from Core's retained cursor; the
+    /// existing event consumer is reused so no duplicate subscription or
+    /// message is created.
     func resumeAfterForeground() async {
-        guard isSuspended else { return }
+        guard !isClosed, isSuspended else { return }
         isSuspended = false
+        isRenderingPaused = false
         approvalClock = now()
         restartApprovalTimer()
-        if watchEnded || consumeTask == nil {
-            await reconnectWatch()
-        } else {
-            await queue.refresh()
-        }
+        watchEnded = false
+        errorKey = nil
+        lastAppliedSequence = -1
+        ensureSubscription()
+        guard !isReconnecting else { return }
+        isReconnecting = true
+        defer { isReconnecting = false }
+        await startWatchConnection()
+        onReconnected?()
     }
 
     /// Recovery path for a watch that ended on its own. The composer disables

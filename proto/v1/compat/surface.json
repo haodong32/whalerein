@@ -1,6 +1,7 @@
 {
   "enums": [
     "whalerein.v1.ApprovalDecision",
+    "whalerein.v1.ApprovalReviewAvailability",
     "whalerein.v1.ApprovalState",
     "whalerein.v1.AttemptOutcome",
     "whalerein.v1.BlockKind",
@@ -77,6 +78,7 @@
     "GET /v1/hosts",
     "POST /v1/hosts/{host_id}/requests",
     "GET /v1/hosts/{host_id}/authority",
+    "GET /v1/hosts/{host_id}/directory",
     "GET /v1/requests/{request_id}",
     "POST /v1/requests/{request_id}/heartbeat",
     "DELETE /v1/devices/{device_id}",
@@ -145,6 +147,7 @@
     "whalerein.v1.HostCapabilities",
     "whalerein.v1.HostClients",
     "whalerein.v1.HostCredential",
+    "whalerein.v1.HostDirectory",
     "whalerein.v1.HostEnrollmentRequest",
     "whalerein.v1.HostEnrollmentResponse",
     "whalerein.v1.HostEnrollmentStatus",
@@ -240,6 +243,8 @@
     "whalerein.v1.RouteDiscovery",
     "whalerein.v1.ScopedAuthority",
     "whalerein.v1.SelectSessionModel",
+    "whalerein.v1.SelfStatus",
+    "whalerein.v1.SelfStatusRequest",
     "whalerein.v1.SendMessage",
     "whalerein.v1.SessionKey",
     "whalerein.v1.SessionList",

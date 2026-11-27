@@ -1349,10 +1349,10 @@ func TestPairingReceiptRequiresExactActiveGrantGeneration(t *testing.T) {
 	if err != nil || !outcome.Active || !bytes.Equal(outcome.TokenHash, invitationHash) || !bytes.Equal(outcome.FinishHash, op.FinishHash) {
 		t.Fatal("committed outcome mismatch")
 	}
-	if _, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, "wrong-request", now); err == nil {
+	if _, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, "wrong-request", "", now); err == nil {
 		t.Fatal("wrong request confirmed Host")
 	}
-	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, now); err != nil || !confirmed {
+	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, "", now); err != nil || !confirmed {
 		t.Fatal("valid Host confirmation not saved")
 	}
 	outcome, err = s.PairingOutcome(ctx, op.ClaimID, op.DeviceID)
@@ -1373,7 +1373,7 @@ func TestPairingReceiptRequiresExactActiveGrantGeneration(t *testing.T) {
 	if err != nil || saved.Active {
 		t.Fatal("superseded grant recovered through old receipt")
 	}
-	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, now); err != nil || confirmed {
+	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, "", now); err != nil || confirmed {
 		t.Fatal("superseded grant was confirmed")
 	}
 

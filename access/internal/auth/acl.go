@@ -21,6 +21,7 @@ const (
 	accessEvent       = "whalerein/v1/h/+/event"
 	accessDeviceQuery = "whalerein/v1/h/+/d/+/query"
 	accessDeviceReady = "whalerein/v1/h/+/d/+/ready"
+	accessSelfStatus  = "whalerein/v1/h/+/svc/self-status/reply"
 
 	sysConnected    = "$SYS/brokers/+/clients/+/connected"
 	sysDisconnected = "$SYS/brokers/+/clients/+/disconnected"
@@ -56,7 +57,7 @@ func (s *Service) authorizeAccessACL(action ACLAction, topic string) bool {
 		return topic == accessResult || topic == accessEvent ||
 			topic == accessDeviceQuery ||
 			topic == sysConnected || topic == sysDisconnected ||
-			topic == accessDeviceReady
+			topic == accessDeviceReady || topic == accessSelfStatus
 	case ActionPublish:
 		parsed, ok := parseTopic(topic)
 		if !ok {
@@ -66,6 +67,7 @@ func (s *Service) authorizeAccessACL(action ACLAction, topic string) bool {
 			(parsed.kind == "device_event" && parsed.hostID != "") ||
 			(parsed.kind == "device_notice" && parsed.hostID != "") ||
 			(parsed.kind == "device_reply" && parsed.hostID != "") ||
+			(parsed.kind == "service_self_status_request" && parsed.hostID != "") ||
 			parsed.kind == "presence"
 	}
 	return false
@@ -81,11 +83,14 @@ func (s *Service) authorizeHostACL(identity BrokerIdentity, action ACLAction, to
 	}
 	switch action {
 	case ActionSubscribe:
-		return parsed.kind == "request" || parsed.kind == "presence"
+		return parsed.kind == "request" || parsed.kind == "presence" ||
+			parsed.kind == "service_self_status_request"
 	case ActionPublish:
-		// A Host publishes results, control events and its authorized direct
-		// device previews. The retired h/{host}/live relay is never allowed.
+		// A Host publishes results, control events, its authorized direct
+		// device previews and the bounded self-status reply for its own service
+		// request. The retired h/{host}/live relay is never allowed.
 		return parsed.kind == "result" || parsed.kind == "event" ||
+			parsed.kind == "service_self_status_reply" ||
 			(parsed.kind == "device_live" && parsed.hostID == identity.HostID)
 	}
 	return false
@@ -152,8 +157,25 @@ func parseTopic(topic string) (parsedTopic, bool) {
 			return parsedTopic{}, false
 		}
 	case 4:
-		hostID, marker, deviceID, leaf := parts[0], parts[1], parts[2], parts[3]
-		if hostID == "" || deviceID == "" || strings.ContainsAny(hostID+deviceID, "+#") {
+		hostID, marker, middle, leaf := parts[0], parts[1], parts[2], parts[3]
+		if hostID == "" || strings.ContainsAny(hostID, "+#") {
+			return parsedTopic{}, false
+		}
+		if marker == "svc" {
+			if middle != "self-status" {
+				return parsedTopic{}, false
+			}
+			switch leaf {
+			case "request":
+				return parsedTopic{hostID: hostID, kind: "service_self_status_request"}, true
+			case "reply":
+				return parsedTopic{hostID: hostID, kind: "service_self_status_reply"}, true
+			default:
+				return parsedTopic{}, false
+			}
+		}
+		deviceID := middle
+		if deviceID == "" || strings.ContainsAny(deviceID, "+#") {
 			return parsedTopic{}, false
 		}
 		if marker != "d" {

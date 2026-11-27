@@ -105,6 +105,90 @@ def test_answer_reads_stdin_and_rejects_unusable_input(scenario, paired_device, 
     assert paired_device.call("session", "question", "list", "--session", session_id)["batches"] == []
 
 
+def test_invitation_directory_discloses_display_metadata_before_pairing(scenario):
+    """A valid invitation can discover the Host display name and OS family without creating a grant."""
+    import urllib.parse
+
+    from environment import Device, http
+
+    invitation = http("/v1/pairing/invitations", {"hostId": scenario.host}, scenario.admin)
+    token = urllib.parse.parse_qs(urllib.parse.urlparse(invitation["pairingUri"]).query)["token"][0]
+    directory = http(f"/v1/hosts/{scenario.host}/directory", token=token)
+    assert directory["hostId"] == scenario.host
+    assert directory["displayName"], "HostReady carried no display name"
+    assert directory["osFamily"] == "Linux"
+    # The directory read is not consumption: the same invitation still pairs.
+    device = Device(scenario.directory, "directory-device")
+    device.pair(invitation["pairingUri"])
+    assert device.sessions(scenario.host) == []
+
+
+def test_self_status_answers_from_the_live_host(scenario, paired_device):
+    """The unauthenticated bootstrap lane reaches the real Host, which answers the exact grant and challenge."""
+    import base64
+    import sqlite3
+    import time
+    import urllib.error
+    import urllib.request
+
+    device_id = paired_device.identity["device_id"]
+    with sqlite3.connect(scenario.env["WHALEREIN_DATABASE_PATH"]) as connection:
+        row = connection.execute(
+            "SELECT grant_id FROM pairing_outcomes WHERE device_id=? AND host_confirmed=1",
+            (device_id,),
+        ).fetchone()
+    assert row is not None and row[0], "Access kept no confirmed grant for the paired device"
+    grant_id = row[0]
+
+    def varint(value):
+        out = bytearray()
+        while value > 0x7F:
+            out.append((value & 0x7F) | 0x80)
+            value >>= 7
+        out.append(value)
+        return bytes(out)
+
+    def field(number, payload):
+        return varint((number << 3) | 2) + varint(len(payload)) + payload
+
+    def status():
+        challenge = os.urandom(32)
+        frame = field(1, grant_id.encode("utf-8")) + field(2, challenge)
+        request = urllib.request.Request(
+            f"http://127.0.0.1:18080/v1/hosts/{scenario.host}/self-status",
+            data=json.dumps({
+                "hostId": scenario.host,
+                "kind": "REQUEST_KIND_SELF_STATUS",
+                "body": base64.b64encode(frame).decode("ascii"),
+            }).encode("utf-8"),
+            headers={"content-type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                assert response.status == 200
+                return json.load(response), challenge
+        except urllib.error.HTTPError as error:
+            raise AssertionError(f"self-status HTTP {error.code}") from error
+
+    active, challenge = status()
+    assert active["grantId"] == grant_id
+    assert active["challenge"] == base64.b64encode(challenge).decode("ascii")
+    assert active["active"] is True
+
+    paired_device.revoke()
+    # Revocation is delivered to the Host asynchronously; poll with a fresh
+    # challenge until the Host has processed its notice.
+    revoked = None
+    for _ in range(50):
+        revoked, _ = status()
+        if revoked.get("grantId") == grant_id and revoked.get("active", False) is False:
+            break
+        time.sleep(0.2)
+    assert revoked is not None and revoked.get("grantId") == grant_id
+    assert revoked.get("active", False) is False
+
+
 @pytest.mark.relay_directory
 def test_question_payload_pages_and_oversized_detail(scenario, paired_device, session_id):
     """Large complete question pages keep every batch and oversized detail is explicitly unavailable."""
@@ -148,6 +232,8 @@ def test_question_answer_replay_across_plugin_restart(scenario, paired_device, s
 
 def test_pair(scenario):
     """When an unpaired device accepts a valid invitation, its host-bound credentials authorize a session query."""
+    import sqlite3
+
     device = scenario.pair()
     assert device.identity["device_id"]
     assert any(
@@ -155,6 +241,24 @@ def test_pair(scenario):
         for host in device.hosts()
     ), "Pairing did not authorize the invited host"
     assert device.sessions(scenario.host) == []
+    # The Host grant identity crosses the real COMMIT ack and is durable on
+    # both sides: Access keeps the confirmed outcome for retries and the Host's
+    # peer row keeps the same committed grant. The session query above proves
+    # the channel installed for that grant.
+    with sqlite3.connect(scenario.env["WHALEREIN_DATABASE_PATH"]) as connection:
+        access_grant = connection.execute(
+            "SELECT grant_id, host_confirmed FROM pairing_outcomes WHERE device_id=?",
+            (device.identity["device_id"],),
+        ).fetchone()
+    with sqlite3.connect(scenario.directory / "plugin/state.sqlite") as connection:
+        host_grant = connection.execute(
+            "SELECT grant_id FROM peer_keys WHERE device_id=?",
+            (device.identity["device_id"],),
+        ).fetchone()
+    assert access_grant is not None and access_grant[1] == 1, "Access did not keep the confirmed outcome"
+    assert host_grant is not None and host_grant[0], "Host did not store the committed grant"
+    assert access_grant[0] == host_grant[0], "Access outcome and Host grant disagree"
+    assert access_grant[0].startswith("grant_") and access_grant[0].strip() == access_grant[0]
 
 
 def test_hosts(scenario, paired_device):

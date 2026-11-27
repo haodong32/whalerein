@@ -184,17 +184,6 @@ extension L10nKey {
         count == 1 ? .conversationUnreadCount : .conversationUnreadCountPlural
     }
 
-    static func diagnosticStageKey(for status: DiagnosticStageStatus) -> L10nKey {
-        switch status {
-        case .ok:
-            return .diagnosticsStageOk
-        case .failed:
-            return .diagnosticsStageFailed
-        case .idle:
-            return .diagnosticsStageIdle
-        }
-    }
-
     static func deliveryKey(for delivery: DeliveryChoice) -> L10nKey {
         switch delivery {
         case .send:

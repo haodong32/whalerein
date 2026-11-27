@@ -248,6 +248,59 @@ extension AppScenePhase {
     }
 }
 
+// MARK: - Sheet privacy shield
+
+/// One shell-owned flag shared with every presented surface. The root ZStack
+/// cannot cover a sheet because a sheet is presented in its own window, so each
+/// sheet content reads this value and renders the same opaque shield.
+private struct PrivacyShieldVisibleKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var privacyShieldVisible: Bool {
+        get { self[PrivacyShieldVisibleKey.self] }
+        set { self[PrivacyShieldVisibleKey.self] = newValue }
+    }
+}
+
+/// Covers one presented surface with the root privacy shield while the scene is
+/// inactive, backgrounded or waiting for an authorized resume.
+struct PrivacyShieldOverlay: ViewModifier {
+    let isVisible: Bool
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            if isVisible {
+                PrivacyShieldView()
+                    .transition(.opacity)
+            }
+        }
+    }
+}
+
+/// Environment-driven variant for nested sheets presented from a surface that
+/// does not own the shell model (the session switcher, Settings and pairing).
+private struct EnvironmentPrivacyShieldOverlay: ViewModifier {
+    @Environment(\.privacyShieldVisible) private var isVisible
+
+    func body(content: Content) -> some View {
+        content.privacyShield(isVisible)
+    }
+}
+
+extension View {
+    /// Shields an individual presentation with the shell's current flag.
+    func privacyShield(_ isVisible: Bool) -> some View {
+        modifier(PrivacyShieldOverlay(isVisible: isVisible))
+    }
+
+    /// Shields a nested sheet from the shell flag carried in the environment.
+    func privacyShieldFromEnvironment() -> some View {
+        modifier(EnvironmentPrivacyShieldOverlay())
+    }
+}
+
 #Preview {
     Text(verbatim: "WhaleRein")
 }

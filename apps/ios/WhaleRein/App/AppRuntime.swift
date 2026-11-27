@@ -60,11 +60,20 @@ final class AppRuntime {
         }
     }
 
-    func handleScenePhase(_ phase: AppScenePhase) async {
+    /// Synchronous scene entry. The privacy shield and the rendering pause must be
+/// applied before the system snapshots the app, so this performs the immediate
+/// part and returns the ordered transition task. Background transitions also
+/// flush the redacted log here instead of on a later turn.
+    @discardableResult
+    func scenePhaseDidChange(_ phase: AppScenePhase) -> Task<Void, Never> {
         if phase == .background {
             AppLog.shared.flush()
         }
-        await legacy.handleScenePhase(phase)
+        return legacy.scenePhaseDidChange(phase)
+    }
+
+    func handleScenePhase(_ phase: AppScenePhase) async {
+        await scenePhaseDidChange(phase).value
     }
 
     func handleOpenURL(_ url: URL) async {

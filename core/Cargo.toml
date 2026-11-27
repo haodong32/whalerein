@@ -24,7 +24,6 @@ fs4 = { workspace = true }
 getrandom = { workspace = true }
 hex = { workspace = true }
 hmac = "0.12"
-hkdf = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
 ring = "0.17"
@@ -64,6 +63,7 @@ keyring = { version = "3.6", features = ["windows-native"], optional = true }
 keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"], optional = true }
 
 [dev-dependencies]
+hkdf = { workspace = true }
 rcgen = "0.14"
 tempfile = { workspace = true }
 tokio = { workspace = true }

@@ -11,14 +11,11 @@ import {
   NoiseXX,
   NoiseError,
   channelPrologue,
-  deriveChannelKeys,
   eventAad,
   fingerprint,
   formatFingerprint,
-  open,
   pairingPrologue,
   requestAad,
-  seal,
 } from './noise.js'
 import { randomBytes } from 'node:crypto'
 import { bytesEqual, sha256Bytes } from './digest.js'
@@ -26,6 +23,7 @@ import { codec as defaultCodec, resolveCodec } from '../protocol.js'
 import { PluginError } from '../errors.js'
 import { sanitizeDisplayName } from '../display-name.js'
 import { sanitizeOs } from '../os.js'
+import { DeviceTrustStore } from './grants.js'
 import {
   RELAY_VERSION,
   resolveTransportProfile,
@@ -43,6 +41,13 @@ export const HOST_CAPABILITIES = Object.freeze([
   'sync',
   'snapshot',
 ])
+
+/**
+ * Rights granted by the existing owner-approved pairing flow. A sponsored
+ * enrollment carries only what its sponsor selected, and never a grantable
+ * ceiling or add-device authority.
+ */
+export const DEFAULT_ENROLLMENT_RIGHTS = Object.freeze(['read', 'write', 'approve'])
 
 const TOKEN_HASH = /^[0-9a-fA-F]{64}$/
 const PENDING_TTL_MS = 120_000
@@ -115,6 +120,12 @@ export class SecurityManager {
    * @param {number} [options.maxHostChannels]
    * @param {(channels: Array<{deviceId: string, channelId: string}>, reason: string) => void} [options.onClosedChannels]
    * @param {(channels: Array<{deviceId: string, channelId: string}>, deviceIds: string[]) => void} [options.onRevokedChannels]
+   * @param {import('./grants.js').DeviceTrustStore} [options.trust] Host-owned
+   *   grant store. Defaults to one over the same open state store so tests and
+   *   embeddings that construct the manager directly share the authority.
+   * @param {(context: {claim: object, deviceId: string, devicePublicKey: Uint8Array}) => ({approver: object, useRights?: string[]})} [options.resolveEnrollmentApprover]
+   *   Host-local owner/sponsor selection for a COMMIT. Defaults to the owner
+   *   flow, which is the only path the current wire exposes.
    * @param {() => object} [options.receiveAdvertisement] Host receive limits for
    *   the authenticated broker connection generation. Re-evaluated per channel
    *   handshake so a reconnect can never reuse an older generation.
@@ -135,6 +146,8 @@ export class SecurityManager {
     onClosedChannels = () => {},
     onRevokedDevices = () => {},
     onRevokedChannels = () => {},
+    trust = null,
+    resolveEnrollmentApprover = null,
     receiveAdvertisement = () => defaultReceiveAdvertisement(1),
   }) {
     this.hostId = hostId
@@ -155,6 +168,8 @@ export class SecurityManager {
     this.receiveAdvertisement = receiveAdvertisement
     this.hostFingerprint = identity.fingerprint ?? fingerprint(identity.publicKey)
     this.hostFingerprintDisplay = formatFingerprint(identity.publicKey)
+    this.trust = trust ?? new DeviceTrustStore({ store, now })
+    this.resolveEnrollmentApprover = resolveEnrollmentApprover
   }
 
   get revocationsPending() {
@@ -512,8 +527,10 @@ export class SecurityManager {
     if(!Number.isSafeInteger(generation)||generation<0)throw new PluginError('invalid_argument','invalid grant generation')
     if(claim.phase==='PAIRING_PHASE_COMMIT') {
       const peer=this.store.getPeerKey(claim.device_id)
-      if(this.store.isGrantRevoked(claim.device_id,generation)||(peer&&(
-        generation<peer.grantGeneration || (generation===peer.grantGeneration&&peer.claimId!==claimId)))) {
+      // A strictly older Access grant incarnation is superseded. A competing
+      // claim in the same incarnation is decided by the Host grant writer,
+      // which reports a conflict without replacing the active grant.
+      if(this.store.isGrantRevoked(claim.device_id,generation)||(peer&&generation<peer.grantGeneration)) {
         this.store.deletePendingPeer(claimId)
         this.#completedPairings.delete(claimId)
         throw new PluginError('unauthorized','pairing grant superseded or revoked')
@@ -521,8 +538,35 @@ export class SecurityManager {
     }
     const completed = this.#completedPairings.get(claimId) ?? this.store.getPendingPeer(claimId)
     if (!completed) {
-      const existing = this.store.getPeerKey(claim.device_id)
-      if (claim.phase === 'PAIRING_PHASE_COMMIT' && existing?.claimId === claimId && bytesEqual(existing.publicKey, claim.device_public_key)) { this.store.deletePendingPeer(claimId); return { authorized: true, device_id: claim.device_id } }
+      // An exact COMMIT retry arrives after the staged row was consumed. It is
+      // authorized only by the durable decision AND the same still-active Host
+      // grant for the exact candidate key. Access activation alone can never
+      // recreate session authority.
+      const retry = (claim.phase === 'PAIRING_PHASE_COMMIT' || claim.phase === 'PAIRING_PHASE_AUTHORIZE')
+        ? this.#activeDecision(claimId, claim)
+        : null
+      if (retry) {
+        // Repair the peer mirror from the durable decision. The grant row stays
+        // the authority; this only restores the pinned identity after an
+        // interrupted COMMIT response.
+        const existingPeer = this.store.getPeerKey(retry.decision.deviceId)
+        this.store.upsertPeerKey({
+          deviceId: retry.decision.deviceId,
+          publicKey: retry.decision.candidatePublicKey,
+          fingerprint: fingerprint(retry.decision.candidatePublicKey),
+          claimId,
+          grantGeneration: Math.max(existingPeer?.grantGeneration ?? 0, generation),
+          grantId: retry.grant.grantId,
+          grantRevision: retry.grant.revision,
+          pairedAt: existingPeer?.pairedAt ?? this.now(),
+          displayName: existingPeer?.displayName || retry.decision.deviceLabel || '',
+          os: existingPeer?.os ?? '',
+        })
+        this.store.deletePendingPeer(claimId)
+        // The exact COMMIT retry acknowledges the same Host-owned grant. It is
+        // the durable grant row (not the Access request) that supplies the ID.
+        return { authorized: true, device_id: claim.device_id, grant_id: retry.grant.grantId }
+      }
       throw new PluginError('unauthorized', 'pairing not finished')
     }
     const deviceId = requiredString(claim.device_id, 'device_id')
@@ -538,12 +582,18 @@ export class SecurityManager {
       return { authorized: true, device_id: deviceId }
     }
 
+    // COMMIT is the Host grant writer. One authenticated candidate commits
+    // exactly one grant; the grant row (not the Access row) is the authority.
+    const enrollment = this.#enrollmentTerms({ claim, claimId, completed, deviceId })
+    const grant = this.#commitHostGrant({ claim, claimId, completed, deviceId, enrollment })
     this.store.upsertPeerKey({
       deviceId,
       publicKey: completed.publicKey,
       fingerprint: fingerprint(completed.publicKey),
       claimId,
       grantGeneration: generation,
+      grantId: grant.grantId,
+      grantRevision: grant.revision,
       pairedAt: this.now(),
       displayName: completed.displayName ?? '',
       os: completed.os ?? '',
@@ -561,7 +611,93 @@ export class SecurityManager {
       device_public_key: completed.publicKey,
       host_public_key: this.identity.publicKey,
       host_fingerprint: this.hostFingerprint,
+      // The COMMIT acknowledgement names the exact Host-owned grant row this
+      // writer just committed. Access persists it for the Device and for a
+      // retry after a lost response; it is never derived from a label.
+      grant_id: grant.grantId,
     }
+  }
+
+  /** The original approved decision while its grant is still active. */
+  #activeDecision(claimId, claim) {
+    const decision = this.trust.getCandidate(claimId)
+    if (!decision || decision.state !== 'approved' || !decision.grantId) return null
+    if (decision.deviceId !== claim.device_id) return null
+    if (!(claim.device_public_key instanceof Uint8Array) || !bytesEqual(decision.candidatePublicKey, claim.device_public_key)) return null
+    const grant = this.trust.getGrant(decision.grantId)
+    if (!grant || grant.state !== 'active'
+        || grant.hostKeyFingerprint !== this.hostFingerprint
+        || !bytesEqual(grant.devicePublicKey, decision.candidatePublicKey)) return null
+    return { decision, grant }
+  }
+
+  /**
+   * Rights and approver for one COMMIT. The wire has no sponsor field yet, so
+   * the local owner flow is the default and any sponsor selection must come
+   * from the embedding (or a future authenticated claim field).
+   */
+  #enrollmentTerms({ claim, claimId, completed, deviceId }) {
+    const resolved = this.resolveEnrollmentApprover
+      ? this.resolveEnrollmentApprover({ claim, claimId, deviceId, devicePublicKey: completed.publicKey })
+      : null
+    if (resolved && resolved.approver) {
+      const useRights = resolved.useRights ?? DEFAULT_ENROLLMENT_RIGHTS
+      return {
+        approver: resolved.approver,
+        useRights,
+        grantableRights: resolved.grantableRights ?? [],
+        addDevice: resolved.addDevice ?? false,
+      }
+    }
+    return {
+      approver: { kind: 'owner' },
+      useRights: DEFAULT_ENROLLMENT_RIGHTS,
+      grantableRights: [],
+      addDevice: false,
+    }
+  }
+
+  /** Stage the exact candidate (if needed) and let the grant writer decide. */
+  #commitHostGrant({ claim, claimId, completed, deviceId, enrollment }) {
+    const existing = this.trust.getCandidate(claimId)
+    const sponsor = enrollment.approver.kind === 'sponsor'
+    if (!existing) {
+      const expiresAt = Number(claim?.expires_at_unix_ms) > this.now()
+        ? Number(claim.expires_at_unix_ms)
+        : completed.expiresAt
+      this.trust.stageCandidate({
+        candidateId: claimId,
+        method: sponsor ? 'sponsor' : 'local',
+        hostKeyFingerprint: this.hostFingerprint,
+        candidatePublicKey: completed.publicKey,
+        deviceId,
+        deviceLabel: completed.displayName ?? '',
+        useRights: enrollment.useRights,
+        grantableRights: enrollment.grantableRights,
+        addDevice: enrollment.addDevice,
+        sponsorGrantId: sponsor ? enrollment.approver.grantId : null,
+        sponsorRevision: sponsor ? (enrollment.approver.revision ?? null) : null,
+        expiresAt,
+        now: this.now(),
+      })
+    } else if (!bytesEqual(existing.candidatePublicKey, completed.publicKey)) {
+      throw new PluginError('unauthorized', 'device key mismatch')
+    }
+    const outcome = this.trust.commitEnrollment({
+      candidateId: claimId,
+      candidatePublicKey: completed.publicKey,
+      useRights: enrollment.useRights,
+      grantableRights: enrollment.grantableRights,
+      addDevice: enrollment.addDevice,
+      approver: enrollment.approver,
+      now: this.now(),
+    })
+    if (!outcome.grant || outcome.grant.state !== 'active'
+        || outcome.grant.hostKeyFingerprint !== this.hostFingerprint
+        || !bytesEqual(outcome.grant.devicePublicKey, completed.publicKey)) {
+      throw new PluginError('unauthorized', 'pairing grant unavailable')
+    }
+    return outcome.grant
   }
 
   // --- secure channels ----------------------------------------------------
@@ -614,6 +750,27 @@ export class SecurityManager {
       if (protocolMismatch(hello.protocol_version, this.protocolVersion)) {
         throw new PluginError('protocol_version_incompatible', 'channel version mismatch')
       }
+      // Snapshot the one active Host grant for this pinned device key at the
+      // start of the exchange. The (Host key, device key) tuple names the
+      // candidate grant, and every later check binds this exact grant ID. A
+      // device without an active grant never reaches session access, even if
+      // Access still admits its transport.
+      const grant = this.trust.findActiveGrant({
+        hostKeyFingerprint: this.hostFingerprint,
+        devicePublicKey: peer.publicKey,
+      })
+      if (!grant) throw new PluginError('forbidden', 'device has no active grant')
+      if (grant.deviceId !== deviceId) throw new PluginError('forbidden', 'grant device mismatch')
+      // A new Device names the exact grant it expects. A non-empty mismatch is
+      // a stale or foreign grant and fails closed before any pending handshake
+      // or channel exists. An empty value is accepted only as the legacy
+      // compatibility path (old Clients have no grant field); it never relaxes
+      // the Host snapshot/re-check below, so the Host still installs only the
+      // one active grant for the authenticated device key.
+      const clientGrantId = typeof hello.grant_id === 'string' ? hello.grant_id : ''
+      if (clientGrantId !== '' && clientGrantId !== grant.grantId) {
+        throw new PluginError('forbidden', 'channel grant mismatch')
+      }
       // The Host's ChannelReady advertisement is scoped to this Noise channel,
       // never to the Access-broker generation used by HostReady.
       const hostReceive = this.#channelReceive(this.#hostReceive())
@@ -638,10 +795,16 @@ export class SecurityManager {
         },
         host_nonce: randomNonce(),
         receive: hostReceive,
+        // Echo the one grant this channel is bound to. The Device can reject a
+        // channel that does not name the grant it asked for.
+        grant_id: grant.grantId,
       })
       const reply = noise.writeMessage(ready)
       this.#pendingHandshakes.set(channelId, {
         deviceId,
+        devicePublicKey: Buffer.from(peer.publicKey),
+        grantId: grant.grantId,
+        grantRevision: grant.revision,
         noise,
         connectionRef,
         grantGeneration,
@@ -667,9 +830,22 @@ export class SecurityManager {
     }
     if (payload.length !== 0) throw new PluginError('invalid_argument', 'handshake payload unexpected')
     const remote = pending.noise.remoteStaticKey
-    if (!remote || !bytesEqual(remote, peer.publicKey)) {
+    if (!remote || !bytesEqual(remote, peer.publicKey) || !bytesEqual(remote, pending.devicePublicKey)) {
       throw new PluginError('unauthorized', 'device key mismatch')
     }
+    // Install only for the SAME grant that was active at hello. Revoke and
+    // edit are synchronous with this recheck, so a revoked or replaced grant
+    // can never install, and a re-enrollment gets a different grant ID.
+    const grant = this.trust.getGrant(pending.grantId)
+    if (!grant || grant.state !== 'active'
+        || grant.hostKeyFingerprint !== this.hostFingerprint
+        || !bytesEqual(grant.devicePublicKey, remote)) {
+      throw new PluginError('unauthorized', 'grant changed during handshake')
+    }
+    // The pinned peer row must still point at this key and (when recorded) at
+    // this same grant. A newer pairing supersedes, and this finish fails.
+    if (!bytesEqual(peer.publicKey, remote)) throw new PluginError('unauthorized', 'device key mismatch')
+    if (peer.grantId && peer.grantId !== grant.grantId) throw new PluginError('unauthorized', 'grant changed during handshake')
     this.pruneIdleChannels()
     let deviceChannels = 0
     for (const channel of this.#channels.values()) {
@@ -678,19 +854,20 @@ export class SecurityManager {
     if (deviceChannels >= this.maxDeviceChannels || this.#channels.size >= this.maxHostChannels) {
       throw new PluginError('rate_limited', 'channel capacity reached')
     }
-    const derived = deriveChannelKeys(
-      pending.noise.handshakeHash,
-      channelPrologue({ hostId: this.hostId, deviceId, channelId }),
-    )
+    // Application keys are the secret Noise Split outputs. The transcript
+    // hash below is retained only for the App-session proof.
+    const cipher = pending.noise.takeChannelCipher()
     const now = this.now()
     const channel = {
       channelId,
       deviceId,
+      devicePublicKey: Buffer.from(remote),
+      grantId: grant.grantId,
+      grantRevision: grant.revision,
       connectionRef,
       grantGeneration,
       enrollmentGeneration,
-      c2h: derived.c2h,
-      h2c: derived.h2c,
+      cipher,
       handshakeHash: pending.noise.handshakeHash,
       createdAt: now,
       lastUsedAt: now,
@@ -760,10 +937,13 @@ export class SecurityManager {
       commandId: request.command_id ?? '',
       expiresAt: request.expires_at_unix_ms ?? 0,
     })
-    const plaintext = open(channel.c2h, aad, frame.nonce, frame.ciphertext)
-    if (!plaintext) {
-      this.logger?.warn('frame_rejected', { code: 'unauthorized', device: channel.deviceId, channel: channel.channelId })
-      return { ok: false, code: 'unauthorized', reason: 'authentication_failed' }
+    let plaintext
+    try {
+      plaintext = channel.cipher.open('c2h', aad, frame.nonce, frame.ciphertext)
+    } catch (error) {
+      const reason = error?.code ?? 'authentication_failed'
+      this.logger?.warn('frame_rejected', { code: 'unauthorized', device: channel.deviceId, channel: channel.channelId, reason })
+      return { ok: false, code: 'unauthorized', reason }
     }
     return { ok: true, plaintext, channel }
   }
@@ -775,10 +955,22 @@ export class SecurityManager {
     const { channel, plaintext } = opened
     channel.inFlight++
     try {
-      return await handle({ ok: true, plaintext })
+      return await handle({ ok: true, plaintext, channel })
     } finally {
       channel.lastUsedAt = this.now()
       channel.inFlight--
+    }
+  }
+
+  /** The grant tuple a live channel is bound to, or null. */
+  getChannelGrant(channelId, deviceId = null) {
+    const channel = deviceId === null ? this.getChannel(channelId) : this.#resolveChannel(channelId, deviceId)
+    if (!channel) return null
+    return {
+      grantId: channel.grantId,
+      grantRevision: channel.grantRevision,
+      deviceId: channel.deviceId,
+      devicePublicKey: Buffer.from(channel.devicePublicKey ?? new Uint8Array(0)),
     }
   }
 
@@ -794,7 +986,7 @@ export class SecurityManager {
       commandId: request.command_id ?? '',
       expiresAt: request.expires_at_unix_ms ?? 0,
     })
-    const sealed = seal(channel.h2c, aad, plaintext)
+    const sealed = channel.cipher.seal('h2c', aad, plaintext)
     return this.codec.encode('whalerein.v1.EncryptedFrame', {
       channel_id: channel.channelId,
       nonce: sealed.nonce,
@@ -807,7 +999,7 @@ export class SecurityManager {
     const channel = this.#resolveChannel(channelId, deviceId)
     if (!channel) return null
     const aad = eventAad({ hostId: this.hostId, deviceId, channelId, createdAt })
-    const sealed = seal(channel.h2c, aad, plaintext)
+    const sealed = channel.cipher.seal('h2c', aad, plaintext)
     return { channelId, nonce: sealed.nonce, ciphertext: sealed.ciphertext }
   }
 
@@ -844,6 +1036,21 @@ export class SecurityManager {
       revokedAt: notice.revoked_at_unix_ms ?? this.now(),
       now: this.now(),
     })
+    // The same authoritative revocation also fences the Host-owned grants for
+    // the applied devices, so a delayed transport activation cannot restore
+    // session authority and a fresh enrollment starts from a new ceremony.
+    const grantIds = []
+    if (applied.length > 0) {
+      const active = this.trust.listGrants({ hostKeyFingerprint: this.hostFingerprint, state: 'active', limit: 1024 })
+      for (const deviceId of applied) {
+        for (const grant of active) if (grant.deviceId === deviceId) grantIds.push(grant.grantId)
+      }
+      if (grantIds.length > 0) this.trust.revokeGrants({ grantIds, now: this.now() })
+      for (const deviceId of applied) {
+        this.#dropPairingsForDevice(deviceId)
+        this.store.deletePendingPeersForDevice(deviceId)
+      }
+    }
     // Close observations while the channel keys still exist so each Device can
     // receive an authenticated terminal WatchClosed with the revocation reason.
     if (applied.length > 0) this.onRevokedDevices(applied)
@@ -858,7 +1065,78 @@ export class SecurityManager {
       ack: { replay_id: replayId, device_ids: deviceIds },
       applied,
       closed,
+      grants: grantIds,
       final: notice.final === true,
+    }
+  }
+
+  // --- Host-owned grant revocation ---------------------------------------
+
+  /**
+   * Revoke exactly the selected Host grants and fence everything bound to
+   * them: pending handshakes, established channels, queued ciphertext and the
+   * pinned peer row. Independent child grants and other devices stay live.
+   */
+  revokeGrants({ grantIds, reason = 'revoked' }) {
+    if (!Array.isArray(grantIds)) throw new PluginError('invalid_argument', 'grant ids must be an array')
+    if (grantIds.length === 0) {
+      return { revoked: [], alreadyRevoked: [], unknown: [], fencedCandidates: [], closed: [], devices: [] }
+    }
+    const result = this.trust.revokeGrants({ grantIds, now: this.now() })
+    const closed = []
+    const devices = new Set()
+    for (const grantId of result.revoked) {
+      const grant = this.trust.getGrant(grantId)
+      closed.push(...this.#clearGrantChannels(grantId))
+      if (!grant) continue
+      devices.add(grant.deviceId)
+      this.#dropPairingsForDevice(grant.deviceId, grant.devicePublicKey)
+      this.store.deletePendingPeersForDevice(grant.deviceId)
+      const peer = this.store.getPeerKey(grant.deviceId)
+      if (peer && (peer.grantId === grantId || bytesEqual(peer.publicKey, grant.devicePublicKey))) {
+        this.store.deletePeerKey(grant.deviceId)
+        this.store.deleteOutboxForDevice(grant.deviceId)
+      }
+      this.logger?.info('grant_revoked', { device: grant.deviceId, grant: grantId, reason })
+    }
+    if (closed.length > 0) this.onRevokedChannels(closed, [...devices])
+    return { ...result, closed, devices: [...devices] }
+  }
+
+  /**
+   * Close the channels and pending handshakes of one grant after its rights
+   * were edited (for example when the read right is removed). Other grants for
+   * other devices are untouched.
+   */
+  closeGrantChannels(grantId, reason = 'rights_changed') {
+    const closed = this.#clearGrantChannels(grantId)
+    if (closed.length > 0) this.onClosedChannels(closed, reason)
+    return closed
+  }
+
+  #clearGrantChannels(grantId) {
+    const closed = []
+    for (const [channelId, channel] of this.#channels) {
+      if (channel.grantId !== grantId) continue
+      this.#channels.delete(channelId)
+      closed.push({ deviceId: channel.deviceId, channelId })
+    }
+    for (const [channelId, pending] of this.#pendingHandshakes) {
+      if (pending.grantId !== grantId) continue
+      this.#markConnectionClosed(pending.connectionRef)
+      this.#pendingHandshakes.delete(channelId)
+    }
+    return closed
+  }
+
+  #dropPairingsForDevice(deviceId, devicePublicKey = null) {
+    for (const [claimId, pending] of this.#pendingPairings) {
+      if (pending.deviceId === deviceId) this.#pendingPairings.delete(claimId)
+    }
+    for (const [claimId, completed] of this.#completedPairings) {
+      if (completed.deviceId !== deviceId) continue
+      if (devicePublicKey && !bytesEqual(completed.publicKey, devicePublicKey)) continue
+      this.#completedPairings.delete(claimId)
     }
   }
 }

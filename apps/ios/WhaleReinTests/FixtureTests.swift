@@ -71,14 +71,17 @@ struct FixtureTests {
         #expect(expired.expiresAtUnixMs < Int64(now.timeIntervalSince1970 * 1000))
     }
 
-    @Test("the diagnostics sample contains both reachable HTTPS and failed MQTT")
+    @Test("the diagnostics sample captures two Host rows and a retained failure")
     func diagnosticsSample() {
-        let report = FixtureCatalog.diagnostics(now: Date(timeIntervalSince1970: 1_800_000_000))
-        #expect(report.stages.contains { $0.kind == .https && $0.status == .ok })
-        #expect(report.stages.contains { $0.kind == .mqtt && $0.status == .failed })
-        #expect(report.redactionFields.contains("token"))
-        #expect(report.lastFailureCode == "mqtt_subscription_failed")
-        #expect(report.coreVersion == FixtureCatalog.coreRevision)
+        let capture = FixtureCatalog.diagnostics(now: Date(timeIntervalSince1970: 1_800_000_000))
+        let summary = DiagnosticsSummaryParser.parse(capture.text)
+        #expect(summary.hosts.map(\.label) == ["host-1", "host-2"])
+        #expect(summary.hosts.first?.connectionState == "connected")
+        #expect(summary.hosts.last?.connectionState == "offline")
+        #expect(capture.redactionFields.contains("device tokens"))
+        #expect(summary.lastFailure?.code == "mqtt_subscription_failed")
+        #expect(summary.coreVersion == FixtureCatalog.coreRevision)
+        #expect(String(decoding: capture.bytes, as: UTF8.self) == capture.text)
     }
 
     @Test("seeded random values are reproducible")

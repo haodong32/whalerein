@@ -155,6 +155,7 @@ struct InvitationView: View {
             NavigationStack {
                 PairingConfirmationView(pairing: pairing)
             }
+            .privacyShieldFromEnvironment()
             .interactiveDismissDisabled()
         }
     }

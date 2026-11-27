@@ -247,11 +247,14 @@ func TestBrokerReconnectsAfterFailureAndStopsOnCancellation(t *testing.T) {
 	subscribed := append([]string(nil), session.subscribed...)
 	subscribedQoS := append([]byte(nil), session.subscribedQoS...)
 	session.mu.Unlock()
-	if len(subscribed) != 6 {
+	if len(subscribed) != 7 {
 		t.Fatalf("subscribed = %v", subscribed)
 	}
 	if subscribed[2] != DeviceQueryFilter {
 		t.Fatalf("device query filter not subscribed: %v", subscribed)
+	}
+	if subscribed[4] != SelfStatusReplyFilter {
+		t.Fatalf("self-status reply filter not subscribed: %v", subscribed)
 	}
 	for _, qos := range subscribedQoS {
 		if qos != 1 {

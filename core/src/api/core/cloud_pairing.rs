@@ -545,12 +545,14 @@ impl Core {
         if host.fingerprint != *pin {
             return Err(CoreError::Security("Host fingerprint changed".into()));
         }
+        let host_grant_id = config.host_grant_id_for(host_id).map(str::to_owned);
         Ok(Some(PairingOutcome {
             operation_id: None,
             host_id: host_id.into(),
             device_id: config.device_id,
             fingerprint: pin.clone(),
             access_url: access.base_url().to_string(),
+            host_grant_id,
         }))
     }
 
@@ -694,11 +696,18 @@ impl Core {
                 "Cloud pairing completion scope mismatch".into(),
             ));
         }
+        // An empty value is a legacy Host that owns no grant identity; a new
+        // Host always returns the committed opaque id.
+        if !crate::pairing::is_valid_host_grant_id(&reply.grant_id) {
+            return Err(crate::pairing::PairingError::InvalidGrantId.into());
+        }
+        let host_grant_id = (!reply.grant_id.is_empty()).then_some(reply.grant_id.as_str());
         self.commit_cloud_pairing(
             &operation,
             expected_fingerprint,
             access_url,
             access.cloud_session_id(),
+            host_grant_id,
         )
     }
 
@@ -746,11 +755,14 @@ impl Core {
                         "Recovered Host grant identity could not be confirmed".into(),
                     ));
                 }
+                // A recovered grant has no FINISH reply to read the Host-owned
+                // grant identity from; it stays unset rather than being derived.
                 self.commit_cloud_pairing(
                     operation,
                     route.host_fingerprint.clone(),
                     route.access.to_string(),
                     access.cloud_session_id(),
+                    None,
                 )
             }
         }
@@ -762,6 +774,7 @@ impl Core {
         expected_fingerprint: String,
         access_url: String,
         expected_session: Option<&str>,
+        host_grant_id: Option<&str>,
     ) -> CoreResult<PairingOutcome> {
         let _identity = self.identity_lock()?;
         if self.cloud_session_id()?.as_deref() != expected_session {
@@ -783,6 +796,12 @@ impl Core {
             operation.device.clone(),
         );
         persisted.host_fingerprint = Some(expected_fingerprint.clone());
+        if let Some(grant_id) = host_grant_id {
+            persisted.set_host_grant_id(&operation.host, grant_id);
+        }
+        let host_grant_id = persisted
+            .host_grant_id_for(&operation.host)
+            .map(str::to_owned);
         self.finish_pairing_config(
             persisted,
             &finish.device_token,
@@ -795,6 +814,7 @@ impl Core {
             device_id: operation.device.clone(),
             fingerprint: expected_fingerprint,
             access_url,
+            host_grant_id,
         };
         self.finish_cloud_receipt(&outcome)?;
         Ok(outcome)

@@ -146,6 +146,44 @@ struct ApprovalRefreshTests {
         #expect(!model.isApprovalActionable(model.approvals[0]))
     }
 
+    @Test("an incomplete review survives refresh with its limitation and stays allow-able")
+    func incompleteReviewSurvivesRefresh() async {
+        let service = StubSessionService()
+        let incomplete = testApproval(
+            id: "approval-incomplete",
+            review: ApprovalReviewDetails(
+                action: "Change one file",
+                target: nil,
+                impact: "Replaces the selected file content.",
+                availability: .incomplete
+            )
+        )
+        service.resolveHandler = { _, _, _, _, _, _ in
+            var updated = incomplete
+            updated.state = .allowed
+            return updated
+        }
+        let model = await modelWith(approval: incomplete, service: service)
+        #expect(model.approvalReviewLimitationKey(incomplete) == .approvalReviewIncomplete)
+
+        // The Host still reports the same pending, incomplete request.
+        service.approvalsHandler = { _, _ in [incomplete] }
+        await model.refreshApprovals()
+
+        let current = model.approvals[0]
+        #expect(current.state == .pending)
+        #expect(current.review == incomplete.review)
+        #expect(model.approvalReview(current)?.target == nil)
+        #expect(model.approvalReviewLimitationKey(current) == .approvalReviewIncomplete)
+        #expect(model.canAllowApproval(current))
+
+        await model.resolveApproval(current, allow: true)
+        #expect(service.resolveCalls.count == 1)
+        #expect(service.resolveCalls.first?.version == incomplete.version)
+        #expect(service.resolveCalls.first?.digest == incomplete.digestHex)
+        #expect(model.approvals[0].state == .allowed)
+    }
+
     @Test("a changed variant delivered by the Host remains a fresh pending decision")
     func changedVariantStaysReviewable() async {
         let service = StubSessionService()
@@ -161,7 +199,13 @@ struct ApprovalRefreshTests {
             version: approval.version + 1,
             expiresAtUnixMs: approval.expiresAtUnixMs,
             digestHex: "new-digest",
-            state: .pending
+            state: .pending,
+            review: ApprovalReviewDetails(
+                action: "Change one file",
+                target: "Sources/Other.swift",
+                impact: "Replaces a different file.",
+                availability: .complete
+            )
         )
         model.handle(envelope(.approvalChanged(changed), sequence: 2))
 

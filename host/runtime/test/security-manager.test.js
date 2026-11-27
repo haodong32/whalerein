@@ -7,17 +7,15 @@ import {
   eventAad,
   fingerprint,
   generateKeypair,
-  open,
   pairingPrologue,
   requestAad,
-  seal,
 } from '../src/security/noise.js'
 import { SecurityManager, HOST_CAPABILITIES, defaultReceiveAdvertisement } from '../src/security/manager.js'
 import { transportProfileBudget } from '../src/contracts/transport.js'
 import { loadOrCreateHostIdentity, HOST_KEY_CREDENTIAL } from '../src/security/identity.js'
 import { StateStore } from '../src/state/store.js'
 import { codec as defaultCodec } from '../src/protocol.js'
-import { establishChannel } from './support/channel.js'
+import { ensureOwnerGrant, establishChannel, openFrame } from './support/channel.js'
 
 const hostId = 'host-1'
 const codec = defaultCodec()
@@ -40,6 +38,21 @@ function makeSecurity(overrides = {}) {
     onRevokedChannels: overrides.onRevokedChannels,
   })
   return { store, identity, security }
+}
+
+/** Persist the pinned peer row with the Host grant the channel now requires. */
+function persistPeerWithGrant(security, store, { deviceId, identity, claimId = `claim-${deviceId}` }) {
+  const grant = ensureOwnerGrant({ security, deviceId, identity })
+  store.upsertPeerKey({
+    deviceId,
+    publicKey: identity.publicKey,
+    fingerprint: fingerprint(identity.publicKey),
+    claimId,
+    pairedAt: 1,
+    grantId: grant?.grantId ?? null,
+    grantRevision: grant?.revision ?? null,
+  })
+  return grant
 }
 
 function pairingStart({ deviceId = 'device-1', tokenHash = 'ab'.repeat(32), claimId = 'claim-1', identity = generateKeypair() } = {}) {
@@ -309,7 +322,7 @@ test('when revocation replay, message shape, or TTL checks fail, the channel han
   let now = 1000
   const { security, store } = makeSecurity({ now: () => now, pendingTtlMs: 10 })
   const identity = generateKeypair()
-  store.upsertPeerKey({ deviceId: 'device-1', publicKey: identity.publicKey, fingerprint: 'f' })
+  persistPeerWithGrant(security, store, { deviceId: 'device-1', identity })
   const channelId = 'channel-1'
   const noise = new NoiseXX({ initiator: true, staticKeypair: identity, prologue: channelPrologue({ hostId, deviceId: 'device-1', channelId }) })
   const hello = codec.encode('whalerein.v1.ChannelHello', { device_id: 'device-1', host_id: hostId, protocol_version: 1 })
@@ -362,7 +375,7 @@ test('when request frame channel/MAC/AAD checks pass, results are sealed to that
     expiresAt: request.expires_at_unix_ms,
   })
   const plaintext = new TextEncoder().encode('payload')
-  const sealed = seal(device.c2h, aad, plaintext)
+  const sealed = device.cipher.seal('c2h', aad, plaintext)
   const body = codec.encode('whalerein.v1.EncryptedFrame', {
     channel_id: device.channelId,
     nonce: sealed.nonce,
@@ -382,7 +395,7 @@ test('when request frame channel/MAC/AAD checks pass, results are sealed to that
     commandId: command.command_id,
     expiresAt: command.expires_at_unix_ms,
   })
-  const commandSealed = seal(device.c2h, commandAad, plaintext)
+  const commandSealed = device.cipher.seal('c2h', commandAad, plaintext)
   const commandBody = codec.encode('whalerein.v1.EncryptedFrame', {
     channel_id: device.channelId,
     nonce: commandSealed.nonce,
@@ -403,15 +416,56 @@ test('when request frame channel/MAC/AAD checks pass, results are sealed to that
 
   const resultBody = security.sealResult({ request, plaintext: new Uint8Array([4, 5]) })
   const frame = codec.decode('whalerein.v1.EncryptedFrame', resultBody)
-  const resultPlain = open(device.h2c, aad, frame.nonce, frame.ciphertext)
+  const resultPlain = openFrame({ cipher: device.cipher, direction: 'h2c', aad, nonce: frame.nonce, ciphertext: frame.ciphertext })
   assert.deepEqual([...resultPlain], [4, 5])
   assert.equal(security.sealResult({ request: { ...request, channel_id: 'other' }, plaintext }), null)
 
   const eventPlaintext = codec.encode('whalerein.v1.EventPayload', { session_id: 's1' })
   const sealedEvent = security.sealEvent({ deviceId: 'device-1', channelId: device.channelId, plaintext: eventPlaintext, createdAt: 900 })
-  const eventPlain = open(device.h2c, eventAad({ hostId, deviceId: 'device-1', channelId: device.channelId, createdAt: 900 }), sealedEvent.nonce, sealedEvent.ciphertext)
+  const eventPlain = openFrame({ cipher: device.cipher, direction: 'h2c', aad: eventAad({ hostId, deviceId: 'device-1', channelId: device.channelId, createdAt: 900 }), nonce: sealedEvent.nonce, ciphertext: sealedEvent.ciphertext })
   assert.deepEqual([...eventPlain], [...eventPlaintext])
   assert.equal(security.sealEvent({ deviceId: 'device-1', channelId: 'other', plaintext: eventPlaintext, createdAt: 900 }), null)
+})
+
+test('when a record is replayed or uses a retired nonce, the channel rejects it without side effects', async () => {
+  const { security, store } = makeSecurity()
+  const device = establishChannel({ security, store, hostId, deviceId: 'device-1', codec })
+  const request = {
+    request_id: 'request-replay',
+    host_id: hostId,
+    device_id: 'device-1',
+    kind: 'REQUEST_KIND_QUERY',
+    command_id: '',
+    expires_at_unix_ms: 5000,
+    channel_id: device.channelId,
+    protocol_version: 1,
+    relay_version: 5,
+    connection_ref: device.connectionRef,
+    grant_generation: device.grantGeneration,
+    enrollment_generation: device.enrollmentGeneration,
+  }
+  const aad = requestAad({
+    requestId: request.request_id, hostId, deviceId: 'device-1', kind: request.kind,
+    commandId: '', expiresAt: request.expires_at_unix_ms,
+  })
+  const sealed = device.cipher.seal('c2h', aad, new TextEncoder().encode('payload'))
+  const body = codec.encode('whalerein.v1.EncryptedFrame', {
+    channel_id: device.channelId, nonce: sealed.nonce, ciphertext: sealed.ciphertext,
+  })
+  const authenticate = (request, body) => security.withRequest({ ...request, body }, result => result)
+  assert.equal((await authenticate(request, body)).ok, true)
+  const replay = await authenticate(request, body)
+  assert.equal(replay.ok, false)
+  assert.equal(replay.reason, 'replay_detected')
+  assert.equal(replay.plaintext, undefined, 'a replayed frame releases no plaintext')
+
+  const frame = codec.decode('whalerein.v1.EncryptedFrame', body)
+  frame.nonce = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+  const retired = codec.encode('whalerein.v1.EncryptedFrame', frame)
+  const rejected = await authenticate({ ...request, request_id: 'request-legacy' }, retired)
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.reason, 'invalid_nonce')
+  assert.equal(rejected.plaintext, undefined, 'a retired nonce releases no plaintext')
 })
 
 test('a query admitted on a retired client key is rejected after rotation', async () => {
@@ -433,7 +487,7 @@ test('a query admitted on a retired client key is rejected after rotation', asyn
       requestId, hostId, deviceId: 'device-1', kind: request.kind, commandId: '',
       expiresAt: request.expires_at_unix_ms,
     })
-    const frame = seal(channel.c2h, aad, new TextEncoder().encode('payload'))
+    const frame = channel.cipher.seal('c2h', aad, new TextEncoder().encode('payload'))
     return {
       request,
       body: codec.encode('whalerein.v1.EncryptedFrame', {
@@ -621,6 +675,10 @@ test('a revoked grant cannot reactivate and stale revocations do not clear a rep
   security.handlePairingClaim({request,claim:commit})
   const channelOptions={security,store,hostId,deviceId:start.deviceId,identity:start.identity,persistPeer:false}
   const previous=establishChannel(channelOptions)
+  // A fresh re-enrollment requires the old Host grant to be revoked first; one
+  // active grant per device key is the durable invariant.
+  security.revokeGrants({grantIds:[store.getPeerKey(start.deviceId).grantId]})
+  assert.equal(security.getChannel(previous.channelId),null)
   const repair=pairingStart({deviceId:start.deviceId,identity:start.identity,claimId:'repair'})
   const repairHello=security.handlePairingClaim({request,claim:helloClaim(repair)})
   repair.noise.readMessage(repairHello.noise_message)
@@ -792,7 +850,7 @@ test('an absent channel receive advertisement adds no cap and a malformed one fa
     const attempt = (receive) => {
       const channelId = `channel-${Math.random()}`
       const identity = generateKeypair()
-      store.upsertPeerKey({ deviceId: 'device-1', publicKey: identity.publicKey, fingerprint: fingerprint(identity.publicKey), claimId: 'claim', pairedAt: 1 })
+      persistPeerWithGrant(security, store, { deviceId: 'device-1', identity, claimId: 'claim' })
       const prologue = channelPrologue({ hostId, deviceId: 'device-1', channelId })
       const noise = new NoiseXX({ initiator: true, staticKeypair: identity, prologue })
       const hello = codec.encode('whalerein.v1.ChannelHello', {
@@ -899,7 +957,7 @@ test('a FINISH with an unknown claim, wrong scope, host, or fingerprint is rejec
 })
 
 function startChannelHello(security, store, { deviceId = 'device-1', channelId = 'channel-1', identity = generateKeypair(), hello = {} } = {}) {
-  store.upsertPeerKey({ deviceId, publicKey: identity.publicKey, fingerprint: fingerprint(identity.publicKey), claimId: `claim-${deviceId}-${channelId}`, pairedAt: 1 })
+  persistPeerWithGrant(security, store, { deviceId, identity, claimId: `claim-${deviceId}-${channelId}` })
   const prologue = channelPrologue({ hostId, deviceId, channelId })
   const noise = new NoiseXX({ initiator: true, staticKeypair: identity, prologue })
   const message = codec.encode('whalerein.v1.ChannelHello', {
@@ -986,9 +1044,8 @@ test('channel handshake rejects invalid host advertisements, pending limits, sco
     const hello = startChannelHello(substituted.security, substituted.store, {
       channelId: 'channel-substituted', identity: attacker,
     })
-    substituted.store.upsertPeerKey({
-      deviceId: hello.deviceId, publicKey: storedIdentity.publicKey,
-      fingerprint: fingerprint(storedIdentity.publicKey), claimId: 'stored', pairedAt: 1,
+    persistPeerWithGrant(substituted.security, substituted.store, {
+      deviceId: hello.deviceId, identity: storedIdentity, claimId: 'stored',
     })
     const reply = substituted.security.handleChannelHandshake({ connection_ref: '0123456789abcdef:test', channel_id: hello.channelId, device_id: hello.deviceId, body: hello.body })
     hello.noise.readMessage(reply)

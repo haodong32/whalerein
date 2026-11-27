@@ -609,7 +609,14 @@ impl Core {
                             CoreError::Revoked | CoreError::RevokedRetentionUnverified
                         ) || error.device_authorization_lost()) =>
                 {
-                    DeviceAccess::Revoked
+                    // A retained local profile means the service rejected
+                    // admission but no Host-confirmed revocation (or explicit
+                    // revoke/forget) has retired this enrollment yet.
+                    if self.is_paired() {
+                        DeviceAccess::RevocationPending
+                    } else {
+                        DeviceAccess::Revoked
+                    }
                 }
                 _ => DeviceAccess::Unavailable,
             },
@@ -918,7 +925,13 @@ mod tests {
         access.fail_hosts(false);
         access.revoke();
         let revoked = core.status().await.unwrap();
-        assert!(matches!(revoked.device_access, DeviceAccess::Revoked));
+        // Service admission is lost, but this pairing was never locally
+        // revoked: the retained profile is reported as pending confirmation.
+        assert!(matches!(
+            revoked.device_access,
+            DeviceAccess::RevocationPending
+        ));
+        assert!(core.is_paired());
         assert_eq!(
             std::fs::read(core.data_dir().join(DEFAULT_HOST)).unwrap(),
             expected

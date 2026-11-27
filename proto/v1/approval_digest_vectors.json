@@ -1,6 +1,6 @@
 {
-  "format": "whalerein/v1/approval",
-  "canonical": "sha256(\"whalerein/v1/approval|{approval_id}|{session_id}|{tool_name}|{call_id}|{reason}|{version}|{expires_at_unix_ms}\") with \\ and | escaped as \\\\ and \\| inside every string field",
+  "format": "whalerein/v2/approval",
+  "canonical": "sha256(\"whalerein/v2/approval|{approval_id}|{session_id}|{tool_name}|{call_id}|{reason}|{review_action}|{review_target}|{review_impact}|{availability}|{version}|{expires_at_unix_ms}\") with \\ and | escaped as \\\\ and \\| inside every string field; availability is complete|incomplete|unavailable",
   "cases": [
     {
       "name": "base",
@@ -11,9 +11,13 @@
         "call_id": "call",
         "reason": "reason text",
         "version": 3,
-        "expires_at_unix_ms": 1700000000000
+        "expires_at_unix_ms": 1700000000000,
+        "review_action": "Replace file",
+        "review_target": "Sources/App.swift",
+        "review_impact": "Replaces 3 lines",
+        "review_availability": "complete"
       },
-      "digest_hex": "6537dd17e336f8d69a8b82eb0cceaf501614b59de04d81b091e472c67393bece"
+      "digest_hex": "4ee8d5b3104351bd8d86f7e38ef425513d74dcd2b787e41ed2f03003dcda419b"
     },
     {
       "name": "empty fields",
@@ -24,9 +28,13 @@
         "call_id": "",
         "reason": "",
         "version": 0,
-        "expires_at_unix_ms": 0
+        "expires_at_unix_ms": 0,
+        "review_action": "",
+        "review_target": "",
+        "review_impact": "",
+        "review_availability": "unavailable"
       },
-      "digest_hex": "648d3c49ade2f46e3abc2bf87ea2e1c419bd147e3db35a26fe4055e5b77762b3"
+      "digest_hex": "b84f40fcde3945f24ed6c8334cab20b4e691f3dab85ca8010119043897b6d7b3"
     },
     {
       "name": "pipe in reason",
@@ -37,9 +45,13 @@
         "call_id": "c",
         "reason": "a|b",
         "version": 1,
-        "expires_at_unix_ms": 99
+        "expires_at_unix_ms": 99,
+        "review_action": "",
+        "review_target": "",
+        "review_impact": "",
+        "review_availability": "unavailable"
       },
-      "digest_hex": "977543f4fbdfe0d489df31f2421da900e01bc567e93cc92eded0aca87523bdf7"
+      "digest_hex": "d96e678e57eb0933b968eee41205a4e19dcf906fd92dbc67b258715f875b0fbb"
     },
     {
       "name": "boundary left",
@@ -50,9 +62,13 @@
         "call_id": "c",
         "reason": "r",
         "version": 1,
-        "expires_at_unix_ms": 99
+        "expires_at_unix_ms": 99,
+        "review_action": "",
+        "review_target": "",
+        "review_impact": "",
+        "review_availability": "unavailable"
       },
-      "digest_hex": "f9f9d25ff81dab90aa37e610d4f8b87ce864706babd0fc3599d7efedb001fe50"
+      "digest_hex": "9ed484dc7b05028891f735f5bbe6f9643844f2793d6d42f47fccbfa2a6f06727"
     },
     {
       "name": "boundary right",
@@ -63,9 +79,13 @@
         "call_id": "b|c",
         "reason": "r",
         "version": 1,
-        "expires_at_unix_ms": 99
+        "expires_at_unix_ms": 99,
+        "review_action": "",
+        "review_target": "",
+        "review_impact": "",
+        "review_availability": "unavailable"
       },
-      "digest_hex": "d3d2bfbec29ccf3321c301d3de1db22c95dcbed9145e9b8bd56a7b47b419e650"
+      "digest_hex": "01bcebc311d4603760e496ab6a7ee8712004edc000b7ba8b16a2ef1c2aeffc7f"
     },
     {
       "name": "backslash",
@@ -76,9 +96,13 @@
         "call_id": "c",
         "reason": "path\\|cmd",
         "version": 1,
-        "expires_at_unix_ms": 99
+        "expires_at_unix_ms": 99,
+        "review_action": "",
+        "review_target": "",
+        "review_impact": "",
+        "review_availability": "unavailable"
       },
-      "digest_hex": "36d28ed0d29c2f005689a28cc9b8396e0577aa1a3e1456a07747d137f8929b79"
+      "digest_hex": "38ee0381e223132eadb3ec7d4cac646a306298c71498b064fafc7ea96590b6e9"
     },
     {
       "name": "unicode",
@@ -89,9 +113,98 @@
         "call_id": "c",
         "reason": "é漢字|新行\n",
         "version": 2,
-        "expires_at_unix_ms": 1700000000123
+        "expires_at_unix_ms": 1700000000123,
+        "review_action": "",
+        "review_target": "",
+        "review_impact": "",
+        "review_availability": "unavailable"
       },
-      "digest_hex": "c93493b9725a4c208b51c5dc683a1f866e3d25bffd531d217593183b0f650478"
+      "digest_hex": "0e48192b1fdea6f35b2ef2099ce75ff745af9ace32461b44ed2181c40c10455e"
+    },
+    {
+      "name": "target changed",
+      "fields": {
+        "approval_id": "appr",
+        "session_id": "sess",
+        "tool_name": "Write",
+        "call_id": "call",
+        "reason": "reason text",
+        "version": 3,
+        "expires_at_unix_ms": 1700000000000,
+        "review_action": "Replace file",
+        "review_target": "Sources/Other.swift",
+        "review_impact": "Replaces 3 lines",
+        "review_availability": "complete"
+      },
+      "digest_hex": "b333051f035904b52debc40db872fff13bc10487baad10710c8bb23ac98ff83f"
+    },
+    {
+      "name": "action changed",
+      "fields": {
+        "approval_id": "appr",
+        "session_id": "sess",
+        "tool_name": "Write",
+        "call_id": "call",
+        "reason": "reason text",
+        "version": 3,
+        "expires_at_unix_ms": 1700000000000,
+        "review_action": "Delete file",
+        "review_target": "Sources/App.swift",
+        "review_impact": "Replaces 3 lines",
+        "review_availability": "complete"
+      },
+      "digest_hex": "3fa6939e25ade7658d88fe1c2364b895578f3709724fc27d3fef916f09f2ab42"
+    },
+    {
+      "name": "impact changed",
+      "fields": {
+        "approval_id": "appr",
+        "session_id": "sess",
+        "tool_name": "Write",
+        "call_id": "call",
+        "reason": "reason text",
+        "version": 3,
+        "expires_at_unix_ms": 1700000000000,
+        "review_action": "Replace file",
+        "review_target": "Sources/App.swift",
+        "review_impact": "Deletes the whole file",
+        "review_availability": "complete"
+      },
+      "digest_hex": "e0ead22b7c085886f4223ac082b3e12ff60da61912fe286ed29c0be6d7ba5af0"
+    },
+    {
+      "name": "availability changed",
+      "fields": {
+        "approval_id": "appr",
+        "session_id": "sess",
+        "tool_name": "Write",
+        "call_id": "call",
+        "reason": "reason text",
+        "version": 3,
+        "expires_at_unix_ms": 1700000000000,
+        "review_action": "Replace file",
+        "review_target": "Sources/App.swift",
+        "review_impact": "Replaces 3 lines",
+        "review_availability": "incomplete"
+      },
+      "digest_hex": "38c3791d36e5c5b68d2f6dd4fbc6d6400ec721d9699917e04ce75473f5ff9993"
+    },
+    {
+      "name": "review pipe escaped",
+      "fields": {
+        "approval_id": "appr",
+        "session_id": "sess",
+        "tool_name": "Write",
+        "call_id": "call",
+        "reason": "reason text",
+        "version": 3,
+        "expires_at_unix_ms": 1700000000000,
+        "review_action": "x\\y",
+        "review_target": "a|b",
+        "review_impact": "Replaces 3 lines",
+        "review_availability": "complete"
+      },
+      "digest_hex": "629dbbb17f3346eddc487e397a7d450cdc35ec0f3fbe7d496c4944bccc87f6d9"
     }
   ],
   "must_differ": [
@@ -102,6 +215,26 @@
     [
       "pipe in reason",
       "base"
+    ],
+    [
+      "base",
+      "target changed"
+    ],
+    [
+      "base",
+      "action changed"
+    ],
+    [
+      "base",
+      "impact changed"
+    ],
+    [
+      "base",
+      "availability changed"
+    ],
+    [
+      "base",
+      "review pipe escaped"
     ]
   ]
 }

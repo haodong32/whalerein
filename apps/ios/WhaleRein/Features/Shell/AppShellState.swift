@@ -10,6 +10,9 @@ struct AppShellState: Equatable, Sendable {
     var isPaired = false
     var rootState: ConversationRootState = .restoring
     var selectedHostId: String?
+    /// Ordered scene-transition owner. The shield and the rendering pause are
+    /// derived from it, so a stale completion cannot reveal content.
+    var scene = AppSceneLifecycle()
     var isOfflineCached = false
     var isPrivacyShieldVisible = false
     var isRevoked = false

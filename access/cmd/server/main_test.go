@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"log/slog"
 
@@ -415,18 +416,76 @@ func TestProcessHostReadyClosingDoesNotAdvanceEnrollment(t *testing.T) {
 	enrolled := false
 	replayed := false
 	err := processHostReady(context.Background(), "host-1", &whalereinv1.HostReady{HostId: "host-1", RouteClosing: true},
-		&route.Service{},
+		&route.Service{}, nil,
 		func(context.Context, string) error { replayed = true; return nil },
-		func(context.Context, string) error { enrolled = true; return nil })
+		func(context.Context, string) error { enrolled = true; return nil }, nil)
 	if err != nil || replayed || enrolled {
 		t.Fatalf("closing ready = %v replayed=%v enrolled=%v", err, replayed, enrolled)
 	}
 	err = processHostReady(context.Background(), "host-1", &whalereinv1.HostReady{HostId: "host-1"},
-		&route.Service{},
+		&route.Service{}, nil,
 		func(context.Context, string) error { replayed = true; return nil },
-		func(context.Context, string) error { enrolled = true; return nil })
+		func(context.Context, string) error { enrolled = true; return nil }, nil)
 	if err != nil || !replayed || !enrolled {
 		t.Fatalf("normal ready = %v replayed=%v enrolled=%v", err, replayed, enrolled)
+	}
+}
+
+func TestProcessHostReadyPersistsHostDirectory(t *testing.T) {
+	ctx := context.Background()
+	data, err := store.Open(ctx, filepath.Join(t.TempDir(), "access.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	if err := data.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := data.EnsureHost(ctx, "host-1"); err != nil {
+		t.Fatal(err)
+	}
+	tokenHash := sha256.Sum256([]byte("invitation-token"))
+	if err := data.CreatePairingToken(ctx, tokenHash[:], "host-1", time.Now().Add(time.Hour), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&log, nil))
+	if err := processHostReady(ctx, "host-1", &whalereinv1.HostReady{
+		HostId: "host-1", DisplayName: "Studio Mac", OsFamily: "macos",
+	}, &route.Service{}, data.SetHostDirectory,
+		func(context.Context, string) error { return nil },
+		func(context.Context, string) error { return nil }, logger); err != nil {
+		t.Fatalf("ready with directory = %v", err)
+	}
+	directory, err := data.HostDirectory(ctx, "host-1", tokenHash[:], time.Now())
+	if err != nil {
+		t.Fatalf("directory read = %v", err)
+	}
+	if directory.DisplayName != "Studio Mac" || directory.OSFamily != "macos" {
+		t.Fatalf("directory = %#v", directory)
+	}
+	if log.Len() != 0 {
+		t.Fatalf("successful persist logged: %s", log.String())
+	}
+
+	// A storage failure must not fail readiness and must not log the values or
+	// the raw error. The store has no such host, so SetHostDirectory returns
+	// ErrNotFound.
+	log.Reset()
+	err = processHostReady(ctx, "missing-host", &whalereinv1.HostReady{
+		HostId: "missing-host", DisplayName: "private-display", OsFamily: "linux",
+	}, &route.Service{}, data.SetHostDirectory,
+		func(context.Context, string) error { return nil },
+		func(context.Context, string) error { return nil }, logger)
+	if err != nil {
+		t.Fatalf("directory failure became fatal: %v", err)
+	}
+	logged := log.String()
+	if !strings.Contains(logged, "host_directory_persist_failed") {
+		t.Fatalf("stable code missing from log: %s", logged)
+	}
+	if strings.Contains(logged, "private-display") || strings.Contains(logged, "linux") || strings.Contains(logged, "not found") {
+		t.Fatalf("log leaked directory details: %s", logged)
 	}
 }
 

@@ -68,6 +68,18 @@ final class ApprovalUITests: WhaleReinUITestCase {
         XCTAssertFalse(app.buttons["approval.reject"].exists)
     }
 
+    func testApprovalShowsVerifiedActionTargetAndImpact() {
+        launchAndOpenConversation()
+        revealByScrolling("approval.card.\(Self.approvalId)")
+
+        let review = waitFor("approval.review.\(Self.approvalId)")
+        XCTAssertTrue(review.label.contains("Run the release verification script"))
+        XCTAssertTrue(review.label.contains("tools/release/verify.sh"))
+        XCTAssertTrue(review.label.contains("Executes the local verification checks"))
+        XCTAssertFalse(element("approval.limit.\(Self.approvalId)").exists)
+        XCTAssertTrue(app.buttons["approval.allowOnce"].isEnabled)
+    }
+
     func testApprovalLabelsIdentifyToolAndState() {
         launchAndOpenConversation()
         waitFor("approval.card.\(Self.approvalId)")

@@ -226,6 +226,7 @@ struct SettingsView: View {
             }
             .sheet(isPresented: $showDiagnostics) {
                 DiagnosticsView(model: diagnostics)
+                    .privacyShieldFromEnvironment()
             }
             .alert(
                 pendingAction == .revokeDevice

@@ -9,6 +9,7 @@ import { hostname as osHostname } from 'node:os'
 import { createHash, randomBytes } from 'node:crypto'
 import { HostRuntime } from './host.js'
 import { MqttAccess } from './access/mqtt.js'
+import { hostOsFamily } from './os.js'
 import { PluginError } from './errors.js'
 import { ActivationOwner } from './activation.js'
 import { HostProfileRegistry, RegistryError, hasLegacyMarkers } from './registry.js'
@@ -1377,6 +1378,10 @@ export class ConnectionManager {
       url: credential.mqttUrl,
       hostId: prepared.hostId,
       token: credential.password,
+      // Directory display metadata is bounded by the transport and never
+      // feeds the Host id, route, fingerprint or grants.
+      displayName: this.#hostDisplayName(),
+      osFamily: hostOsFamily(),
       routeNodeId: credential.nodeId ?? '',
       routeIncarnation: credential.incarnation ?? '',
       routeService: record.service?.id ?? '',
@@ -1723,6 +1728,12 @@ export class ConnectionManager {
     return metadata
   }
 
+  /** One bounded human-facing Host label; never an identifier. */
+  #hostDisplayName() {
+    return this.#options.displayName
+      ?? (this.#options.instanceLabel ? `${this.#hostName} · ${this.#options.instanceLabel}` : this.#hostName)
+  }
+
   #createClient(record, prepared, metadata) {
     if (!metadata || typeof metadata !== 'object') throw new PluginError('protocol_version_incompatible', 'service metadata is unavailable')
     return new ManagedEnrollmentClient({
@@ -1741,8 +1752,7 @@ export class ConnectionManager {
       verifyAuthorization: this.#options.verifyAuthorization,
       expectedIssuer: this.#options.expectedIssuer,
       expectedAudience: '',
-      displayName: this.#options.displayName
-        ?? (this.#options.instanceLabel ? `${this.#hostName} · ${this.#options.instanceLabel}` : this.#hostName),
+      displayName: this.#hostDisplayName(),
       locale: this.#options.locale,
     })
   }

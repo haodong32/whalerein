@@ -11,11 +11,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/whalerein/whalerein/access/internal/auth"
 	"github.com/whalerein/whalerein/access/internal/diagnostics"
+	"github.com/whalerein/whalerein/access/internal/pairing"
 	"github.com/whalerein/whalerein/access/internal/policy"
 	"github.com/whalerein/whalerein/access/internal/requests"
+	"github.com/whalerein/whalerein/access/internal/store"
 	whalereinv1 "github.com/whalerein/whalerein/proto/v1/bindings/go"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -183,6 +186,44 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request, _ map[strin
 	w.Header().Set("X-Whalerein-Hosts-Returned", strconv.Itoa(len(list.Hosts)))
 	w.Header().Set("X-Whalerein-Hosts-Truncated", strconv.FormatBool(truncated))
 	s.writeProto(w, http.StatusOK, list)
+}
+
+// handleHostDirectory returns Host display metadata before pairing. The bearer
+// value is the one-time invitation token, never a device or admin credential.
+// Every invalid, unknown, expired or already-used invitation maps to the same
+// 404 so the route cannot be used to probe host existence or token state.
+func (s *Server) handleHostDirectory(w http.ResponseWriter, r *http.Request, params map[string]string) {
+	hostID := params["host_id"]
+	if !validResourceID(hostID) {
+		s.writeError(w, r, auth.ErrBadRequest)
+		return
+	}
+	token, err := bearerToken(r)
+	if err != nil {
+		s.writeError(w, r, errDirectoryNotFound)
+		return
+	}
+	if s.deps.Directory == nil {
+		s.writeError(w, r, errDirectoryUnavailable)
+		return
+	}
+	directory, err := s.deps.Directory.HostDirectory(r.Context(), hostID, pairing.HashInvitationToken(token), time.Now().UTC())
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.writeError(w, r, errDirectoryNotFound)
+			return
+		}
+		s.writeError(w, r, errDirectoryUnavailable)
+		return
+	}
+	// The invitation is one-time and the response is Host-owned metadata. No
+	// intermediary may cache it past the token's single use.
+	w.Header().Set("Cache-Control", "no-store")
+	s.writeProto(w, http.StatusOK, &whalereinv1.HostDirectory{
+		HostId:      directory.HostID,
+		DisplayName: directory.DisplayName,
+		OsFamily:    directory.OSFamily,
+	})
 }
 
 func hostListBounds(r *http.Request) (int, int, error) {

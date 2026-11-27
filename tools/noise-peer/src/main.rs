@@ -11,7 +11,7 @@
 //!
 //! Line protocol:
 //!   msg <hex>                       handshake message (both roles)
-//!   ready <fingerprint> <hhash> <channel-id> <c2h> <h2c>
+//!   ready <fingerprint> <hhash> <channel-id> <split-fingerprint>
 //!   seal <aad-hex> <plaintext-hex>  -> sealed <nonce-hex> <ciphertext-hex>
 //!   open <aad-hex> <nonce-hex> <ciphertext-hex> -> opened <plaintext-hex>
 //!   ping                            -> pong
@@ -20,9 +20,7 @@
 use std::io::{BufRead, Write};
 
 use anyhow::{anyhow, Context, Result};
-use whalerein_core::testing::{
-    derive_channel_keys, fingerprint, open_with_key, seal_with_key, NoiseSession, StaticIdentity,
-};
+use whalerein_core::testing::{fingerprint, NoiseSession, SecureChannel, StaticIdentity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -112,6 +110,8 @@ fn run_with_io(options: Options, input: impl BufRead, mut stdout: impl Write) ->
         Role::Responder => NoiseSession::responder(&identity, &options.prologue),
     }
     .map_err(|_| anyhow!("noise init failed"))?;
+    // Built once from the secret Split outputs after the handshake completes.
+    let mut channel: Option<SecureChannel> = None;
 
     let lines = input.lines();
 
@@ -140,15 +140,19 @@ fn run_with_io(options: Options, input: impl BufRead, mut stdout: impl Write) ->
                     .map_err(|_| anyhow!("noise read failed"))?;
                 let _ = payload;
                 if session.is_finished() {
-                    emit_ready(&mut stdout, &session, &options)?;
-                } else if options.role == Role::Responder || options.role == Role::Initiator {
+                    let established = establish(&mut session, &options)?;
+                    emit_ready(&mut stdout, &established, &mut session, &options)?;
+                    channel = Some(established);
+                } else {
                     let response = session
                         .write(b"whalerein-noise-peer")
                         .map_err(|_| anyhow!("noise write failed"))?;
                     writeln!(stdout, "msg {}", hex::encode(response))?;
                     stdout.flush()?;
                     if session.is_finished() {
-                        emit_ready(&mut stdout, &session, &options)?;
+                        let established = establish(&mut session, &options)?;
+                        emit_ready(&mut stdout, &established, &mut session, &options)?;
+                        channel = Some(established);
                     }
                 }
             }
@@ -156,14 +160,17 @@ fn run_with_io(options: Options, input: impl BufRead, mut stdout: impl Write) ->
                 let aad = hex::decode(parts.next().unwrap_or_default()).context("aad hex")?;
                 let plaintext =
                     hex::decode(parts.next().unwrap_or_default()).context("plaintext hex")?;
-                let keys = keys(&session, &options)?;
-                let (nonce, ciphertext) = seal_with_key(&keys.h2c, &aad, &plaintext)
+                let channel = channel
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("handshake incomplete"))?;
+                let frame = channel
+                    .seal_raw(&aad, &plaintext)
                     .map_err(|_| anyhow!("seal failed"))?;
                 writeln!(
                     stdout,
                     "sealed {} {}",
-                    hex::encode(nonce),
-                    hex::encode(ciphertext)
+                    hex::encode(frame.nonce),
+                    hex::encode(frame.ciphertext)
                 )?;
                 stdout.flush()?;
             }
@@ -172,8 +179,10 @@ fn run_with_io(options: Options, input: impl BufRead, mut stdout: impl Write) ->
                 let nonce = hex::decode(parts.next().unwrap_or_default()).context("nonce hex")?;
                 let ciphertext =
                     hex::decode(parts.next().unwrap_or_default()).context("ciphertext hex")?;
-                let keys = keys(&session, &options)?;
-                match open_with_key(&keys.c2h, &aad, &nonce, &ciphertext) {
+                let channel = channel
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("handshake incomplete"))?;
+                match channel.open_raw_parts(&aad, &nonce, &ciphertext) {
                     Ok(plaintext) => {
                         writeln!(stdout, "opened {}", hex::encode(plaintext))?;
                     }
@@ -197,30 +206,43 @@ fn run_with_io(options: Options, input: impl BufRead, mut stdout: impl Write) ->
     Ok(())
 }
 
-fn keys(session: &NoiseSession, options: &Options) -> Result<whalerein_core::testing::ChannelKeys> {
-    let hash = session
-        .handshake_hash()
+fn establish(session: &mut NoiseSession, options: &Options) -> Result<SecureChannel> {
+    let split = session
+        .split_keys()
         .map_err(|_| anyhow!("handshake not complete"))?;
-    derive_channel_keys(&hash, &options.prologue).map_err(|_| anyhow!("key derivation failed"))
+    let device = SecureChannel::from_split(
+        split,
+        &options.channel_id,
+        "noise-peer-host",
+        "noise-peer-device",
+    )
+    .map_err(|_| anyhow!("channel init failed"))?;
+    Ok(match options.role {
+        // The responder acts as the Host: open c2h requests, seal h2c replies.
+        Role::Responder => device.peer_view(),
+        Role::Initiator => device,
+    })
 }
 
-fn emit_ready(stdout: &mut impl Write, session: &NoiseSession, options: &Options) -> Result<()> {
+fn emit_ready(
+    stdout: &mut impl Write,
+    channel: &SecureChannel,
+    session: &mut NoiseSession,
+    options: &Options,
+) -> Result<()> {
     let hash = session
         .handshake_hash()
         .map_err(|_| anyhow!("handshake not complete"))?;
-    let keys = derive_channel_keys(&hash, &options.prologue)
-        .map_err(|_| anyhow!("key derivation failed"))?;
     let remote = session
         .remote_static()
         .ok_or_else(|| anyhow!("remote static key missing"))?;
     writeln!(
         stdout,
-        "ready {} {} {} {} {}",
+        "ready {} {} {} {}",
         fingerprint(&remote),
         hex::encode(hash),
         options.channel_id,
-        hex::encode(keys.c2h),
-        hex::encode(keys.h2c)
+        channel.key_fingerprint()
     )?;
     stdout.flush()?;
     Ok(())
@@ -315,17 +337,19 @@ mod tests {
         let msg3 = initiator.write(b"").unwrap();
         assert_eq!(responder.read(&msg3).unwrap(), b"");
 
-        let client_keys =
-            derive_channel_keys(&initiator.handshake_hash().unwrap(), prologue).unwrap();
-        let host_keys =
-            derive_channel_keys(&responder.handshake_hash().unwrap(), prologue).unwrap();
-        assert_eq!(client_keys.c2h, host_keys.c2h);
-        assert_eq!(client_keys.h2c, host_keys.h2c);
+        let client_split = initiator.split_keys().unwrap();
+        assert_eq!(client_split, responder.split_keys().unwrap());
+        let client = SecureChannel::from_split(client_split, "chan", "h", "d").unwrap();
+        let host = client.peer_view();
+        assert_eq!(client.key_fingerprint(), host.key_fingerprint());
 
-        let (nonce, ciphertext) = seal_with_key(&client_keys.c2h, b"aad", b"data").unwrap();
-        assert_eq!(
-            open_with_key(&host_keys.c2h, b"aad", &nonce, &ciphertext).unwrap(),
-            b"data"
+        let frame = client.seal_raw(b"aad", b"data").unwrap();
+        assert_eq!(host.open_raw(b"aad", &frame).unwrap(), b"data");
+        let reply = host.seal_raw(b"aad", b"reply").unwrap();
+        assert_eq!(client.open_raw(b"aad", &reply).unwrap(), b"reply");
+        assert!(
+            client.open_raw(b"aad", &reply).is_err(),
+            "replay is rejected"
         );
     }
 
@@ -386,8 +410,9 @@ mod tests {
         .is_err());
         let options = fixture_options(Role::Responder);
         let identity = StaticIdentity::from_private_key(&options.private_key).unwrap();
-        let incomplete = NoiseSession::responder(&identity, &options.prologue).unwrap();
-        assert!(emit_ready(&mut Vec::new(), &incomplete, &options).is_err());
+        let mut incomplete = NoiseSession::responder(&identity, &options.prologue).unwrap();
+        let channel = SecureChannel::from_split(([0u8; 32], [0u8; 32]), "c", "h", "d").unwrap();
+        assert!(emit_ready(&mut Vec::new(), &channel, &mut incomplete, &options).is_err());
     }
 
     #[test]
@@ -488,14 +513,20 @@ mod tests {
         }
         let ready = line(&mut responses);
         let fields: Vec<_> = ready.split_whitespace().collect();
-        assert!(fields.len() == 6 && fields[0] == "ready");
+        assert!(fields.len() == 5 && fields[0] == "ready");
         let hash = session.handshake_hash().unwrap();
-        let derived = derive_channel_keys(&hash, &options.prologue).unwrap();
+        let split = session.split_keys().unwrap();
+        let own = SecureChannel::from_split(split, &options.channel_id, "h", "d").unwrap();
+        let peer_channel = match role {
+            // The tool is the host; this side is the device.
+            Role::Responder => own,
+            // The tool is the device; this side is the host.
+            Role::Initiator => own.peer_view(),
+        };
         assert!(fields[1] == fingerprint(identity.public_key()));
         assert!(fields[2] == hex::encode(hash));
         assert!(fields[3] == options.channel_id);
-        assert!(fields[4] == hex::encode(derived.c2h));
-        assert!(fields[5] == hex::encode(derived.h2c));
+        assert!(fields[4] == peer_channel.key_fingerprint());
 
         let aad = b"fixture aad";
         let plaintext = b"synthetic fixture bytes";
@@ -506,9 +537,15 @@ mod tests {
         let nonce = hex::decode(parts[1]).unwrap();
         let ciphertext = hex::decode(parts[2]).unwrap();
         assert!(nonce.len() == 12);
-        assert!(open_with_key(&derived.h2c, aad, &nonce, &ciphertext).unwrap() == plaintext);
+        assert!(
+            peer_channel
+                .open_raw_parts(aad, &nonce, &ciphertext)
+                .unwrap()
+                == plaintext
+        );
 
-        let (nonce, ciphertext) = seal_with_key(&derived.c2h, aad, plaintext).unwrap();
+        let frame = peer_channel.seal_raw(aad, plaintext).unwrap();
+        let (nonce, ciphertext) = (frame.nonce, frame.ciphertext);
         writeln!(
             peer,
             "open {} {} {}",

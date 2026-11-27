@@ -23,6 +23,7 @@ pub const HANDSHAKE_TIMEOUT_MS: i64 = 30_000;
 /// A reconnect always creates a new channel and discards the old one, so old
 /// ciphertext can never be opened with the new keys.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub async fn ensure_channel(
     runtime: &Runtime,
     access: &AccessClient,
@@ -31,6 +32,7 @@ pub async fn ensure_channel(
     device_id: &str,
     force_new: bool,
     expected_fingerprint: Option<&str>,
+    grant_id: Option<&str>,
 ) -> CoreResult<SecureChannel> {
     ensure_channel_with(
         runtime,
@@ -41,6 +43,7 @@ pub async fn ensure_channel(
         device_id,
         force_new,
         expected_fingerprint,
+        grant_id,
     )
     .await
 }
@@ -62,6 +65,7 @@ pub(crate) async fn ensure_channel_on(
     device_id: &str,
     force_new: bool,
     expected_fingerprint: Option<&str>,
+    grant_id: Option<&str>,
 ) -> CoreResult<SecureChannel> {
     ensure_channel_with(
         runtime,
@@ -72,6 +76,7 @@ pub(crate) async fn ensure_channel_on(
         device_id,
         force_new,
         expected_fingerprint,
+        grant_id,
     )
     .await
 }
@@ -86,6 +91,7 @@ async fn ensure_channel_with(
     device_id: &str,
     force_new: bool,
     expected_fingerprint: Option<&str>,
+    grant_id: Option<&str>,
 ) -> CoreResult<SecureChannel> {
     let stale = force_new.then(|| {
         runtime
@@ -102,6 +108,7 @@ async fn ensure_channel_with(
         force_new,
         stale,
         expected_fingerprint,
+        grant_id,
     )
     .await
 }
@@ -118,6 +125,7 @@ pub(crate) async fn ensure_channel_after_on(
     device_id: &str,
     stale_channel_id: &str,
     expected_fingerprint: Option<&str>,
+    grant_id: Option<&str>,
 ) -> CoreResult<SecureChannel> {
     ensure_channel_after_with(
         runtime,
@@ -128,6 +136,7 @@ pub(crate) async fn ensure_channel_after_on(
         device_id,
         stale_channel_id,
         expected_fingerprint,
+        grant_id,
     )
     .await
 }
@@ -142,6 +151,7 @@ async fn ensure_channel_after_with(
     device_id: &str,
     stale_channel_id: &str,
     expected_fingerprint: Option<&str>,
+    grant_id: Option<&str>,
 ) -> CoreResult<SecureChannel> {
     ensure_channel_guarded(
         runtime,
@@ -153,6 +163,7 @@ async fn ensure_channel_after_with(
         true,
         Some(Some(stale_channel_id.to_owned())),
         expected_fingerprint,
+        grant_id,
     )
     .await
 }
@@ -168,6 +179,7 @@ async fn ensure_channel_guarded(
     mut force_new: bool,
     stale_channel_id: Option<Option<String>>,
     expected_fingerprint: Option<&str>,
+    grant_id: Option<&str>,
 ) -> CoreResult<SecureChannel> {
     let lock = runtime.channel_lock(host_id);
     let _guard = lock.lock().await;
@@ -205,6 +217,7 @@ async fn ensure_channel_guarded(
         device_id,
         expected_fingerprint,
         receive_generation,
+        grant_id,
     )
     .await
     {
@@ -254,6 +267,7 @@ struct Established {
     receive_generation: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handshake(
     access: &AccessClient,
     identity: &StaticIdentity,
@@ -262,6 +276,7 @@ async fn handshake(
     device_id: &str,
     expected_fingerprint: Option<&str>,
     receive_generation: u64,
+    grant_id: Option<&str>,
 ) -> CoreResult<Established> {
     // The negotiation id is random and bound into the prologue. The derived
     // application channel id is different and is used for encrypted frames.
@@ -280,6 +295,9 @@ async fn handshake(
         capabilities: Some(default_capabilities()),
         client_nonce: random_id(16),
         receive: Some(device_receive),
+        // The caller supplies the current Host grant identity once known. An
+        // unset/legacy profile sends an empty field and fabricates nothing.
+        grant_id: grant_id.unwrap_or_default().to_owned(),
     };
     let msg1 = noise.write(&hello.encode_to_vec())?;
     let msg2 = send_handshake(
@@ -303,6 +321,17 @@ async fn handshake(
     }
     if !ready.device_id.is_empty() && ready.device_id != device_id {
         return Err(CoreError::Unauthorized);
+    }
+    // The Host echoes the grant it bound into the prepared channel. A
+    // non-empty expectation must match exactly; an empty legacy expectation is
+    // not silently upgraded, and an unexpected echo is ignored because the
+    // Host remains the authority for the grant it installed.
+    if let Some(expected) = grant_id {
+        if !expected.is_empty() && ready.grant_id != expected {
+            return Err(CoreError::Security(
+                "channel grant identity does not match the authenticated handshake".into(),
+            ));
+        }
     }
     let capabilities = ready.capabilities.unwrap_or_default();
     let (host_receive, host_receive_generation) = ready
@@ -345,13 +374,15 @@ async fn handshake(
     }
 
     let hash = noise.handshake_hash()?;
+    // The handshake hash stays the public binding for the managed App-session
+    // proof. It is never an application-key input.
     // Proof failure must not tear down an otherwise authenticated channel:
     // the Host gate fails closed at dispatch if the proof never arrives.
     let _ = access
         .submit_session_proof(host_id, device_id, &negotiation_id, &hash)
         .await;
-    let channel =
-        SecureChannel::from_handshake(&hash, &prologue, &negotiation_id, host_id, device_id)?;
+    let split = noise.split_keys()?;
+    let channel = SecureChannel::from_split(split, &negotiation_id, host_id, device_id)?;
     access
         .diagnostics
         .record(DiagnosticKind::SecureChannelEstablished);
@@ -557,7 +588,7 @@ mod tests {
         let error = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(ensure_channel(
-                &runtime, &access, &identity, "h", "d", false, None,
+                &runtime, &access, &identity, "h", "d", false, None, None,
             ))
             .unwrap_err();
         assert!(matches!(error, CoreError::Revoked));
@@ -575,13 +606,17 @@ mod fake_host_tests {
         let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
         let identity = StaticIdentity::generate();
         let runtime = Runtime::new();
-        let first = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
-            .await
-            .unwrap();
+        let first = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", false, None, None,
+        )
+        .await
+        .unwrap();
         assert_eq!(runtime.handshake_phase("host-1"), HandshakePhase::Complete);
-        let second = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", true, None)
-            .await
-            .unwrap();
+        let second = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", true, None, None,
+        )
+        .await
+        .unwrap();
         assert_ne!(first.channel_id(), second.channel_id());
         assert_eq!(
             runtime.channel("host-1").unwrap().channel_id(),
@@ -607,9 +642,11 @@ mod fake_host_tests {
         let identity = StaticIdentity::generate();
         let runtime = Runtime::new();
         runtime.set_transport_budget(compact);
-        let _channel = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
-            .await
-            .unwrap();
+        let _channel = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", false, None, None,
+        )
+        .await
+        .unwrap();
         let hello = access
             .host
             .lock()
@@ -645,9 +682,11 @@ mod fake_host_tests {
         let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
         let identity = StaticIdentity::generate();
         let runtime = Runtime::new();
-        let _first = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
-            .await
-            .unwrap();
+        let _first = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", false, None, None,
+        )
+        .await
+        .unwrap();
 
         // The local Hello leg is scoped to the Noise channel and starts its own
         // monotonic generation. The Host's ChannelReady leg is independent.
@@ -666,9 +705,11 @@ mod fake_host_tests {
 
         // Reconnect on the same Host broker connection: the local generation
         // advances while the Host channel advertisement keeps generation 9.
-        let _second = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", true, None)
-            .await
-            .unwrap();
+        let _second = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", true, None, None,
+        )
+        .await
+        .unwrap();
         let hello = access
             .host
             .lock()
@@ -691,17 +732,21 @@ mod fake_host_tests {
         let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
         let identity = StaticIdentity::generate();
         let runtime = Runtime::new();
-        let _ = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
-            .await
-            .unwrap();
+        let _ = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", false, None, None,
+        )
+        .await
+        .unwrap();
         assert_eq!(runtime.host_receive_generation("host-1"), Some(4));
 
         // The replacement channel advertises nothing. The prior channel's
         // receive budget and generation must not carry over to it.
         access.host.lock().unwrap().omit_channel_receive = true;
-        let error = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", true, None)
-            .await
-            .unwrap_err();
+        let error = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", true, None, None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, CoreError::ProtocolIncompatible));
         assert!(runtime.host_receive("host-1").is_none());
         assert!(runtime.host_receive_generation("host-1").is_none());
@@ -733,9 +778,11 @@ mod fake_host_tests {
         let identity = StaticIdentity::generate();
         let runtime = Runtime::new();
         runtime.set_transport_budget(local);
-        let _ = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
-            .await
-            .unwrap();
+        let _ = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", false, None, None,
+        )
+        .await
+        .unwrap();
 
         let hello = access
             .host
@@ -758,9 +805,11 @@ mod fake_host_tests {
         let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
         let identity = StaticIdentity::generate();
         let runtime = Runtime::new();
-        let error = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
-            .await
-            .unwrap_err();
+        let error = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", false, None, None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, CoreError::ProtocolIncompatible));
         assert!(runtime.host_receive("host-1").is_none());
 
@@ -773,9 +822,11 @@ mod fake_host_tests {
         invalid.budget.as_mut().unwrap().reserved_bytes = 1024;
         access.host.lock().unwrap().channel_receive = Some(invalid);
         let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
-        let error = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
-            .await
-            .unwrap_err();
+        let error = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", false, None, None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, CoreError::ProtocolIncompatible));
     }
 
@@ -794,9 +845,11 @@ mod fake_host_tests {
         let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
         let identity = StaticIdentity::generate();
         let runtime = Runtime::new();
-        let _channel = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
-            .await
-            .unwrap();
+        let _channel = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", false, None, None,
+        )
+        .await
+        .unwrap();
         let negotiated = runtime.capabilities("host-1").expect("negotiated set");
         assert!(!whalerein_proto::has_capability(
             &negotiated,
@@ -849,9 +902,11 @@ mod fake_host_tests {
         let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
         let identity = StaticIdentity::generate();
         let runtime = Runtime::new();
-        let channel = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
-            .await
-            .unwrap();
+        let channel = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", false, None, None,
+        )
+        .await
+        .unwrap();
         let negotiated = runtime.capabilities("host-1").expect("negotiated set");
         for capability in [
             Capability::Sessions,
@@ -948,9 +1003,11 @@ mod fake_host_tests {
         let client = AccessClient::new(access.url(), Some("device-token".into())).unwrap();
         let identity = StaticIdentity::generate();
         let runtime = Runtime::new();
-        let error = ensure_channel(&runtime, &client, &identity, "host-1", "d-1", false, None)
-            .await
-            .unwrap_err();
+        let error = ensure_channel(
+            &runtime, &client, &identity, "host-1", "d-1", false, None, None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(error, CoreError::HostOffline));
         assert_eq!(runtime.handshake_phase("host-1"), HandshakePhase::Failed);
         assert_eq!(runtime.recent_errors(), vec!["host_offline".to_owned()]);

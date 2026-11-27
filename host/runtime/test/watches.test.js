@@ -86,12 +86,15 @@ test('a rotated client key replaces the observation of its retired channel only'
     hostId: 'h', deviceId: 'd', security: ctx.security, store: ctx.store,
     identity: rotatedIdentity, connectionRef: '0123456789abcdef:2',
   })
-  // The retired key can no longer handshake for this Device.
+  // The retired key still names its old grant, which no longer matches the
+  // Host snapshot for this Device's pinned key: the handshake fails closed at
+  // msg1 (no pending channel) rather than at finish.
   assert.throws(() => establishChannel({
     hostId: 'h', deviceId: 'd', security: ctx.security, store: ctx.store,
     identity: ctx.identity, persistPeer: false, channelId: '0123456789abcdef',
     connectionRef: '0123456789abcdef:3',
-  }), (error) => error.code === 'unauthorized')
+  }), (error) => error.code === 'forbidden')
+  assert.equal(ctx.security.getChannel('0123456789abcdef'), null, 'the retired key installs no channel')
   const current = await ctx.events.watch('d', rotated.channelId, 's', undefined, CONV)
   assert.notEqual(current.watch_id, retired.watch_id, 'a rotated key gets its own observation')
   // The retired Broker connection closes; that ends exactly its observation and
@@ -126,7 +129,7 @@ test('watch registration precedes the baseline, shares native watches, and deliv
  ctx.source.sinks.get('s')(live())
  await settle()
  const outer=codec().decode('whalerein.v1.EventEnvelope',ctx.access.published[0])
- const payload=openEventEnvelope({envelope:outer,channel:ctx.channel,hostId:'h',deviceId:'d'})
+ const payload=openEventEnvelope({envelope:outer,cipher:ctx.channel.cipher,hostId:'h',deviceId:'d'})
  assert.equal(payload.update.watch_id,ready.watch_id)
  assert.equal(payload.update.live.delta.text.length,1)
  const page=await ctx.events.readHistory('s',{})
@@ -350,7 +353,7 @@ test('a rejected shared source registration fails every attached observer and a 
   for (const envelope of ctx.access.published) {
     const outer = codec().decode('whalerein.v1.EventEnvelope', envelope)
     const channel = outer.device_id === 'd' ? ctx.channel : second
-    const payload = openEventEnvelope({ envelope: outer, channel, hostId: 'h', deviceId: outer.device_id })
+    const payload = openEventEnvelope({ envelope: outer, cipher: channel.cipher, hostId: 'h', deviceId: outer.device_id })
     updates.set(outer.device_id, payload.update)
   }
   assert.equal(updates.size, 2, 'both intended observers receive the live update')
@@ -372,13 +375,13 @@ test('a stalled committed publication for one recipient does not block another r
   let blockedCommitted = false
   ctx.access.publishLive = async function (bytes) {
     const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
-    const payload = openEventEnvelope({ envelope: outer, channel: channels.get(outer.device_id), hostId: 'h', deviceId: outer.device_id })
+    const payload = openEventEnvelope({ envelope: outer, cipher: channels.get(outer.device_id).cipher, hostId: 'h', deviceId: outer.device_id })
     published.push({ deviceId: outer.device_id, kind: 'live', batchId: null, watchId: payload.update.watch_id })
     return true
   }
   ctx.access.publishEvent = async function (bytes) {
     const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
-    const payload = openEventEnvelope({ envelope: outer, channel: channels.get(outer.device_id), hostId: 'h', deviceId: outer.device_id })
+    const payload = openEventEnvelope({ envelope: outer, cipher: channels.get(outer.device_id).cipher, hostId: 'h', deviceId: outer.device_id })
     const update = payload.update
     published.push({ deviceId: outer.device_id, kind: 'committed',
       batchId: update.history?.batch_id ?? null, watchId: update.watch_id })
@@ -450,7 +453,7 @@ function questionUpdates(ctx) {
   for (const bytes of ctx.access.published) {
     const outer=codec().decode('whalerein.v1.EventEnvelope',bytes)
     if (outer.device_id!=='d') continue
-    const payload=openEventEnvelope({envelope:outer,channel:ctx.channel,hostId:'h',deviceId:'d'})
+    const payload=openEventEnvelope({envelope:outer,cipher:ctx.channel.cipher,hostId:'h',deviceId:'d'})
     if (payload.update.questions) out.push(payload.update.questions)
   }
   return out
@@ -623,7 +626,7 @@ test('a source that no longer has the session closes the watch with a terminal e
   await assert.rejects(ctx.events.versions('d', ctx.channel.channelId, 's'), error => error.code === 'not_found')
   assert.equal(ctx.access.published.length, 1, 'the terminal close must be delivered')
   const outer = codec().decode('whalerein.v1.EventEnvelope', ctx.access.published[0])
-  const payload = openEventEnvelope({ envelope: outer, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
+  const payload = openEventEnvelope({ envelope: outer, cipher: ctx.channel.cipher, hostId: 'h', deviceId: 'd' })
   assert.equal(payload.watch_closed.watch_id, watch.watch_id)
   assert.equal(payload.watch_closed.reason, 'session_deleted')
   assert.deepEqual(payload.watch_closed.session, { host_id: 'h', session_id: 's' })
@@ -636,10 +639,8 @@ function deliveredUpdates(ctx, deviceId = 'd') {
   for (const bytes of ctx.access.published) {
     const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
     if (outer.device_id !== deviceId) continue
-    const channel = deviceId === 'd'
-      ? ctx.channel
-      : { channelId: outer.channel_id, h2c: ctx.otherChannels?.get(deviceId)?.h2c }
-    const payload = openEventEnvelope({ envelope: outer, channel, hostId: 'h', deviceId })
+    if (deviceId !== 'd') continue
+    const payload = openEventEnvelope({ envelope: outer, cipher: ctx.channel.cipher, hostId: 'h', deviceId })
     if (payload?.update) out.push(payload.update)
   }
   return out
@@ -735,7 +736,7 @@ test('a shared event route uses the smallest authenticated receiver budget', asy
   for (const bytes of ctx.access.published) {
     const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
     const channel = outer.channel_id === ctx.channel.channelId ? ctx.channel : other
-    const payload = openEventEnvelope({ envelope: outer, channel, hostId: 'h', deviceId: outer.device_id })
+    const payload = openEventEnvelope({ envelope: outer, cipher: channel.cipher, hostId: 'h', deviceId: outer.device_id })
     assert.equal(payload.update.history, undefined)
     assert.equal(payload.update.reset.reason, 'snapshot_required')
   }
@@ -769,7 +770,7 @@ test('a shared event route uses a relation-valid overridden receive budget as it
   for (const bytes of ctx.access.published) {
     const outer = codec().decode('whalerein.v1.EventEnvelope', bytes)
     const channel = outer.channel_id === ctx.channel.channelId ? ctx.channel : other
-    const payload = openEventEnvelope({ envelope: outer, channel, hostId: 'h', deviceId: outer.device_id })
+    const payload = openEventEnvelope({ envelope: outer, cipher: channel.cipher, hostId: 'h', deviceId: outer.device_id })
     assert.equal(payload.update.history, undefined)
     assert.equal(payload.update.reset.reason, 'snapshot_required')
   }
@@ -806,7 +807,7 @@ test('an oversized live delta is split before sealing into packet-sized previews
     const envelope = codec().decode('whalerein.v1.EventEnvelope', bytes)
     assert.equal(envelope.relay_version, 5)
     assert.equal((envelope.ciphertext ?? new Uint8Array(0)).length > 0, true, 'previews stay inline on MQTT')
-    const payload = openEventEnvelope({ envelope, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
+    const payload = openEventEnvelope({ envelope, cipher: ctx.channel.cipher, hostId: 'h', deviceId: 'd' })
     assert.equal(payload.update.reset, undefined, 'a live preview never becomes a HistoryReset')
     assert.equal(payload.update.watch_id, watch.watch_id)
     assert.equal(payload.update.live.block_id, 'visible')
@@ -886,7 +887,7 @@ test('an unsplittable one-unit live delta is never replaced by a HistoryReset', 
   assert.equal(ctx.events.describe().snapshotRequired, 0)
   assert.equal(ctx.access.published.length, 1)
   const envelope = codec().decode('whalerein.v1.EventEnvelope', ctx.access.published[0])
-  const payload = openEventEnvelope({ envelope, channel: ctx.channel, hostId: 'h', deviceId: 'd' })
+  const payload = openEventEnvelope({ envelope, cipher: ctx.channel.cipher, hostId: 'h', deviceId: 'd' })
   assert.equal(payload.update.reset, undefined)
   assert.equal(payload.update.live.delta.text.length, 5000)
 })
@@ -916,7 +917,7 @@ test('previews use only the live class and the committed message stays on the or
   assert.equal(control.length, 1, 'the committed message is control')
   const committed = openEventEnvelope({
     envelope: codec().decode('whalerein.v1.EventEnvelope', control[0]),
-    channel: ctx.channel, hostId: 'h', deviceId: 'd',
+    cipher: ctx.channel.cipher, hostId: 'h', deviceId: 'd',
   })
   assert.equal(committed.update.history.batch_id, 'commit')
 
@@ -1011,7 +1012,7 @@ test('two previews for one watch are not serialized behind each other', async (t
     async publishLive(bytes) {
       const payload = openEventEnvelope({
         envelope: codec().decode('whalerein.v1.EventEnvelope', bytes),
-        channel: ctx.channel, hostId: 'h', deviceId: 'd',
+        cipher: ctx.channel.cipher, hostId: 'h', deviceId: 'd',
       })
       order.push(payload.update.live.block_id)
       if (order.length === 1) await first.promise

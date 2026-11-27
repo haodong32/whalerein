@@ -35,6 +35,12 @@ struct ApprovalCardView: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 row(L10n.approvalTool, approval.toolName)
+                if let review = model.approvalReview(approval) {
+                    // Verified, credential-masked facts from the Host
+                    // projection. Nothing is inferred from the tool name.
+                    reviewRows(review)
+                        .accessibilityIdentifier("approval.review.\(approval.approvalId)")
+                }
                 row(L10n.approvalReason, approval.reason)
                 row(L10n.approvalExpires, Self.expiryText(for: approval))
             }
@@ -88,6 +94,13 @@ struct ApprovalCardView: View {
                     .accessibilityIdentifier("approval.unavailable.\(approval.approvalId)")
             }
 
+            if let limitationKey = model.approvalReviewLimitationKey(approval) {
+                Label(limitationKey.key, systemImage: "exclamationmark.shield")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("approval.limit.\(approval.approvalId)")
+            }
+
             if effectiveState == .pending,
                let reasonKey = model.approvalActionDisabledReasonKey,
                model.resolvingApprovalId != approval.approvalId {
@@ -119,7 +132,7 @@ struct ApprovalCardView: View {
                     }
                     .glassButtonStyle(prominent: true)
                     .controlSize(.large)
-                    .disabled(!model.isApprovalActionable(approval))
+                    .disabled(!model.canAllowApproval(approval))
                     .accessibilityIdentifier("approval.allowOnce")
                     .accessibilityLabel(L10n.approvalAllowOnce.key)
                     .accessibilityValue(Text(approval.toolName))
@@ -153,6 +166,19 @@ struct ApprovalCardView: View {
         .liquidGlass(in: RoundedRectangle(cornerRadius: 20))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("approval.card.\(approval.approvalId)")
+    }
+
+    @ViewBuilder
+    private func reviewRows(_ review: ApprovalReviewDetails) -> some View {
+        if let action = review.action, !action.isEmpty {
+            row(L10n.approvalAction, action)
+        }
+        if let target = review.target, !target.isEmpty {
+            row(L10n.approvalTarget, target)
+        }
+        if let impact = review.impact, !impact.isEmpty {
+            row(L10n.approvalImpact, impact)
+        }
     }
 
     private func row(_ label: L10nKey, _ value: String) -> some View {

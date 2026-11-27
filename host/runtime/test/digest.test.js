@@ -47,7 +47,7 @@ test('when approval fields use either casing, the digest uses the canonical fiel
     expires_at_unix_ms: 99,
   }
   assert.deepEqual([...approvalDigest(canonical)], [...approvalDigest(snake)])
-  assert.deepEqual([...approvalDigest({})], [...sha256Text('whalerein/v1/approval||||||0|0')])
+  assert.deepEqual([...approvalDigest({})], [...sha256Text('whalerein/v2/approval|||||||||unavailable|0|0')])
 })
 
 test('shared approval digest vectors match across Core and the Host connector', () => {
