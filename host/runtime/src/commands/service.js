@@ -14,6 +14,7 @@ import { QuestionPager } from './question-pager.js'
 import { AttachmentService } from '../attachments/service.js'
 import { DEFAULT_ENVELOPE_BYTES, DEFAULT_TRANSPORT_PROFILE, transportProfileBudget } from '../contracts/transport.js'
 import { emitFact } from '../observation/index.js'
+import { boundReviewValue } from '../security/redaction.js'
 
 const COMMAND_STATUS_TO_PROTO = Object.freeze({
   accepted: 'host_accepted',
@@ -50,39 +51,6 @@ const APPROVAL_REVIEW_AVAILABILITY_TO_PROTO = Object.freeze({
 // The adapter already projects masked facts. This second pass is a serialization
 // boundary guarantee: a source that returns a raw secret still cannot put it on
 // the wire. The digest is bound to the native record, not to these replacements.
-const REVIEW_REDACTED = '<redacted>'
-const REVIEW_MASK_RULES = Object.freeze([
-  [new RegExp(
-    '-----BEGIN ' +
-    '[A-Z0-9 ]*' +
-    'PRIVATE KEY-----' + '[\\s\\S]*?-----END [A-Z0-9 ]*' + 'PRIVATE KEY-----',
-    'gi',
-  ), REVIEW_REDACTED],
-  [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{4,}/gi, `$1 ${REVIEW_REDACTED}`],
-  [/((?:api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|token|secret|password|passwd|pwd|authorization|private[_-]?key|credential|session[_-]?key)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s&;,]+)/gi, `$1${REVIEW_REDACTED}`],
-  [/\b(sk|rk|pk)-[A-Za-z0-9_-]{8,}/g, REVIEW_REDACTED],
-  [/\bsk_[A-Za-z0-9_-]{8,}/g, REVIEW_REDACTED],
-  [/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, REVIEW_REDACTED],
-  [/\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, REVIEW_REDACTED],
-  [/\bAKIA[0-9A-Z]{16}\b/g, REVIEW_REDACTED],
-  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, REVIEW_REDACTED],
-  [/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, `$1${REVIEW_REDACTED}@`],
-  [/\b[0-9a-fA-F]{32,}\b/g, REVIEW_REDACTED],
-  [/\b[A-Za-z0-9+_-]{48,}={0,2}\b/g, REVIEW_REDACTED],
-])
-
-function maskedReviewText(value) {
-  let text = boundedText(value)
-  if (text === '') return ''
-  for (const [pattern, replacement] of REVIEW_MASK_RULES) {
-    pattern.lastIndex = 0
-    text = text.replace(pattern, replacement)
-  }
-  // A replacement can be longer than the secret it replaces; bound again so
-  // the projected field never exceeds the wire limit.
-  return boundedText(text)
-}
-
 function reviewAvailabilityToProto(value) {
   return APPROVAL_REVIEW_AVAILABILITY_TO_PROTO[approvalReviewAvailability(value)]
     ?? 'approval_review_unavailable'
@@ -110,9 +78,9 @@ function reviewToProto(approval, include) {
     }
   }
   return {
-    review_action: maskedReviewText(approval.reviewAction),
-    review_target: maskedReviewText(approval.reviewTarget),
-    review_impact: maskedReviewText(approval.reviewImpact),
+    review_action: boundReviewValue(approval.reviewAction),
+    review_target: boundReviewValue(approval.reviewTarget),
+    review_impact: boundReviewValue(approval.reviewImpact),
     review_availability: reviewAvailabilityToProto(approval.reviewAvailability),
   }
 }

@@ -39,7 +39,7 @@ function escapeApprovalField(value) {
  * and the shared vectors in `proto/v1/approval_digest_vectors.json`.
  * @param {object} approval approval fields; `approval_id` and camelCase aliases accepted.
  */
-export const APPROVAL_DIGEST_DOMAIN = 'whalerein/v2/approval'
+const APPROVAL_DIGEST_DOMAIN = 'whalerein/v2/approval'
 
 /** Normalize a review availability to the canonical lowercase token. */
 export function approvalReviewAvailability(value) {

@@ -40,7 +40,7 @@ const MAX_LABEL_LENGTH = 128
  * discovery never authorizes an execution. Any operation absent from this map
  * is unclassified and denied by default.
  */
-export const OPERATION_RIGHTS = Object.freeze({
+const OPERATION_RIGHTS = Object.freeze({
   // Read scope.
   list_sessions: 'read',
   get_session: 'read',
