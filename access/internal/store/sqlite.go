@@ -559,8 +559,14 @@ func translateSQL(query string, args []any) (string, []any, error) {
 				if len(prefix) >= 4 && strings.EqualFold(prefix[len(prefix)-4:], "any(") {
 					reflection := reflect.ValueOf(argument)
 					if reflection.Kind() == reflect.Slice || reflection.Kind() == reflect.Array {
+						listPrefix := prefix[:len(prefix)-4]
+						// `= ANY(...)` becomes `IN (...)`, not `= IN (...)`.
+						trimmed := strings.TrimRight(listPrefix, " ")
+						if strings.HasSuffix(trimmed, "=") {
+							listPrefix = strings.TrimRight(trimmed[:len(trimmed)-1], " ") + " "
+						}
 						builder.Reset()
-						builder.WriteString(prefix[:len(prefix)-4])
+						builder.WriteString(listPrefix)
 						builder.WriteString("IN (")
 						for i := 0; i < reflection.Len(); i++ {
 							if i > 0 {
@@ -569,7 +575,7 @@ func translateSQL(query string, args []any) (string, []any, error) {
 							builder.WriteByte('?')
 							values = append(values, normalizeArg(reflection.Index(i).Interface()))
 						}
-						builder.WriteString(")")
+						// The query's own closing parenthesis closes the list.
 						index = end
 						continue
 					}
@@ -591,6 +597,8 @@ func translateSQL(query string, args []any) (string, []any, error) {
 	translated = regexp.MustCompile(`(?i)\s+SKIP\s+LOCKED`).ReplaceAllString(translated, "")
 	translated = castPattern.ReplaceAllString(translated, "")
 	translated = regexp.MustCompile(`(?i)\bUPDATE\s+([a-z_][a-z0-9_]*)\s+([a-z_][a-z0-9_]*)\s+SET\b`).ReplaceAllString(translated, "UPDATE $1 AS $2 SET")
+	// SQLite requires AS before a DELETE table alias.
+	translated = regexp.MustCompile(`(?i)\bDELETE\s+FROM\s+([a-z_][a-z0-9_]*)\s+([a-z_][a-z0-9_]*)\s+WHERE\b`).ReplaceAllString(translated, "DELETE FROM $1 AS $2 WHERE")
 	// SQLite's UPDATE ... FROM does not resolve the target alias inside
 	// RETURNING, so strip only that qualified prefix.
 	if index := strings.LastIndex(strings.ToUpper(translated), "RETURNING"); index >= 0 {

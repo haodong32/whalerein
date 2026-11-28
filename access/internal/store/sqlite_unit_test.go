@@ -40,8 +40,11 @@ func TestTranslateSQLExpandsAnyAndRewritesFunctions(t *testing.T) {
 	if strings.Contains(strings.ToUpper(translated), "GREATEST") || strings.Contains(strings.ToUpper(translated), "LEAST") {
 		t.Fatalf("greatest/least survived: %s", translated)
 	}
-	if !strings.Contains(translated, "IN (?,?)") {
-		t.Fatalf("ANY not expanded: %s", translated)
+	if !strings.Contains(translated, "device_id IN (?,?)\n") {
+		t.Fatalf("ANY list not rewritten exactly: %s", translated)
+	}
+	if _, _, err := translateSQL(`DELETE FROM device_credentials dc WHERE dc.device_id IN (?)`, []any{"a"}); err != nil {
+		t.Fatal(err)
 	}
 	if !strings.Contains(translated, "unixepoch()*1000") || !strings.Contains(translated, "7200000") {
 		t.Fatalf("time expressions not rewritten: %s", translated)
