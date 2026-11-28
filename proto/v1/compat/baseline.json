@@ -14,6 +14,24 @@
         "number": 2
       }
     ],
+    "ApprovalReviewAvailability": [
+      {
+        "name": "approval_review_unspecified",
+        "number": 0
+      },
+      {
+        "name": "approval_review_complete",
+        "number": 1
+      },
+      {
+        "name": "approval_review_incomplete",
+        "number": 2
+      },
+      {
+        "name": "approval_review_unavailable",
+        "number": 3
+      }
+    ],
     "ApprovalState": [
       {
         "name": "APPROVAL_STATE_UNSPECIFIED",
@@ -656,6 +674,10 @@
       {
         "name": "REQUEST_KIND_SESSION_PROOF",
         "number": 10
+      },
+      {
+        "name": "REQUEST_KIND_SELF_STATUS",
+        "number": 11
       }
     ],
     "RevocationState": [
@@ -945,6 +967,35 @@
           "repeated": false,
           "type": "TYPE_ENUM",
           "type_name": "whalerein.v1.ApprovalDecision"
+        },
+        {
+          "json_name": "reviewAction",
+          "name": "review_action",
+          "number": 11,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "reviewTarget",
+          "name": "review_target",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "reviewImpact",
+          "name": "review_impact",
+          "number": 13,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "reviewAvailability",
+          "name": "review_availability",
+          "number": 14,
+          "repeated": false,
+          "type": "TYPE_ENUM",
+          "type_name": "whalerein.v1.ApprovalReviewAvailability"
         }
       ]
     },
@@ -1455,6 +1506,13 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ReceiveAdvertisement"
+        },
+        {
+          "json_name": "grantId",
+          "name": "grant_id",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -1503,6 +1561,13 @@
           "repeated": false,
           "type": "TYPE_MESSAGE",
           "type_name": "whalerein.v1.ReceiveAdvertisement"
+        },
+        {
+          "json_name": "grantId",
+          "name": "grant_id",
+          "number": 7,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -2453,6 +2518,31 @@
         }
       ]
     },
+    "HostDirectory": {
+      "fields": [
+        {
+          "json_name": "hostId",
+          "name": "host_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "displayName",
+          "name": "display_name",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "osFamily",
+          "name": "os_family",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        }
+      ]
+    },
     "HostEnrollmentRequest": {
       "fields": [
         {
@@ -2771,6 +2861,20 @@
           "number": 15,
           "repeated": false,
           "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "displayName",
+          "name": "display_name",
+          "number": 16,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "osFamily",
+          "name": "os_family",
+          "number": 17,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -4445,6 +4549,13 @@
           "number": 11,
           "repeated": false,
           "type": "TYPE_UINT32"
+        },
+        {
+          "json_name": "grantId",
+          "name": "grant_id",
+          "number": 12,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -4498,6 +4609,13 @@
           "number": 7,
           "repeated": false,
           "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "grantId",
+          "name": "grant_id",
+          "number": 8,
+          "repeated": false,
+          "type": "TYPE_STRING"
         }
       ]
     },
@@ -6743,6 +6861,56 @@
           "optional": true,
           "repeated": false,
           "type": "TYPE_STRING"
+        }
+      ]
+    },
+    "SelfStatus": {
+      "fields": [
+        {
+          "json_name": "grantId",
+          "name": "grant_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "challenge",
+          "name": "challenge",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_BYTES"
+        },
+        {
+          "json_name": "active",
+          "name": "active",
+          "number": 3,
+          "repeated": false,
+          "type": "TYPE_BOOL"
+        },
+        {
+          "json_name": "revokedAtUnixMs",
+          "name": "revoked_at_unix_ms",
+          "number": 4,
+          "repeated": false,
+          "type": "TYPE_INT64"
+        }
+      ]
+    },
+    "SelfStatusRequest": {
+      "fields": [
+        {
+          "json_name": "grantId",
+          "name": "grant_id",
+          "number": 1,
+          "repeated": false,
+          "type": "TYPE_STRING"
+        },
+        {
+          "json_name": "challenge",
+          "name": "challenge",
+          "number": 2,
+          "repeated": false,
+          "type": "TYPE_BYTES"
         }
       ]
     },

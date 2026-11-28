@@ -3,29 +3,45 @@
 import XCTest
 
 final class DiagnosticsSettingsUITests: WhaleReinUITestCase {
-    func testDiagnosticsShowsStagesAndCancelDoesNotExport() {
+    func testDiagnosticsShowsAnonymousHostsAndExpandsTheSameReport() {
         launchAndOpenConversation()
         tap(waitFor("conversation.diagnostics"))
 
-        let preview = waitFor("diagnostics.preview")
-        XCTAssertTrue(preview.label.contains("corr-https-0001"))
-        XCTAssertFalse(preview.label.contains("Do not export this sentence"))
-        XCTAssertFalse(preview.label.contains("inv_SENSITIVE_VALUE"))
+        let firstHost = waitFor("diagnostics.host.host-1")
+        XCTAssertTrue(firstHost.label.contains("host-1"))
+        XCTAssertTrue(firstHost.label.contains("Connected"))
+        let secondHost = waitFor("diagnostics.host.host-2")
+        XCTAssertTrue(secondHost.label.contains("Offline"))
 
-        let mqttStage = waitFor("diagnostics.stage.studio-mac.mqtt")
-        XCTAssertTrue(mqttStage.label.contains("Failed"))
-        XCTAssertTrue(mqttStage.label.contains("mqtt_subscription_failed"))
+        // The fixture has no authorized directory binding, so rows stay
+        // anonymous and never gain local decoration.
+        XCTAssertFalse(firstHost.label.contains("Studio Mac"))
 
+        tap(waitFor("diagnostics.fullReport"))
+        let fullReport = waitFor("diagnostics.preview")
+        XCTAssertTrue(fullReport.label.contains("\"hosts\""))
+        XCTAssertTrue(fullReport.label.contains("mqtt_subscription_failed"))
+        XCTAssertFalse(fullReport.label.contains("Do not export this sentence"))
+        XCTAssertFalse(fullReport.label.contains("inv_SENSITIVE_VALUE"))
+    }
+
+    func testOneShareTapOpensTheSystemSheetWithoutAnInAppConfirmation() {
+        launchAndOpenConversation()
+        tap(waitFor("conversation.diagnostics"))
+
+        XCTAssertFalse(app.alerts.firstMatch.exists, "Share has no intervening confirmation")
         tap(waitFor("diagnostics.share"))
-        let alert = app.alerts.firstMatch
-        XCTAssertTrue(alert.waitForExistence(timeout: 10))
-        alert.buttons
-            .matching(NSPredicate(format: "label == %@", "Cancel"))
-            .firstMatch
-            .tap()
 
-        let status = waitFor("diagnostics.status")
-        XCTAssertTrue(status.label.contains("cancelled"))
+        let activity = app.otherElements["ActivityListView"]
+        XCTAssertTrue(activity.waitForExistence(timeout: 10))
+        if app.buttons["Close"].waitForExistence(timeout: 2) {
+            app.buttons["Close"].tap()
+        } else {
+            app.swipeDown()
+        }
+        // A cancel sends nothing from the app and the capture stays shareable.
+        XCTAssertTrue(waitFor("diagnostics.share").waitForExistence(timeout: 10))
+        XCTAssertFalse(app.alerts.firstMatch.exists)
     }
 
     func testForgetDeviceReturnsToInvitation() {

@@ -447,7 +447,7 @@ mod tests {
     use crate::security::SecureChannel;
 
     fn channel() -> SecureChannel {
-        SecureChannel::from_handshake(&[1u8; 32], "p", "chan", "h-1", "d-1").unwrap()
+        SecureChannel::from_split(([1u8; 32], [2u8; 32]), "chan", "h-1", "d-1").unwrap()
     }
 
     #[test]

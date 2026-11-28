@@ -2,12 +2,11 @@
 
 | Event | From | To | Invariant |
 | --- | --- | --- | --- |
-| loadStarted | any | loading | A retry clears the previous failure. |
-| loadSucceeded | any | loaded | The report drives every read-only section. |
-| loadFailed(code) | any | failed(code) | One error for the screen. |
-| shareRequested | loaded | confirming | Nothing is written before confirmation. |
-| shareStarted | confirming | exporting | Export writes the app-private snapshot. |
-| shareExported(url) | exporting | ready(url) + count | The share sheet receives the staging file. |
-| shareCancelled | confirming or idle | cancelled | Cancel never writes a file. |
-| shareFailed(code) | any | failed(code) | The preview stays available for retry. |
-| shareDismissed | any | none | Clears the shared file reference. |
+| loadStarted | any | loading, share none | A new explicit capture invalidates any prepared file and increments `captureGeneration`. |
+| loadSucceeded | loading | loaded | The captured document drives the summary, the full report and share. |
+| loadFailed(code) | loading | failed(code) | No capture is retained and no stale share action remains. |
+| shareStarted | loaded, share allows a new share | staging | One explicit tap; nothing is written before it. |
+| shareStaged(url) | staging | presented(url) + count | Exactly one system sheet is presenting the protected copy. |
+| shareFailed(code) | staging | failed(code) | A write failure opens no picker; the capture stays inspectable. |
+| shareFinished(completed) | presented | finished(completed) | The temporary copy is deleted; status distinguishes destination from cancel. |
+| shareDismissed | presented | none | Teardown of a sheet without a completion callback deletes the temporary copy. |

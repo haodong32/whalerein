@@ -1770,7 +1770,7 @@ mod tests {
     use whalerein_proto::OnlineStatus;
 
     fn channel() -> SecureChannel {
-        SecureChannel::from_handshake(&[5u8; 32], "p", "chan", "h-1", "d-1").unwrap()
+        SecureChannel::from_split(([5u8; 32], [6u8; 32]), "chan", "h-1", "d-1").unwrap()
     }
 
     fn response(payload: whalerein_proto::response_payload::Payload) -> ResponsePayload {
@@ -2125,7 +2125,8 @@ mod tests {
     #[test]
     fn old_channel_is_reported_as_channel_mismatch() {
         let channel = channel();
-        let new = SecureChannel::from_handshake(&[6u8; 32], "p", "chan-2", "h-1", "d-1").unwrap();
+        let new =
+            SecureChannel::from_split(([6u8; 32], [7u8; 32]), "chan-2", "h-1", "d-1").unwrap();
         let request = build_request(
             "r",
             "h-1",
@@ -2928,6 +2929,7 @@ mod host_tests {
             "d-1",
             false,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3016,7 +3018,7 @@ mod host_tests {
         }))
         .await;
         let access = Arc::new(AccessClient::new(server.url(), None).unwrap());
-        let channel = SecureChannel::from_handshake(&[9; 32], "p", "chan", "h", "d").unwrap();
+        let channel = SecureChannel::from_split(([9u8; 32], [10u8; 32]), "chan", "h", "d").unwrap();
         let cache = Arc::new(Cache::open_in_memory([8; 32]).unwrap());
         let service = CommandService::new(access, cache.clone());
         assert!(service
@@ -3092,7 +3094,7 @@ mod host_tests {
             Arc::new(AccessClient::new(server.url(), None).unwrap()),
             cache.clone(),
         );
-        let channel = SecureChannel::from_handshake(&[9; 32], "p", "chan", "h", "d").unwrap();
+        let channel = SecureChannel::from_split(([9u8; 32], [10u8; 32]), "chan", "h", "d").unwrap();
         let task = tokio::spawn(async move {
             service
                 .control(
@@ -3145,7 +3147,7 @@ mod host_tests {
             Arc::new(AccessClient::new(server.url(), None).unwrap()),
             cache.clone(),
         );
-        let channel = SecureChannel::from_handshake(&[9; 32], "p", "chan", "h", "d").unwrap();
+        let channel = SecureChannel::from_split(([9u8; 32], [10u8; 32]), "chan", "h", "d").unwrap();
         let task = tokio::spawn(async move {
             service
                 .control(
@@ -3175,7 +3177,7 @@ mod host_tests {
         let access = Arc::new(
             AccessClient::new(url::Url::parse("http://127.0.0.1:1").unwrap(), None).unwrap(),
         );
-        let channel = SecureChannel::from_handshake(&[9u8; 32], "p", "chan", "h", "d").unwrap();
+        let channel = SecureChannel::from_split(([9u8; 32], [10u8; 32]), "chan", "h", "d").unwrap();
         let cache = Arc::new(Cache::open_in_memory([8u8; 32]).unwrap());
         let service = CommandService::new(access, cache.clone());
         let error = service
@@ -3217,7 +3219,7 @@ mod host_tests {
             )),
         };
         let test_channel =
-            SecureChannel::from_handshake(&[9u8; 32], "p", "chan", "h-1", "d-1").unwrap();
+            SecureChannel::from_split(([9u8; 32], [10u8; 32]), "chan", "h-1", "d-1").unwrap();
         let error = service
             .control("h-1", "d-1", &test_channel, payload)
             .await
@@ -3273,7 +3275,7 @@ mod host_tests {
             .await_command_result(
                 "h-1",
                 "d-1",
-                &SecureChannel::from_handshake(&[5u8; 32], "p", "chan", "h-1", "d-1").unwrap(),
+                &SecureChannel::from_split(([5u8; 32], [6u8; 32]), "chan", "h-1", "d-1").unwrap(),
                 "original-request",
                 "original-command",
             )
@@ -3543,7 +3545,8 @@ mod relay_command_tests {
             envelope_bytes: 16 * 1024 * 1024,
             ..TransportBudget::default()
         });
-        let channel = SecureChannel::from_handshake(&[3u8; 32], "p", "chan", "h-1", "d-1").unwrap();
+        let channel =
+            SecureChannel::from_split(([3u8; 32], [4u8; 32]), "chan", "h-1", "d-1").unwrap();
         let result = service
             .control(
                 "h-1",
@@ -3591,7 +3594,8 @@ mod relay_command_tests {
         let server = start_relay_server(order.clone(), submitted.clone()).await;
         let cache = Arc::new(Cache::open_in_memory([4; 32]).unwrap());
         let service = service(&server, cache);
-        let channel = SecureChannel::from_handshake(&[5u8; 32], "p", "chan", "h-1", "d-1").unwrap();
+        let channel =
+            SecureChannel::from_split(([5u8; 32], [6u8; 32]), "chan", "h-1", "d-1").unwrap();
         let result = service
             .control(
                 "h-1",
@@ -3913,7 +3917,8 @@ mod relay_command_tests {
                 transfer_timeout_ms: 2_000,
                 profile: crate::access::transport::TransportProfile::Default,
             });
-        let channel = SecureChannel::from_handshake(&[9u8; 32], "p", "chan", "h-1", "d-1").unwrap();
+        let channel =
+            SecureChannel::from_split(([9u8; 32], [10u8; 32]), "chan", "h-1", "d-1").unwrap();
         let error = service
             .query(
                 "h-1",

@@ -113,6 +113,17 @@ Session IDs belong to the selected Host.
   estimated decoding memory note before you download them.
 - `session model`, `session queue`, `session approval` and `session question`
   expose advanced operations and their verification guards.
+- `session approval approve` submits the Allow resolution with the requested
+  `--digest` and `--version`. It does not pre-read the approval or withhold
+  Allow when review facts are incomplete; the pinned DSH exposes only the tool
+  name, call id and reason, so remote approval must stay available. The Host
+  remains authoritative for the digest, version and approval state guards.
+  `session approval list` and `list --request <id>` still render `review:` plus
+  any supplied action, target and impact, and state an explicit limitation when
+  the review is incomplete, unavailable, or labeled complete with an empty
+  essential fact. No value is invented for unavailable facts; inspect with
+  `session approval list --request <id>` before deciding, and reject with
+  `session approval reject` when the request should not proceed.
 - `session send <id> <text>` follows the submitted message's reply and renders
   the confirmed committed message in the original command. `--detach` returns
   the submission receipt. `--timeout <seconds>` limits observation. Pending
@@ -129,8 +140,12 @@ Session IDs belong to the selected Host.
 - `operation list` displays retained operations. `operation recover <id>`
   checks the original operation using its recorded target. Recover uncertain
   sends before submitting another message.
-- `doctor` shows local diagnostics. Use `doctor --export <file>` with explicit
-  confirmation for a redacted report.
+- `doctor` shows a bounded summary of the current redacted capture; expanding it
+  reads only local state and writes nothing. `doctor --export <file>` writes that
+  same captured report. A new path is created with 0600 permissions in one action,
+  in terminal or noninteractive use, without `--yes`. An existing regular file
+  needs an interactive overwrite answer or `--yes` in noninteractive use; a
+  refusal, symlink or directory leaves it untouched. The report is never uploaded.
 
 ## Machine output
 

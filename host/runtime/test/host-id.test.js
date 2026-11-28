@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { generateHostId, HOST_ID_ALPHABET, slugHostName } from '../src/host-id.js'
+import {
+  generateHostId,
+  HOST_ID_ALPHABET,
+  HOST_ID_PREFIX,
+  HOST_ID_RANDOM_LENGTH,
+  isNameDerivedHostId,
+  slugHostName,
+} from '../src/host-id.js'
 
 test('when a computer name is slugged, the result is safe for MQTT topics', () => {
   assert.equal(slugHostName('Haodong的MacBook Pro.local'), 'haodong-macbook-pro')
@@ -13,14 +20,33 @@ test('when a computer name is slugged, the result is safe for MQTT topics', () =
   assert.equal(slugHostName('a--b..c'), 'a-b..c')
 })
 
-test('when a host ID is generated, it has a four-character suffix and stays within 128 characters', () => {
-  const random = () => Buffer.from([9, 28, 10, 23])
-  assert.equal(generateHostId('Haodong的MacBook Pro.local', random), 'haodong-macbook-pro-k7m2')
-  const longName = `${'n'.repeat(200)}.local`
-  const generated = generateHostId(longName, random)
-  assert.equal([...generated].length, 128)
-  assert.match(generated, /-k7m2$/)
-  assert.equal(generated.includes('--'), false)
-  const suffix = generateHostId('---name---', () => Buffer.from([30, 30, 30, 30]))
-  assert.equal(suffix, `name-${HOST_ID_ALPHABET.at(-1).repeat(4)}`)
+test('a generated host id is opaque and independent of the computer name', () => {
+  const zero = generateHostId(() => Buffer.alloc(HOST_ID_RANDOM_LENGTH, 0))
+  assert.equal(zero, HOST_ID_PREFIX + HOST_ID_ALPHABET[0].repeat(HOST_ID_RANDOM_LENGTH))
+  assert.doesNotMatch(zero, /macbook|haodong/i)
+
+  const first = generateHostId(() => Buffer.from(Array.from({ length: HOST_ID_RANDOM_LENGTH }, (_, index) => index)))
+  const second = generateHostId(() => Buffer.from(Array.from({ length: HOST_ID_RANDOM_LENGTH }, (_, index) => index + 1)))
+  assert.match(first, new RegExp(`^${HOST_ID_PREFIX}[${HOST_ID_ALPHABET}]{${HOST_ID_RANDOM_LENGTH}}$`))
+  assert.notEqual(first, second)
+})
+
+test('only the retired name-derived route format is recognized as legacy', () => {
+  const hostname = 'Haodong的MacBook Pro.local'
+  assert.equal(isNameDerivedHostId('haodong-macbook-pro-k7m2', hostname), true)
+  // A truncation of a long computer-name slug keeps its suffix.
+  assert.equal(isNameDerivedHostId('haodong-macbook-pr-k7m2', hostname), true)
+
+  assert.equal(isNameDerivedHostId(generateHostId(), hostname), false)
+  assert.equal(isNameDerivedHostId('host-aaaaaaaaaaaaaaaaaaaa', hostname), false)
+  assert.equal(isNameDerivedHostId('opaque-managed-id', hostname), false)
+  // Same suffix but a different computer's name is not this Host's legacy id.
+  assert.equal(isNameDerivedHostId('someone-else-k7m2', hostname), false)
+  assert.equal(isNameDerivedHostId('', hostname), false)
+})
+
+test('a generated id fits the topic id bound', () => {
+  const id = generateHostId()
+  assert.ok(id.length <= 128)
+  assert.equal(id.includes('/'), false)
 })

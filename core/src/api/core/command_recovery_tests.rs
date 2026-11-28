@@ -45,6 +45,99 @@ async fn lost_submit_receipts_are_recoverable_after_reopening_without_another_na
 }
 
 #[tokio::test]
+async fn service_denial_preserves_pending_work_and_drafts_across_restart() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, secrets) = core(dir.path());
+    let paired = core
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    core.save_draft("host-1", "session-1", "draft retained across denial")
+        .unwrap();
+    access.host.lock().unwrap().drop_command_receipts = true;
+    assert!(core
+        .send_message(&key("host-1", "session-1"), "fixture")
+        .await
+        .is_err());
+    let pending = core.pending_commands().unwrap();
+    assert_eq!(pending.len(), 1);
+    let config_before = std::fs::read(dir.path().join("config.json")).unwrap();
+    let token = secrets
+        .load(&crate::security::keys::device_token(&paired.device_id))
+        .unwrap()
+        .unwrap();
+    let cache_key = secrets
+        .load(&crate::security::keys::cache_key(&paired.device_id))
+        .unwrap()
+        .unwrap();
+
+    access.revoke();
+    assert!(matches!(core.hosts().await, Err(CoreError::Revoked)));
+    assert!(matches!(
+        core.sessions("host-1").await,
+        Err(CoreError::Revoked)
+    ));
+    assert_eq!(core.pending_commands().unwrap(), pending);
+
+    let options = CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets: secrets.clone(),
+    };
+    drop(core);
+    let reopened = Core::new(options.clone()).unwrap();
+    // Restart keeps the pending observation and every local artifact; it does
+    // not interpret service denial as a confirmed revocation.
+    assert!(reopened.is_paired());
+    assert!(!reopened.runtime().is_revoked());
+    assert_eq!(
+        reopened.local_revocation_state().unwrap(),
+        Some("revocation_pending")
+    );
+    assert_eq!(reopened.pending_commands().unwrap(), pending);
+    assert_eq!(
+        std::fs::read(dir.path().join("config.json")).unwrap(),
+        config_before
+    );
+    assert!(dir.path().join("cache.sqlite3").exists());
+    assert_eq!(
+        secrets
+            .load(&crate::security::keys::device_token(&paired.device_id))
+            .unwrap()
+            .unwrap(),
+        token
+    );
+    assert_eq!(
+        secrets
+            .load(&crate::security::keys::cache_key(&paired.device_id))
+            .unwrap()
+            .unwrap(),
+        cache_key
+    );
+    assert_eq!(
+        reopened
+            .load_draft("host-1", "session-1")
+            .unwrap()
+            .as_deref(),
+        Some("draft retained across denial")
+    );
+
+    // A successful reconnect reconciles the observation; the original pending
+    // command is still recoverable by its retained identity.
+    access.host.lock().unwrap().revoked = false;
+    access.host.lock().unwrap().drop_command_receipts = false;
+    assert_eq!(reopened.hosts().await.unwrap().len(), 1);
+    assert_eq!(reopened.local_revocation_state().unwrap(), None);
+    let recovered = reopened
+        .recover_pending_command(&pending[0].request_id)
+        .await
+        .unwrap();
+    assert_eq!(recovered.command_id, pending[0].command_id);
+    assert_eq!(recovered.status, OnlineStatus::Succeeded);
+    assert!(reopened.pending_commands().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn recovery_rejects_a_changed_host_key_before_msg3_and_preserves_the_paired_profile() {
     let access = FakeAccess::start().await;
     let dir = tempfile::tempdir().unwrap();

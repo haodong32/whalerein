@@ -415,6 +415,9 @@ func TestValidateRejectsInvalidRequestsAndAcceptsValidOnes(t *testing.T) {
 		{"rejects pairing claim in request submission", func(r *whalereinv1.HostRequest) { r.Kind = whalereinv1.RequestKind_REQUEST_KIND_PAIRING_CLAIM }, nil, ErrInvalidRequest},
 		{"rejects revocation notice in request submission", func(r *whalereinv1.HostRequest) { r.Kind = whalereinv1.RequestKind_REQUEST_KIND_REVOCATION }, nil, ErrInvalidRequest},
 		{"rejects internal Host client listing in request submission", func(r *whalereinv1.HostRequest) { r.Kind = whalereinv1.RequestKind_REQUEST_KIND_HOST_CLIENTS }, nil, ErrInvalidRequest},
+		{"rejects self-status exchange in request submission", func(r *whalereinv1.HostRequest) {
+			r.Kind = whalereinv1.RequestKind_REQUEST_KIND_SELF_STATUS
+		}, nil, ErrInvalidRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

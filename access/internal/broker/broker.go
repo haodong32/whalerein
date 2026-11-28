@@ -47,6 +47,12 @@ type QueryHandler interface {
 	CancelAll()
 }
 
+// SelfStatusHandler completes the bounded self-status bootstrap exchange. It is
+// implemented by access/internal/selfstatus and never persists a row.
+type SelfStatusHandler interface {
+	Complete(ctx context.Context, hostID string, result *whalereinv1.HostResult) bool
+}
+
 // ReadyHandler runs host readiness work (revocation replay and route
 // attachment). It receives the validated HostReady body.
 type ReadyHandler func(ctx context.Context, hostID string, ready *whalereinv1.HostReady) error
@@ -97,6 +103,7 @@ type Service struct {
 	readyHandler  ReadyHandler
 	keyHandler    HostKeyHandler
 	queryHandler  QueryHandler
+	selfStatus    SelfStatusHandler
 
 	sessionMu sync.RWMutex
 	session   Session
@@ -194,6 +201,13 @@ func (s *Service) SetQueryHandler(handler QueryHandler) {
 	s.handlersMu.Lock()
 	defer s.handlersMu.Unlock()
 	s.queryHandler = handler
+}
+
+// SetSelfStatusHandler installs the bounded self-status bootstrap relay.
+func (s *Service) SetSelfStatusHandler(handler SelfStatusHandler) {
+	s.handlersMu.Lock()
+	defer s.handlersMu.Unlock()
+	s.selfStatus = handler
 }
 
 // SetReadyHandler installs the host readiness consumer.
@@ -317,6 +331,7 @@ func (s *Service) Run(ctx context.Context) error {
 		subscribeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err = session.Subscribe(subscribeCtx, []string{
 			ResultFilter, EventFilter, DeviceQueryFilter, DeviceReadyFilter,
+			SelfStatusReplyFilter,
 			ControlReplyFilter, ControlEventFilter,
 		}, 1)
 		cancel()
@@ -435,6 +450,12 @@ func (s *Service) HandleMessage(message Message) {
 		return
 	case KindDeviceReady:
 		s.handleDeviceReady(parsed.HostID, parsed.DeviceID, message.Payload)
+	case KindServiceSelfStatusReply:
+		s.handleSelfStatusReply(parsed.HostID, message)
+	case KindServiceSelfStatusRequest:
+		// Access is the only publisher of the service request topic; an echoed
+		// copy is not input.
+		return
 	case KindPresence:
 		// Access publishes host-scoped presence; Hosts consume it. If a
 		// broker/ACL change ever echoes it back, it must not enter result or
@@ -460,6 +481,42 @@ func (s *Service) handleQuery(message Message) {
 	if err := handler.Admit(ctx, message); err != nil {
 		s.metrics.RouteError()
 		s.logger.Debug("query admission rejected", "error", err.Error())
+	}
+}
+
+// handleSelfStatusReply routes one Host reply from the private service reply
+// topic to the self-status relay. It never enters the durable command path and
+// never echoes a reply back to a Device.
+func (s *Service) handleSelfStatusReply(topicHost string, message Message) {
+	s.handlersMu.RLock()
+	handler := s.selfStatus
+	s.handlersMu.RUnlock()
+	if handler == nil {
+		s.metrics.RouteError()
+		return
+	}
+	var result whalereinv1.HostResult
+	if err := proto.Unmarshal(message.Payload, &result); err != nil {
+		s.metrics.RouteError()
+		s.logger.Warn("self-status result decode failed", "error", err.Error())
+		return
+	}
+	if !s.requireRelayEpoch("self-status", result.GetHostId(), result.GetRelayVersion()) {
+		return
+	}
+	if result.GetHostId() == "" {
+		result.HostId = topicHost
+	} else if result.GetHostId() != topicHost {
+		s.metrics.RouteError()
+		s.logger.Warn("self-status result host mismatch")
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.baseContext(), 5*time.Second)
+	defer cancel()
+	if !handler.Complete(ctx, topicHost, &result) {
+		// A stale, foreign or duplicate reply is deliberately silent: it must
+		// not become an answer, an error or a log line carrying its tuple.
+		s.logger.Debug("self-status reply had no matching waiter")
 	}
 }
 

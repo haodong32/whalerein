@@ -56,6 +56,9 @@ const INLINE_ONLY_REQUESTS = new Set([
   'REQUEST_KIND_REVOCATION',
   'REQUEST_KIND_HOST_CLIENTS',
   'REQUEST_KIND_ACCESS_READY',
+  // The bounded self-status bootstrap frame is published inline by Access and
+  // has no relay-object scope, so a reference is never a valid representation.
+  'REQUEST_KIND_SELF_STATUS',
 ])
 
 /**

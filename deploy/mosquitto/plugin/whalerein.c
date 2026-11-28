@@ -1859,12 +1859,14 @@ static const struct {
 	const char *filter;
 } access_acls[] = {
 	{ACL_WRITE, "whalerein/v1/h/+/request"},
+	{ACL_WRITE, "whalerein/v1/h/+/svc/self-status/request"},
 	{ACL_WRITE, "whalerein/v1/h/+/d/+/event"},
 	{ACL_WRITE, "whalerein/v1/h/+/d/+/notice"},
 	{ACL_WRITE, "whalerein/v1/h/+/d/+/reply"},
 	{ACL_WRITE, "whalerein/v1/h/+/presence"},
 	{ACL_WRITE, "$CONTROL/whalerein/v1"},
 	{ACL_READ, "whalerein/v1/h/+/result"},
+	{ACL_READ, "whalerein/v1/h/+/svc/self-status/reply"},
 	{ACL_READ, "whalerein/v1/h/+/event"},
 	{ACL_READ, "whalerein/v1/h/+/d/+/query"},
 	{ACL_READ, "whalerein/v1/h/+/d/+/ready"},

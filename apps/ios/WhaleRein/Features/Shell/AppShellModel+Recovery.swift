@@ -15,7 +15,10 @@ extension AppShellModel {
         outgoingStore = ConversationOutgoingStore()
         connectivity.stopMonitoring()
         isRevoked = true
-        isPrivacyShieldVisible = false
+        // The revoked screen carries no conversation content, but while the
+        // scene is inactive or backgrounded the shield stays in front of every
+        // surface until the foreground transition reveals the blocked state.
+        isPrivacyShieldVisible = !shell.scene.isActiveAndResumed
         dismissSheet()
         dismissSheet()
         dismissSheet()

@@ -180,6 +180,10 @@ def test_approval_reason_is_bounded_and_arguments_never_enter_the_wire(scenario)
         "expires_at_unix_ms",
         "state",
         "decision",
+        "review_action",
+        "review_target",
+        "review_impact",
+        "review_availability",
     }
     serialized = repr(card)
     assert "arguments" not in serialized

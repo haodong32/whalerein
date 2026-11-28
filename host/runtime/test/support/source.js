@@ -77,8 +77,31 @@ export class TestSource extends SourceAdapter {
 
   async interrupt(id) { this.setRunning(id, false); return {} }
 
-  requestApproval({ sessionId, ttlMs = 300_000, reason = '' }) {
-    const approval = { approvalId: randomId(), sessionId, toolName: 'fixture', callId: randomId(), reason, version: 1, expiresAt: this.now() + ttlMs, state: 'pending', decision: 'unspecified' }
+  requestApproval({
+    sessionId,
+    ttlMs = 300_000,
+    reason = '',
+    toolName = 'fixture',
+    reviewAction = '',
+    reviewTarget = '',
+    reviewImpact = '',
+    reviewAvailability = 'unavailable',
+  }) {
+    const approval = {
+      approvalId: randomId(),
+      sessionId,
+      toolName,
+      callId: randomId(),
+      reason,
+      reviewAction,
+      reviewTarget,
+      reviewImpact,
+      reviewAvailability,
+      version: 1,
+      expiresAt: this.now() + ttlMs,
+      state: 'pending',
+      decision: 'unspecified',
+    }
     approval.digest = approvalDigest(approval)
     this.approvals.set(approval.approvalId, approval)
     return { ...approval }

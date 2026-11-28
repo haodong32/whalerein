@@ -4,12 +4,12 @@
 // connection, may call Access to mint a pairing URI, and never listens or links Rust.
 
 import os from 'node:os'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
 import { validateTopicId } from 'whalerein-host/config.js'
 import { ConfigError, resolveConfig, resolveConnectionMode, resolveManagerConfig } from './src/config.js'
 import { createAuthorizationVerifier } from './src/verifier.js'
-import { generateHostId } from 'whalerein-host/host-id.js'
+import { generateHostId, isNameDerivedHostId } from 'whalerein-host/host-id.js'
 import { HostRuntime } from 'whalerein-host/host.js'
 import { ActivationOwner } from 'whalerein-host/activation.js'
 import { MemoryHostCredentials } from 'whalerein-host/security/credentials.js'
@@ -149,6 +149,23 @@ function readPersistedHostId(stateDir) {
   }
 }
 
+// Name-derived route ids are retired at cutover. Keep a local list so an
+// operator can remove the old directory entry; the old id is not a secret and
+// is never used for new transport.
+function retiredHostIdFile(stateDir) {
+  return join(stateDir, 'host-id-retired')
+}
+
+function persistRetiredHostId(stateDir, hostId) {
+  if (!hostId) return
+  try {
+    mkdirSync(stateDir, { recursive: true })
+    appendFileSync(retiredHostIdFile(stateDir), `${hostId}\n`, { mode: 0o600 })
+  } catch {
+    // Losing the local tombstone never restores the retired route.
+  }
+}
+
 function persistHostId(stateDir, hostId) {
   try {
     mkdirSync(stateDir, { recursive: true })
@@ -213,12 +230,41 @@ function createRuntime(config, options) {
  */
 export function withHostId(ctx, rawConfig) {
   const materialized = materializeConfig(rawConfig)
-  if (String(materialized.host_id ?? '').trim()) return materialized
   const stateDir = String(materialized.state_dir || materialized.state_root || '').trim() || join(os.homedir(), '.whalerein', 'dsh')
-  const persisted = readPersistedHostId(stateDir)
-  const hostId = persisted || generateHostId(os.hostname())
+  const hostname = os.hostname()
+  const configured = String(materialized.host_id ?? '').trim()
+  let hostId = configured
+  if (!hostId) {
+    const persisted = readPersistedHostId(stateDir)
+    hostId = persisted
+    if (!hostId) {
+      hostId = generateHostId()
+      persistHostId(stateDir, hostId)
+    } else if (isNameDerivedHostId(hostId, hostname)) {
+      // Retire the name-derived route once. The replacement is independent of
+      // the computer name, and the old id is retained only as local evidence
+      // for directory cleanup.
+      persistRetiredHostId(stateDir, hostId)
+      hostId = generateHostId()
+      persistHostId(stateDir, hostId)
+    }
+  } else if (isNameDerivedHostId(hostId, hostname)) {
+    // A profile can still supply the retired name-derived id on every start
+    // (for example when its settings layer rejects the commit). Prefer the
+    // durable replacement written below so the route is stable across
+    // restarts instead of rotating on each start.
+    const persisted = readPersistedHostId(stateDir)
+    if (persisted && !isNameDerivedHostId(persisted, hostname)) {
+      hostId = persisted
+    } else {
+      persistRetiredHostId(stateDir, hostId)
+      hostId = generateHostId()
+      persistHostId(stateDir, hostId)
+    }
+  } else {
+    return materialized
+  }
   const next = { ...materialized, host_id: hostId }
-  if (!persisted) persistHostId(stateDir, hostId)
   if (ctx && typeof ctx.emit === 'function' && ctx.fiber) {
     try {
       ctx.emit('internal/commit', ctx.fiber, next)

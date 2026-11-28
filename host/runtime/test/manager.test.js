@@ -9,6 +9,7 @@ import { ProfileCredentialStore, CREDENTIAL_PURPOSES } from '../src/credentials.
 import { HostProfileRegistry, RegistryError } from '../src/registry.js'
 import { INTENT_SCHEMA, IntentJournal } from '../src/enrollment.js'
 import { OFFICIAL_SERVICES } from '../src/services.js'
+import { hostOsFamily } from '../src/os.js'
 
 
 function ensureConfig(stateRoot, text = 'version = 1\nenvironment = "production"\n') {
@@ -305,6 +306,8 @@ test('startConnect runs create, poll, proof-bound enrollment and real readiness 
     assert.equal(details.environment, 'production')
     assert.equal(f.mqtts.length, 1)
     assert.equal(f.mqtts[0].options.token, 'broker-password')
+    assert.equal(f.mqtts[0].options.displayName, HOST_NAME)
+    assert.equal(f.mqtts[0].options.osFamily, hostOsFamily())
     // The managed route must give the transport the relay route: an Access
     // origin plus the signing key let an oversized result travel by reference
     // instead of failing above the broker packet limit.

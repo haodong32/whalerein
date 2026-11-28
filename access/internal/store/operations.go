@@ -196,6 +196,9 @@ type PairingOutcome struct {
 	ProtocolVersion           uint32
 	HostConfirmed             bool
 	Active                    bool
+	// GrantID is the Host-owned grant committed for this pairing. It is empty
+	// for an old Host that predates grant IDs and for legacy retained rows.
+	GrantID string
 	// Old retained state with no verifiable COMMIT must remain unconfirmed.
 	CommitBindingUnproven bool
 }
@@ -234,21 +237,21 @@ func verifyPersistedCommitTx(ctx context.Context, tx pgx.Tx, claimID, hostID, de
 
 // A legacy confirmation requires the matching stored Host acknowledgement; a
 // prior boolean alone is not independently sufficient after an upgrade.
-func storedPairingAckTx(ctx context.Context, tx pgx.Tx, hostID, deviceID, requestID string) (time.Time, bool, error) {
+func storedPairingAckTx(ctx context.Context, tx pgx.Tx, hostID, deviceID, requestID string) (time.Time, string, bool, error) {
 	var body []byte
 	var received time.Time
 	err := tx.QueryRow(ctx, `SELECT result_body,updated_at FROM requests WHERE request_id=$1 AND host_id=$2 AND device_id=$3 AND kind=$4 AND status='succeeded' AND updated_at<expires_at AND bodies_cleared IS DISTINCT FROM true`, requestID, hostID, deviceID, int32(whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE)).Scan(&body, &received)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return time.Time{}, false, nil
+		return time.Time{}, "", false, nil
 	}
 	if err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, "", false, err
 	}
 	var ack whalereinv1.PairingClaimResult
 	if proto.Unmarshal(body, &ack) != nil || !ack.Authorized || ack.DeviceId != deviceID {
-		return time.Time{}, false, nil
+		return time.Time{}, "", false, nil
 	}
-	return received, true, nil
+	return received, ack.GetGrantId(), true, nil
 }
 
 // PairingOutcome loads one committed outcome under the device fence, so the
@@ -273,8 +276,9 @@ func pairingOutcome(ctx context.Context, begin func(context.Context) (pgx.Tx, er
 		return tx.QueryRow(ctx, `SELECT o.claim_id,o.token_hash,o.host_id,o.device_id,o.finish_hash,o.device_public_key,COALESCE(o.protocol_version,0),o.host_confirmed,o.commit_request_id,o.commit_binding_verified,o.host_confirmation_verified,
       EXISTS(SELECT 1 FROM grants g JOIN device_credentials c ON c.device_id=g.device_id
       WHERE g.host_id=o.host_id AND g.device_id=o.device_id AND g.revoked_at IS NULL
-      AND g.grant_generation=o.grant_generation AND c.auth_hash=o.auth_hash)
-      FROM pairing_outcomes o WHERE o.claim_id=$1 AND o.device_id=$2`, claimID, deviceID).Scan(&out.ClaimID, &out.TokenHash, &out.HostID, &out.DeviceID, &out.FinishHash, &out.DevicePublicKey, &out.ProtocolVersion, &out.HostConfirmed, &requestID, &bindingVerified, &confirmationVerified, &out.Active)
+      AND g.grant_generation=o.grant_generation AND c.auth_hash=o.auth_hash),
+      COALESCE(o.grant_id,'')
+      FROM pairing_outcomes o WHERE o.claim_id=$1 AND o.device_id=$2`, claimID, deviceID).Scan(&out.ClaimID, &out.TokenHash, &out.HostID, &out.DeviceID, &out.FinishHash, &out.DevicePublicKey, &out.ProtocolVersion, &out.HostConfirmed, &requestID, &bindingVerified, &confirmationVerified, &out.Active, &out.GrantID)
 	}
 	if err = load(); err != nil {
 		return out, wrapRequestScan(err)
@@ -286,7 +290,7 @@ func pairingOutcome(ctx context.Context, begin func(context.Context) (pgx.Tx, er
 		var created time.Time
 		lookupErr := tx.QueryRow(ctx, `SELECT created_at FROM requests WHERE request_id=$1 AND host_id=$2 AND device_id=$3 AND kind=$4`, requestID, out.HostID, deviceID, int32(whalereinv1.RequestKind_REQUEST_KIND_PAIRING_AUTHORIZE)).Scan(&created)
 		if lookupErr == nil {
-			bound, bindErr := confirmPairingHostTx(ctx, tx, claimID, out.HostID, deviceID, requestID, created, false)
+			bound, bindErr := confirmPairingHostTx(ctx, tx, claimID, out.HostID, deviceID, requestID, "", created, false)
 			if bindErr != nil && !errors.Is(bindErr, ErrNotFound) && !errors.Is(bindErr, ErrConflict) {
 				return out, bindErr
 			}
@@ -338,7 +342,7 @@ func pairingOutcome(ctx context.Context, begin func(context.Context) (pgx.Tx, er
 			return out, bindErr
 		}
 		if bound {
-			_, validAck, ackErr := storedPairingAckTx(ctx, tx, out.HostID, deviceID, requestID)
+			_, _, validAck, ackErr := storedPairingAckTx(ctx, tx, out.HostID, deviceID, requestID)
 			if ackErr != nil {
 				return out, ackErr
 			}
@@ -360,12 +364,12 @@ func pairingOutcome(ctx context.Context, begin func(context.Context) (pgx.Tx, er
 	// Legacy rows may predate durable confirmation. Recover only a still-stored,
 	// valid Host acknowledgement whose original recorded time met its deadline.
 	if out.Active && !out.HostConfirmed {
-		received, validAck, ackErr := storedPairingAckTx(ctx, tx, out.HostID, deviceID, requestID)
+		received, ackGrantID, validAck, ackErr := storedPairingAckTx(ctx, tx, out.HostID, deviceID, requestID)
 		if ackErr != nil {
 			return out, ackErr
 		}
 		if validAck {
-			confirmed, confirmErr := confirmPairingHostTx(ctx, tx, claimID, out.HostID, deviceID, requestID, received, true)
+			confirmed, confirmErr := confirmPairingHostTx(ctx, tx, claimID, out.HostID, deviceID, requestID, ackGrantID, received, true)
 			if confirmErr != nil && !errors.Is(confirmErr, ErrNotFound) && !errors.Is(confirmErr, ErrConflict) {
 				return out, confirmErr
 			}
@@ -432,7 +436,7 @@ func reconcilePairingOutcomes(ctx context.Context, query func(context.Context, s
 					return beginErr
 				}
 				if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('whalerein-device:' || $1, 0))`, item.device); err == nil {
-					_, err = confirmPairingHostTx(ctx, tx, item.claim, item.host, item.device, item.request, item.created, false)
+					_, err = confirmPairingHostTx(ctx, tx, item.claim, item.host, item.device, item.request, "", item.created, false)
 				}
 				if err == nil {
 					err = tx.Commit(ctx)
@@ -456,7 +460,7 @@ func reconcilePairingOutcomes(ctx context.Context, query func(context.Context, s
 
 // ConfirmPairingHost records a validated Host COMMIT acknowledgement only while
 // the exact original grant and credential remain active under the device fence.
-func confirmPairingHostTx(ctx context.Context, tx pgx.Tx, claimID, hostID, deviceID, requestID string, at time.Time, markConfirmed bool) (bool, error) {
+func confirmPairingHostTx(ctx context.Context, tx pgx.Tx, claimID, hostID, deviceID, requestID, grantID string, at time.Time, markConfirmed bool) (bool, error) {
 	if claimID == "" || hostID == "" || deviceID == "" || requestID == "" {
 		return false, ErrConflict
 	}
@@ -525,7 +529,7 @@ func confirmPairingHostTx(ctx context.Context, tx pgx.Tx, claimID, hostID, devic
 			return false, ErrConflict
 		}
 	}
-	result, err := tx.Exec(ctx, `UPDATE pairing_outcomes SET device_public_key=$5,protocol_version=$6,commit_binding_verified=true,host_confirmed=CASE WHEN $7 THEN true ELSE host_confirmed END,host_confirmation_verified=CASE WHEN $7 THEN true ELSE host_confirmation_verified END WHERE claim_id=$1 AND host_id=$2 AND device_id=$3 AND commit_request_id=$4`, claimID, hostID, deviceID, requestID, publicKey, protocol, markConfirmed)
+	result, err := tx.Exec(ctx, `UPDATE pairing_outcomes SET device_public_key=$5,protocol_version=$6,commit_binding_verified=true,host_confirmed=CASE WHEN $7 THEN true ELSE host_confirmed END,host_confirmation_verified=CASE WHEN $7 THEN true ELSE host_confirmation_verified END,grant_id=CASE WHEN $8<>'' THEN $8 ELSE grant_id END WHERE claim_id=$1 AND host_id=$2 AND device_id=$3 AND commit_request_id=$4`, claimID, hostID, deviceID, requestID, publicKey, protocol, markConfirmed, grantID)
 	if err != nil {
 		return false, err
 	}
@@ -535,11 +539,11 @@ func confirmPairingHostTx(ctx context.Context, tx pgx.Tx, claimID, hostID, devic
 	return true, nil
 }
 
-func (s *Store) ConfirmPairingHost(ctx context.Context, claimID, hostID, deviceID, requestID string, at time.Time) (bool, error) {
-	return confirmPairingHost(ctx, s.poolBegin, claimID, hostID, deviceID, requestID, at)
+func (s *Store) ConfirmPairingHost(ctx context.Context, claimID, hostID, deviceID, requestID, grantID string, at time.Time) (bool, error) {
+	return confirmPairingHost(ctx, s.poolBegin, claimID, hostID, deviceID, requestID, grantID, at)
 }
 
-func confirmPairingHost(ctx context.Context, begin func(context.Context) (pgx.Tx, error), claimID, hostID, deviceID, requestID string, at time.Time) (bool, error) {
+func confirmPairingHost(ctx context.Context, begin func(context.Context) (pgx.Tx, error), claimID, hostID, deviceID, requestID, grantID string, at time.Time) (bool, error) {
 	tx, err := begin(ctx)
 	if err != nil {
 		return false, err
@@ -551,7 +555,7 @@ func confirmPairingHost(ctx context.Context, begin func(context.Context) (pgx.Tx
 	if err := applyDeviceSessionAuthority(ctx, tx); err != nil {
 		return false, err
 	}
-	confirmed, err := confirmPairingHostTx(ctx, tx, claimID, hostID, deviceID, requestID, at, true)
+	confirmed, err := confirmPairingHostTx(ctx, tx, claimID, hostID, deviceID, requestID, grantID, at, true)
 	if err != nil || !confirmed {
 		return confirmed, err
 	}

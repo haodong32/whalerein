@@ -175,6 +175,30 @@ Domain types mirror the plan's binding contract: `HostSummary`,
 (reset/message/replace/preview/attemptEnded/state/connection/capabilities/
 approvals/approvalChanged/commandStatus/error/watchEnded).
 
+### Scene lifecycle
+
+`AppSceneLifecycle` is the one ordered owner of `active`/`inactive`/`background`
+notifications. `RootView` hands each `scenePhase` change to
+`AppRuntime.scenePhaseDidChange` synchronously, so the opaque privacy shield and
+the rendering pause are in place before the system takes its app-switcher
+snapshot and before any asynchronous work starts.
+
+- `inactive` shields the root and every presented sheet, pauses the approval
+  clock and scroll animation, and keeps the healthy watch, its sequence cursor,
+  the Host probe and the event subscription. It performs no network call and
+  never shows an artificial offline state.
+- `background` additionally persists the draft and stops the Core watch exactly
+  once. The app-level event consumer stays alive so no second subscription is
+  created.
+- `active` after a brief interruption reveals the current authorized view
+  without a resubscription. After a real background entry it keeps the shield
+  up, restarts exactly one watch from Core's retained cursor, refreshes the
+  authoritative facets and only then reveals the reconciled view.
+- Notifications are coalesced per phase and carry a monotonic generation. A
+  completion from an older transition cannot reveal content, start a second
+  watch or refresh a surface after a newer phase arrived. Real transport loss
+  and grant revocation still surface through their existing paths.
+
 ### Launch arguments
 
 | Argument | Behavior |

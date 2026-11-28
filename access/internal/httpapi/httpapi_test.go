@@ -194,11 +194,12 @@ func (f *fakeRequests) Heartbeat(_ context.Context, deviceID, sessionID, request
 }
 
 type apiFixture struct {
-	server   *Server
-	auth     *fakeAuth
-	pairing  *fakePairing
-	requests *fakeRequests
-	ready    *diagnostics.Readiness
+	server    *Server
+	auth      *fakeAuth
+	pairing   *fakePairing
+	requests  *fakeRequests
+	directory *fakeDirectory
+	ready     *diagnostics.Readiness
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
@@ -222,8 +223,9 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	}, created: true}
 	readiness := diagnostics.NewReadiness()
 	readiness.Add("database", func(context.Context) error { return nil })
+	fd := &fakeDirectory{directory: store.HostDirectory{HostID: "h1", DisplayName: "Studio Mac", OSFamily: "macos"}}
 	server, err := New(Dependencies{
-		Auth: fa, Pairing: fp, Requests: fr, Readiness: readiness,
+		Auth: fa, Pairing: fp, Requests: fr, Directory: fd, Readiness: readiness,
 		Metrics: diagnostics.NewMetrics(), Masker: diagnostics.NewMaskerWithKey([]byte("http")),
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		InternalToken: "internal-token", MaxBodyBytes: 1 << 20,
@@ -231,7 +233,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &apiFixture{server: server, auth: fa, pairing: fp, requests: fr, ready: readiness}
+	return &apiFixture{server: server, auth: fa, pairing: fp, requests: fr, directory: fd, ready: readiness}
 }
 
 func doRequest(t *testing.T, handler http.Handler, method, path string, body []byte, headers map[string]string) *httptest.ResponseRecorder {

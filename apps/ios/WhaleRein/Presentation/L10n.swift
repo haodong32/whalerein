@@ -109,6 +109,12 @@ enum L10nKey: String, CaseIterable, Sendable {
     case conversationMessageCount = "conversation.messageCount"
     case conversationWatchEnded = "conversation.watchEnded"
     case approvalTitle = "approval.title"
+    case approvalAction = "approval.action"
+    case approvalTarget = "approval.target"
+    case approvalImpact = "approval.impact"
+    case approvalReviewMissing = "approval.review.missing"
+    case approvalReviewIncomplete = "approval.review.incomplete"
+    case approvalDetailsHidden = "approval.details.hidden"
     case approvalTool = "approval.tool"
     case approvalReason = "approval.reason"
     case approvalExpires = "approval.expires"
@@ -146,6 +152,9 @@ enum L10nKey: String, CaseIterable, Sendable {
     case diagnosticsAppVersion = "diagnostics.appVersion"
     case diagnosticsCoreVersion = "diagnostics.coreVersion"
     case diagnosticsCorrelation = "diagnostics.correlation"
+    case diagnosticsRefresh = "diagnostics.refresh"
+    case diagnosticsFullReport = "diagnostics.fullReport"
+    case diagnosticsCapturedAt = "diagnostics.capturedAt"
     case cloudWelcomeTitle = "cloud.welcomeTitle"
     case cloudWelcomeSubtitle = "cloud.welcomeSubtitle"
     case cloudSignIn = "cloud.signIn"
@@ -586,6 +595,12 @@ enum L10n {
     static let conversationMessageCount = L10nKey.conversationMessageCount
     static let conversationWatchEnded = L10nKey.conversationWatchEnded
     static let approvalTitle = L10nKey.approvalTitle
+    static let approvalAction = L10nKey.approvalAction
+    static let approvalTarget = L10nKey.approvalTarget
+    static let approvalImpact = L10nKey.approvalImpact
+    static let approvalReviewMissing = L10nKey.approvalReviewMissing
+    static let approvalReviewIncomplete = L10nKey.approvalReviewIncomplete
+    static let approvalDetailsHidden = L10nKey.approvalDetailsHidden
     static let approvalTool = L10nKey.approvalTool
     static let approvalReason = L10nKey.approvalReason
     static let approvalExpires = L10nKey.approvalExpires
@@ -623,6 +638,9 @@ enum L10n {
     static let diagnosticsAppVersion = L10nKey.diagnosticsAppVersion
     static let diagnosticsCoreVersion = L10nKey.diagnosticsCoreVersion
     static let diagnosticsCorrelation = L10nKey.diagnosticsCorrelation
+    static let diagnosticsRefresh = L10nKey.diagnosticsRefresh
+    static let diagnosticsFullReport = L10nKey.diagnosticsFullReport
+    static let diagnosticsCapturedAt = L10nKey.diagnosticsCapturedAt
     static let cloudWelcomeTitle = L10nKey.cloudWelcomeTitle
     static let cloudWelcomeSubtitle = L10nKey.cloudWelcomeSubtitle
     static let cloudSignIn = L10nKey.cloudSignIn

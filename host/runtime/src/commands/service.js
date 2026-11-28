@@ -5,7 +5,7 @@
 
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { bytesEqual, sha256Bytes, sha256Text, hex } from '../security/digest.js'
+import { bytesEqual, sha256Bytes, sha256Text, hex, approvalReviewAvailability } from '../security/digest.js'
 import { summaryToProto } from '../contracts/serialization.js'
 import { validateMessageReply } from '../contracts/source.js'
 import { AdapterError, DefinitiveExecutionError, PluginError, publicMessage } from '../errors.js'
@@ -14,6 +14,7 @@ import { QuestionPager } from './question-pager.js'
 import { AttachmentService } from '../attachments/service.js'
 import { DEFAULT_ENVELOPE_BYTES, DEFAULT_TRANSPORT_PROFILE, transportProfileBudget } from '../contracts/transport.js'
 import { emitFact } from '../observation/index.js'
+import { boundReviewValue } from '../security/redaction.js'
 
 const COMMAND_STATUS_TO_PROTO = Object.freeze({
   accepted: 'host_accepted',
@@ -41,6 +42,20 @@ const APPROVAL_DECISION_TO_PROTO = Object.freeze({
 const APPROVAL_REASON_MAX = 1024
 const APPROVAL_FIELD_MAX = 256
 
+const APPROVAL_REVIEW_AVAILABILITY_TO_PROTO = Object.freeze({
+  complete: 'approval_review_complete',
+  incomplete: 'approval_review_incomplete',
+  unavailable: 'approval_review_unavailable',
+})
+
+// The adapter already projects masked facts. This second pass is a serialization
+// boundary guarantee: a source that returns a raw secret still cannot put it on
+// the wire. The digest is bound to the native record, not to these replacements.
+function reviewAvailabilityToProto(value) {
+  return APPROVAL_REVIEW_AVAILABILITY_TO_PROTO[approvalReviewAvailability(value)]
+    ?? 'approval_review_unavailable'
+}
+
 function boundedText(value, max = APPROVAL_FIELD_MAX) {
   if (typeof value !== 'string' || value === '') return ''
   const clean = value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
@@ -48,7 +63,29 @@ function boundedText(value, max = APPROVAL_FIELD_MAX) {
   return points.length <= max ? clean : points.slice(0, max).join('')
 }
 
-function approvalToProto(approval) {
+/**
+ * Review facts are projected only when the request path holds the approval
+ * right. `list_approvals` is classified as a read operation, so it withholds
+ * them; `get_approval` requires `approve` and may include them.
+ */
+function reviewToProto(approval, include) {
+  if (!include) {
+    return {
+      review_action: '',
+      review_target: '',
+      review_impact: '',
+      review_availability: 'approval_review_unavailable',
+    }
+  }
+  return {
+    review_action: boundReviewValue(approval.reviewAction),
+    review_target: boundReviewValue(approval.reviewTarget),
+    review_impact: boundReviewValue(approval.reviewImpact),
+    review_availability: reviewAvailabilityToProto(approval.reviewAvailability),
+  }
+}
+
+function approvalToProto(approval, { review = true } = {}) {
   return {
     approval_id: approval.approvalId,
     session_id: approval.sessionId,
@@ -60,6 +97,7 @@ function approvalToProto(approval) {
     expires_at_unix_ms: approval.expiresAt,
     state: APPROVAL_STATE_TO_PROTO[approval.state] ?? 'APPROVAL_STATE_UNAVAILABLE',
     decision: APPROVAL_DECISION_TO_PROTO[approval.decision] ?? 'APPROVAL_DECISION_UNSPECIFIED',
+    ...reviewToProto(approval, review),
   }
 }
 
@@ -76,6 +114,9 @@ function approvalRecordToProto(record) {
     expires_at_unix_ms: record.expiresAt,
     state: APPROVAL_STATE_TO_PROTO[record.state] ?? 'APPROVAL_STATE_UNAVAILABLE',
     decision: APPROVAL_DECISION_TO_PROTO[record.decision] ?? 'APPROVAL_DECISION_UNSPECIFIED',
+    // Review facts are never persisted in the approval ledger; a terminal view
+    // reports unavailable instead of inventing or reconstructing them.
+    ...reviewToProto(null, false),
   }
 }
 
@@ -673,7 +714,7 @@ export class CommandService {
         this.#expireLedgerApprovals(payload.list_approvals.session_id ?? '')
         return {
           status: 'succeeded',
-          response: { approval_list: { approvals: approvals.map(approvalToProto) } },
+          response: { approval_list: { approvals: approvals.map(approval => approvalToProto(approval, { review: false })) } },
         }
       }
       if (payload.get_approval) {
@@ -1359,7 +1400,7 @@ export class CommandService {
 
   async #execute(request, operation, questionScope, scope) {
     const operationId = hex(sha256Text(JSON.stringify(['whalerein/v1/operation', this.hostId ?? request.host_id, request.device_id, request.command_id])))
-    const context = {operationId, expiresAt:Number(request.expires_at_unix_ms ?? 0), signal:scope.controller.signal}
+    const context = {operationId, expiresAt:Number(request.expires_at_unix_ms ?? 0), signal:scope.controller.signal, guard: request.guard ?? null}
     if (operation.selectModel) {
       if (!this.adapter.describe?.().capabilities?.includes('model-select')) throw new DefinitiveExecutionError('unsupported_capability')
       const selection = operation.selectModel

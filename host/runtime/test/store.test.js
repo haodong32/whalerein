@@ -31,7 +31,7 @@ test('when a peer is authorized or removed, the store updates its key and cached
   const store = memoryStore()
   store.upsertPeerKey({ deviceId: 'd1', publicKey: new Uint8Array([1]), fingerprint: 'f1', claimId: 'c1' })
   assert.equal(store.countPeerKeys(), 1)
-  assert.deepEqual(store.listPeerKeys(), [{ deviceId: 'd1', fingerprint: 'f1', pairedAt: 100, displayName: '', os: '' }])
+  assert.deepEqual(store.listPeerKeys(), [{ deviceId: 'd1', fingerprint: 'f1', pairedAt: 100, displayName: '', os: '', grantId: null, grantRevision: null }])
   assert.equal('publicKey' in store.listPeerKeys()[0], false)
   store.upsertPeerKey({ deviceId: 'd1', publicKey: new Uint8Array([9]), fingerprint: 'f9', displayName: '手机', os: 'macos' })
   assert.equal(store.getPeerKey('d1').displayName, '手机')
@@ -244,7 +244,7 @@ test('a version-four journal upgrades without losing peer or command identity', 
     db.close()
     const restored=new StateStore({path})
     try {
-      assert.equal(restored.getMeta('schema_version'),'6')
+      assert.equal(restored.getMeta('schema_version'),'7')
       assert.equal(restored.getPeerKey('fixture-device').fingerprint,'fixture-pin')
       assert.equal(restored.getCommand('fixture-device','fixture-command').status,'accepted')
       // The approval ledger is additive; an older journal upgrades empty.

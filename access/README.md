@@ -425,13 +425,16 @@ grant. A Will topic outside the device policy is denied.
 
 | Principal | Subscribe | Publish |
 |---|---|---|
-| Access (plugin-local) | results, events, live previews, device wills, device ready advertisements, control replies/events | own-host requests, device events/notices, device live previews, host presence, `$CONTROL/whalerein/v1` |
-| Host | own `whalerein/v1/h/{host}/request` and `presence` | own `result`, own `event` and own `live` |
+| Access (plugin-local) | results, events, live previews, device wills, device ready advertisements, self-status service replies, control replies/events | own-host requests, self-status service requests, device events/notices, device live previews, host presence, `$CONTROL/whalerein/v1` |
+| Host | own `whalerein/v1/h/{host}/request`, `presence` and `svc/self-status/request` | own `result`, own `event`, own `live` and `svc/self-status/reply` |
 | Device | own `.../event`, `.../notice` and `.../live` for each live grant | own `.../ready` and own Will topic |
 | Probe | none | none |
 
 Host and device topics may not contain wildcards. A revoked grant removes its
-local ACL entries and closes the superseded connection.
+local ACL entries and closes the superseded connection. The
+`svc/self-status` subtree is service-only: no Device policy ever contains it, so
+a Device cannot publish or subscribe on the bounded bootstrap lane even while it
+holds another live grant.
 
 ### Presence and revocation
 

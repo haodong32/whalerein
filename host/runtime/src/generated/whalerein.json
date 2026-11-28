@@ -31,7 +31,8 @@
                 "REQUEST_KIND_HOST_CLIENTS": 7,
                 "REQUEST_KIND_ACCESS_READY": 8,
                 "REQUEST_KIND_AUTHORITY": 9,
-                "REQUEST_KIND_SESSION_PROOF": 10
+                "REQUEST_KIND_SESSION_PROOF": 10,
+                "REQUEST_KIND_SELF_STATUS": 11
               }
             },
             "ErrorCode": {
@@ -75,6 +76,14 @@
                 "interrupt": 5,
                 "sync": 6,
                 "snapshot": 7
+              }
+            },
+            "ApprovalReviewAvailability": {
+              "values": {
+                "approval_review_unspecified": 0,
+                "approval_review_complete": 1,
+                "approval_review_incomplete": 2,
+                "approval_review_unavailable": 3
               }
             },
             "PairingPhase": {
@@ -778,6 +787,22 @@
                 }
               }
             },
+            "HostDirectory": {
+              "fields": {
+                "host_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "display_name": {
+                  "type": "string",
+                  "id": 2
+                },
+                "os_family": {
+                  "type": "string",
+                  "id": 3
+                }
+              }
+            },
             "PairingClaimRequest": {
               "fields": {
                 "token": {
@@ -859,6 +884,10 @@
                 "protocol_version": {
                   "type": "uint32",
                   "id": 11
+                },
+                "grant_id": {
+                  "type": "string",
+                  "id": 12
                 }
               }
             },
@@ -931,6 +960,10 @@
                 "device_auth_hash": {
                   "type": "bytes",
                   "id": 7
+                },
+                "grant_id": {
+                  "type": "string",
+                  "id": 8
                 }
               }
             },
@@ -1030,6 +1063,14 @@
                 "route_closing": {
                   "type": "bool",
                   "id": 15
+                },
+                "display_name": {
+                  "type": "string",
+                  "id": 16
+                },
+                "os_family": {
+                  "type": "string",
+                  "id": 17
                 }
               },
               "reserved": [
@@ -1093,6 +1134,10 @@
                 "receive": {
                   "type": "ReceiveAdvertisement",
                   "id": 6
+                },
+                "grant_id": {
+                  "type": "string",
+                  "id": 7
                 }
               }
             },
@@ -1121,6 +1166,10 @@
                 "receive": {
                   "type": "ReceiveAdvertisement",
                   "id": 6
+                },
+                "grant_id": {
+                  "type": "string",
+                  "id": 7
                 }
               }
             },
@@ -1196,6 +1245,38 @@
                 },
                 "device_auth_hash": {
                   "type": "bytes",
+                  "id": 4
+                }
+              }
+            },
+            "SelfStatusRequest": {
+              "fields": {
+                "grant_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "challenge": {
+                  "type": "bytes",
+                  "id": 2
+                }
+              }
+            },
+            "SelfStatus": {
+              "fields": {
+                "grant_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "challenge": {
+                  "type": "bytes",
+                  "id": 2
+                },
+                "active": {
+                  "type": "bool",
+                  "id": 3
+                },
+                "revoked_at_unix_ms": {
+                  "type": "int64",
                   "id": 4
                 }
               }
@@ -2516,6 +2597,22 @@
                 "decision": {
                   "type": "ApprovalDecision",
                   "id": 10
+                },
+                "review_action": {
+                  "type": "string",
+                  "id": 11
+                },
+                "review_target": {
+                  "type": "string",
+                  "id": 12
+                },
+                "review_impact": {
+                  "type": "string",
+                  "id": 13
+                },
+                "review_availability": {
+                  "type": "ApprovalReviewAvailability",
+                  "id": 14
                 }
               }
             },

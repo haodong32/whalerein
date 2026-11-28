@@ -170,4 +170,8 @@ struct WatchFacet: Equatable, Sendable {
     var ended = false
     var suspended = false
     var reconnecting = false
+    /// Visible rendering and clock-driven updates are paused while the scene is
+    /// inactive or shielded. The authorized observation and its cursor stay
+    /// live, so returning to active needs no resubscription.
+    var paused = false
 }

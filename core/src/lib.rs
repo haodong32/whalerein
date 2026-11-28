@@ -39,7 +39,7 @@ pub mod history;
 pub mod testing {
     pub use crate::access::{DeviceMqttClient, MqttConnectionEvent, MqttSettings};
     pub use crate::security::channel::{
-        derive_channel_keys, open_with_key, seal_with_key, ChannelKeys,
+        decode_nonce, encode_nonce, open_with_key, seal_with_key, ChannelKeys, SecureChannel,
     };
     pub use crate::security::{fingerprint, NoiseSession, StaticIdentity};
 }

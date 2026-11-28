@@ -125,28 +125,129 @@ async fn revoke_clears_local_material_after_the_host_revoked_first() {
 }
 
 #[tokio::test]
-async fn rejected_device_token_ends_local_pairing_for_later_commands() {
+async fn rejected_device_token_preserves_local_trust_for_later_calls() {
     let access = FakeAccess::start().await;
     let dir = tempfile::tempdir().unwrap();
     let (paired, secrets) = core(dir.path());
-    paired
+    let outcome = paired
         .pair(&access.pairing_uri(), |_| PairingDecision::approve())
         .await
         .unwrap();
+    let config_path = dir.path().join("config.json");
+    let config_before = std::fs::read(&config_path).unwrap();
+    let token = secrets
+        .load(&crate::security::keys::device_token(&outcome.device_id))
+        .unwrap()
+        .unwrap();
+    let cache_key = secrets
+        .load(&crate::security::keys::cache_key(&outcome.device_id))
+        .unwrap()
+        .unwrap();
+    paired
+        .save_draft("host-1", "session-1", "retained draft")
+        .unwrap();
+    assert_eq!(paired.sessions("host-1").await.unwrap().source, "remote");
+
+    // Access rejects the stored device token: service admission is lost, but
+    // no Host confirmed a revocation for this enrollment.
     access.revoke();
     let error = paired.hosts().await.unwrap_err();
+    assert!(matches!(error, CoreError::Revoked), "{error:?}");
+    assert!(paired.is_paired());
+    assert!(!paired.runtime().is_revoked());
+    assert_eq!(
+        paired.local_revocation_state().unwrap(),
+        Some("revocation_pending")
+    );
+    assert!(paired.authorization_verification_pending().unwrap());
+    assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+    assert_eq!(
+        secrets
+            .load(&crate::security::keys::device_token(&outcome.device_id))
+            .unwrap()
+            .unwrap(),
+        token
+    );
+    assert_eq!(
+        secrets
+            .load(&crate::security::keys::cache_key(&outcome.device_id))
+            .unwrap()
+            .unwrap(),
+        cache_key
+    );
+    assert!(dir.path().join("cache.sqlite3").exists());
+    assert_eq!(
+        paired.load_draft("host-1", "session-1").unwrap().as_deref(),
+        Some("retained draft")
+    );
+
+    // Repeated denials neither escalate to a confirmed revocation nor drop
+    // the retained identity and cache.
+    assert!(matches!(paired.hosts().await, Err(CoreError::Revoked)));
     assert!(matches!(
-        error,
-        CoreError::Revoked | CoreError::RevokedRetentionUnverified
+        paired.sessions("host-1").await,
+        Err(CoreError::Revoked)
     ));
-    assert!(!paired.is_paired());
-    assert!(!secrets.is_empty());
-    assert!(paired.runtime().is_revoked());
-    assert!(matches!(paired.hosts().await, Err(CoreError::NotPaired)));
+    assert!(paired.is_paired());
+    assert_eq!(
+        paired.local_revocation_state().unwrap(),
+        Some("revocation_pending")
+    );
+    assert!(dir.path().join("cache.sqlite3").exists());
+
+    // A later authorized call reconciles the pending observation without any
+    // manual cleanup.
+    access.host.lock().unwrap().revoked = false;
+    assert_eq!(paired.hosts().await.unwrap().len(), 1);
+    assert_eq!(paired.local_revocation_state().unwrap(), None);
+    assert!(!paired.authorization_verification_pending().unwrap());
+    assert_eq!(paired.sessions("host-1").await.unwrap().source, "remote");
 }
 
 #[tokio::test]
-async fn rejected_device_token_ends_pairing_on_a_host_command() {
+async fn forbidden_directory_read_retains_local_trust() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (paired, secrets) = core(dir.path());
+    let outcome = paired
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    assert_eq!(paired.sessions("host-1").await.unwrap().source, "remote");
+    {
+        let mut host = access.host.lock().unwrap();
+        host.forbid_hosts = true;
+        host.query_error = Some(whalerein_proto::ErrorCode::Forbidden);
+    }
+    let error = paired.sessions("host-1").await.unwrap_err();
+    assert!(matches!(error, CoreError::Revoked), "{error:?}");
+    assert!(paired.is_paired());
+    assert!(!paired.runtime().is_revoked());
+    assert_eq!(
+        paired.local_revocation_state().unwrap(),
+        Some("revocation_pending")
+    );
+    assert!(secrets
+        .load(&crate::security::keys::device_token(&outcome.device_id))
+        .unwrap()
+        .is_some());
+    assert!(dir.path().join("cache.sqlite3").exists());
+
+    {
+        let mut host = access.host.lock().unwrap();
+        host.forbid_hosts = false;
+        host.query_error = None;
+    }
+    assert_eq!(paired.hosts().await.unwrap().len(), 1);
+    assert_eq!(paired.local_revocation_state().unwrap(), None);
+    assert_eq!(
+        paired.sessions("host-1").await.unwrap().sessions[0].session_id,
+        "session-1"
+    );
+}
+
+#[tokio::test]
+async fn rejected_device_token_on_a_host_command_preserves_pairing() {
     let access = FakeAccess::start().await;
     let dir = tempfile::tempdir().unwrap();
     let (paired, _) = core(dir.path());
@@ -156,11 +257,104 @@ async fn rejected_device_token_ends_pairing_on_a_host_command() {
         .unwrap();
     access.revoke();
     let error = paired.sessions("host-1").await.unwrap_err();
-    assert!(matches!(
-        error,
-        CoreError::Revoked | CoreError::RevokedRetentionUnverified
-    ));
+    assert!(matches!(error, CoreError::Revoked), "{error:?}");
+    assert!(paired.is_paired());
+    assert!(!paired.runtime().is_revoked());
+    assert_eq!(
+        paired.local_revocation_state().unwrap(),
+        Some("revocation_pending")
+    );
+    access.host.lock().unwrap().revoked = false;
+    assert_eq!(paired.hosts().await.unwrap().len(), 1);
+    assert_eq!(paired.local_revocation_state().unwrap(), None);
+    assert_eq!(
+        paired.sessions("host-1").await.unwrap().sessions[0].session_id,
+        "session-1"
+    );
+}
+
+#[tokio::test]
+async fn explicit_revoke_after_service_denial_still_fully_cleans() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (paired, secrets) = core(dir.path());
+    let outcome = paired
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    access.revoke();
+    assert!(matches!(paired.hosts().await, Err(CoreError::Revoked)));
+    assert!(paired.is_paired());
+
+    // The user explicitly revokes after the denial. Unlike an ordinary call,
+    // this must finish the local cleanup even though Access already rejects
+    // the stored token.
+    let error = paired.revoke().await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CoreError::Revoked | CoreError::RevokedRetentionUnverified
+        ),
+        "{error:?}"
+    );
     assert!(!paired.is_paired());
+    assert!(paired.runtime().is_revoked());
+    assert!(!dir.path().join("config.json").exists());
+    assert!(!dir.path().join("cache.sqlite3").exists());
+    assert!(secrets
+        .load(&crate::security::keys::device_token(&outcome.device_id))
+        .unwrap()
+        .is_none());
+    assert!(secrets
+        .load(&crate::security::keys::cache_key(&outcome.device_id))
+        .unwrap()
+        .is_none());
+    assert_eq!(paired.local_revocation_state().unwrap(), Some("revoked"));
+
+    // The explicit cleanup is restart-safe and a fresh pairing still works.
+    let reopened = Core::new(paired.options.clone()).unwrap();
+    assert!(!reopened.is_paired());
+    reopened
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    assert!(reopened.is_paired());
+    assert_eq!(reopened.local_revocation_state().unwrap(), None);
+}
+
+#[tokio::test]
+async fn explicit_forget_after_service_denial_clears_only_local_material() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (paired, secrets) = core(dir.path());
+    let outcome = paired
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    access.revoke();
+    assert!(matches!(paired.hosts().await, Err(CoreError::Revoked)));
+    assert!(paired.authorization_verification_pending().unwrap());
+
+    paired.forget_local_device().unwrap();
+    assert!(!paired.is_paired());
+    assert!(!dir.path().join("config.json").exists());
+    assert!(!dir.path().join("cache.sqlite3").exists());
+    assert!(secrets
+        .load(&crate::security::keys::device_token(&outcome.device_id))
+        .unwrap()
+        .is_none());
+    // The unconfirmed observation belonged to the forgotten local profile and
+    // must not block pairing again or masquerade as a confirmed revocation.
+    assert!(!paired.authorization_verification_pending().unwrap());
+    assert_eq!(paired.local_revocation_state().unwrap(), None);
+
+    let reopened = Core::new(paired.options.clone()).unwrap();
+    assert!(!reopened.is_paired());
+    reopened
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    assert!(reopened.is_paired());
 }
 
 #[tokio::test]
@@ -642,4 +836,267 @@ async fn pairing_history_handles_empty_and_corrupt_state_without_leaking_credent
         .unwrap();
     let error = core.pairing_history().unwrap_err();
     assert_eq!(error.code(), "security_error");
+}
+
+// AC-38.grant-binding: Core keeps the Host-assigned grant identity.
+#[tokio::test]
+async fn pairing_persists_the_host_owned_grant_and_sends_it_on_the_next_channel() {
+    let access = FakeAccess::start().await;
+    access.host.lock().unwrap().pair_grant_id = "grant_01HZX:alpha-1".into();
+    let dir = tempfile::tempdir().unwrap();
+    let (core, secrets) = core(dir.path());
+    let outcome = core
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome.host_grant_id.as_deref(),
+        Some("grant_01HZX:alpha-1")
+    );
+    let config = core.current_config().unwrap();
+    assert_eq!(config.host_grant_id.as_deref(), Some("grant_01HZX:alpha-1"));
+    assert_eq!(
+        config.host_grant_id_for("host-1"),
+        Some("grant_01HZX:alpha-1")
+    );
+    core.ensure_channel("host-1", true).await.unwrap();
+    assert_eq!(
+        access.host.lock().unwrap().last_hello_grant_id,
+        "grant_01HZX:alpha-1"
+    );
+    // Diagnostics never carry the identifier.
+    assert!(!core
+        .diagnostics_preview()
+        .unwrap()
+        .contains("grant_01HZX:alpha-1"));
+
+    // A restart preserves the identity and the next authenticated hello still
+    // sends exactly the persisted value.
+    drop(core);
+    let reopened = Core::new(CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets,
+    })
+    .unwrap();
+    assert_eq!(
+        reopened
+            .current_config()
+            .unwrap()
+            .host_grant_id_for("host-1"),
+        Some("grant_01HZX:alpha-1")
+    );
+    reopened.ensure_channel("host-1", false).await.unwrap();
+    assert_eq!(
+        access.host.lock().unwrap().last_hello_grant_id,
+        "grant_01HZX:alpha-1"
+    );
+
+    // Core sends what the profile holds; a stale value is not silently repaired
+    // or replaced by a derived label, so the Host can reject it.
+    {
+        let mut config = reopened.current_config().unwrap();
+        config.host_grant_id = Some("stale-grant".into());
+        reopened.config_store().save(&config).unwrap();
+        *reopened.config.write().unwrap() = Some(config);
+    }
+    reopened.runtime().clear_channel("host-1");
+    reopened.ensure_channel("host-1", true).await.unwrap();
+    assert_eq!(
+        access.host.lock().unwrap().last_hello_grant_id,
+        "stale-grant"
+    );
+}
+
+#[tokio::test]
+async fn a_channel_ready_grant_echo_must_match_the_authenticated_hello() {
+    let access = FakeAccess::start().await;
+    access.host.lock().unwrap().pair_grant_id = "grant_echo:alpha-1".into();
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    core.pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    core.ensure_channel("host-1", true).await.unwrap();
+
+    // The Host echoes a different grant than the one the Device authenticated.
+    access.host.lock().unwrap().ready_grant_override = Some("grant_echo:other".into());
+    core.runtime().clear_channel("host-1");
+    let error = core.ensure_channel("host-1", true).await.unwrap_err();
+    assert!(matches!(error, CoreError::Security(_)));
+    assert!(core.runtime().channel("host-1").is_none());
+
+    // A legacy profile without a grant id is not upgraded by the echo and still
+    // completes; the Host stays the authority for what it installed.
+    access.host.lock().unwrap().ready_grant_override = None;
+}
+
+#[tokio::test]
+async fn a_legacy_empty_host_grant_leaves_the_profile_unset_and_sends_nothing() {
+    let access = FakeAccess::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    let outcome = core
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .unwrap();
+    assert!(outcome.host_grant_id.is_none());
+    let config = core.current_config().unwrap();
+    assert!(config.host_grant_id.is_none());
+    assert_eq!(config.host_grant_id_for("host-1"), None);
+    let encoded = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+    assert!(!encoded.contains("host_grant"));
+    core.ensure_channel("host-1", true).await.unwrap();
+    assert!(access.host.lock().unwrap().last_hello_grant_id.is_empty());
+}
+
+#[tokio::test]
+async fn a_lost_finish_reply_recovers_the_same_host_grant_identity() {
+    let access = FakeAccess::start().await;
+    {
+        let mut host = access.host.lock().unwrap();
+        host.pair_grant_id = "grant-stable".into();
+        host.drop_pair_finish_once = true;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (core, secrets) = core(dir.path());
+    assert!(core
+        .pair(&access.pairing_uri(), |_| PairingDecision::approve())
+        .await
+        .is_err());
+    let (operation_id, _) = core.pending_standalone_pairing().unwrap().unwrap();
+    // An unconfirmed FINISH persists no profile and therefore no grant id.
+    assert!(core.current_config().is_none());
+    assert!(!dir.path().join("config.json").exists());
+    drop(core);
+    let reopened = Core::new(CoreOptions {
+        data_dir: dir.path().to_path_buf(),
+        secrets,
+    })
+    .unwrap();
+    access.host.lock().unwrap().drop_pair_finish_once = false;
+    let recovered = reopened
+        .recover_standalone_pairing(&operation_id)
+        .await
+        .unwrap();
+    assert_eq!(recovered.host_grant_id.as_deref(), Some("grant-stable"));
+    assert_eq!(
+        reopened
+            .current_config()
+            .unwrap()
+            .host_grant_id_for("host-1"),
+        Some("grant-stable")
+    );
+    reopened.ensure_channel("host-1", true).await.unwrap();
+    assert_eq!(
+        access.host.lock().unwrap().last_hello_grant_id,
+        "grant-stable"
+    );
+}
+
+#[tokio::test]
+async fn pairing_prompt_carries_only_the_advisory_directory_preview() {
+    const DISPLAY_MARKER: &str = "PREPAIR-DISPLAY-MARKER";
+    const OS_MARKER: &str = "PREPAIR-OS-MARKER";
+    let access = FakeAccess::start().await;
+    {
+        let mut host = access.host.lock().unwrap();
+        host.directory_display_name = DISPLAY_MARKER.into();
+        host.directory_os_family = OS_MARKER.into();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = core(dir.path());
+    let seen = Arc::new(Mutex::new(None));
+    let captured = seen.clone();
+    let outcome = core
+        .pair(&access.pairing_uri(), move |prompt| {
+            *captured.lock().unwrap() = Some(prompt.clone());
+            PairingDecision::approve()
+        })
+        .await
+        .unwrap();
+    let prompt = seen.lock().unwrap().clone().expect("prompt");
+    assert_eq!(prompt.display_name, DISPLAY_MARKER);
+    assert_eq!(prompt.os_family, OS_MARKER);
+
+    // The preview decorates the prompt only. It must not become configuration,
+    // pairing state, diagnostics or the pair outcome.
+    let config = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+    assert!(!config.contains(DISPLAY_MARKER));
+    assert!(!config.contains(OS_MARKER));
+    let outcome_json = serde_json::to_string(&outcome).unwrap();
+    assert!(!outcome_json.contains(DISPLAY_MARKER));
+    assert!(!outcome_json.contains(OS_MARKER));
+    let snapshot = core.diagnostics_snapshot().unwrap();
+    let snapshot = String::from_utf8_lossy(snapshot.bytes()).to_string();
+    assert!(!snapshot.contains(DISPLAY_MARKER));
+    assert!(!snapshot.contains(OS_MARKER));
+    assert!(!directory_tree_contains(dir.path(), DISPLAY_MARKER));
+    assert!(!directory_tree_contains(dir.path(), OS_MARKER));
+    assert!(core.is_paired());
+}
+
+fn directory_tree_contains(root: &std::path::Path, needle: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if directory_tree_contains(&path, needle) {
+                return true;
+            }
+        } else if let Ok(bytes) = std::fs::read(&path) {
+            if String::from_utf8_lossy(&bytes).contains(needle) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[tokio::test]
+async fn advisory_directory_failures_keep_pairing_with_empty_preview() {
+    #[derive(Clone, Copy)]
+    enum Failure {
+        Unavailable,
+        Malformed,
+        Timeout,
+    }
+
+    for failure in [Failure::Unavailable, Failure::Malformed, Failure::Timeout] {
+        let access = FakeAccess::start().await;
+        {
+            let mut host = access.host.lock().unwrap();
+            // Any preview would be visible in the captured prompt, so a
+            // timeout must not wait for a late response that could populate it.
+            host.directory_display_name = "late-display".into();
+            host.directory_os_family = "late-os".into();
+            match failure {
+                Failure::Unavailable => host.directory_status = Some(404),
+                Failure::Malformed => {
+                    host.directory_body = Some(b"{\"hostId\":\"host-1\",\"displayName\"".to_vec())
+                }
+                Failure::Timeout => host.directory_delay_ms = 500,
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (core, _) = core(dir.path());
+        if matches!(failure, Failure::Timeout) {
+            core.set_directory_timeout(Duration::from_millis(50));
+        }
+        let seen = Arc::new(Mutex::new(None));
+        let captured = seen.clone();
+        let outcome = core
+            .pair(&access.pairing_uri(), move |prompt| {
+                *captured.lock().unwrap() = Some(prompt.clone());
+                PairingDecision::approve()
+            })
+            .await
+            .unwrap_or_else(|error| panic!("pairing must survive directory failure: {error:?}"));
+        let prompt = seen.lock().unwrap().clone().expect("prompt");
+        assert_eq!(prompt.display_name, "");
+        assert_eq!(prompt.os_family, "");
+        assert!(core.is_paired());
+        assert_eq!(outcome.host_id, "host-1");
+    }
 }

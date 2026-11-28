@@ -274,16 +274,17 @@ final class RecoverableSessionService: SessionService {
 
     // MARK: - Diagnostics
 
-    func diagnosticsPreview() async throws -> DiagnosticsReport {
-        try await current().diagnosticsPreview()
+    func diagnosticsCapture(refresh: Bool) async throws -> DiagnosticsCapture {
+        try await current().diagnosticsCapture(refresh: refresh)
     }
 
     func clearDiagnostics() async throws {
         try await current().clearDiagnostics()
     }
 
-    func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {
-        try await current().exportDiagnostics(to: url)
+    func diagnosticsLocalHosts(for capture: DiagnosticsCapture) async -> [DiagnosticsLocalHost] {
+        guard let service = try? await current() else { return [] }
+        return await service.diagnosticsLocalHosts(for: capture)
     }
 
     // MARK: - Device lifecycle

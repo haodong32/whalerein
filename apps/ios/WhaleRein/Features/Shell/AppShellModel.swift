@@ -93,7 +93,10 @@ final class AppShellModel {
     let preferencesFactory: (@MainActor (AppInstance) -> PreferencesStore)?
     var didBootstrap = false
     var isBootstrapping = false
-    var isInBackground = false
+    /// Serializes the asynchronous work of accepted scene transitions. Each
+    /// transition chains behind the previous one, so a background suspension
+    /// completes before its foreground resume.
+    var sceneTransitionTask: Task<Void, Never>?
 
     init(
         service: any SessionService,
@@ -232,6 +235,10 @@ final class AppShellModel {
         get { shell.isPrivacyShieldVisible }
         set { shell.isPrivacyShieldVisible = newValue }
     }
+    /// True while the process is actually backgrounded. A brief inactive
+    /// interruption is not a background entry.
+    var isInBackground: Bool { shell.scene.phase == .background }
+    var scenePhase: AppScenePhase { shell.scene.phase }
     var isRevoked: Bool { get { shell.isRevoked } set { shell.isRevoked = newValue } }
     var prefersInvitationAfterDeviceReset: Bool {
         get { shell.prefersInvitationAfterDeviceReset }

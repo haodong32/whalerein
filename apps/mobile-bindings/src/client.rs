@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::task::AbortHandle;
 use whalerein_core::api::{
-    Cancellation, ClientConfig, ClientService, Core, Environment, HistoryContinuity,
-    ObservationInterests, PairingDecision, PairingPrompt, QuestionAnswer, SessionEventPayload,
-    SessionKey,
+    Cancellation, ClientConfig, ClientService, Core, DiagnosticExportMode, Environment,
+    HistoryContinuity, ObservationInterests, PairingDecision, PairingPrompt, QuestionAnswer,
+    SessionEventPayload, SessionKey,
 };
 use whalerein_core::attachments::{DownloadProgress, DownloadRequest};
 use whalerein_core::history::{HistoryContinuation, HistoryPageRequest};
@@ -36,12 +36,12 @@ use crate::types::{
     AttachmentDownloadRequestView, AttachmentDownloadView, AttachmentProgressView,
     AttachmentTransferView, CloudAccountSessionView, CloudAccountStatusView, CloudAccountView,
     CloudAuthAttemptView, CloudConnectResultView, CloudDirectoryHostView, CommandView,
-    ConversationEvent, ConversationEventEnvelope, DeliveryChoice, DiagnosticsReportView,
-    HistoryContinuityView, HistoryPageView, HostConnectionView, HostSummary, MessageReferenceView,
-    MessageView, PairingPromptView, QuestionAnswerView, QuestionBatchView,
-    QuestionCancelReceiptView, QuestionPageView, RetainedOperationView, SendOperationView,
-    SessionCapabilitiesView, SessionKeyView, SessionSummaryView, WatchEventScope,
-    WatchHistoryBaseline,
+    ConversationEvent, ConversationEventEnvelope, DeliveryChoice, DiagnosticsHostView,
+    DiagnosticsReportView, DiagnosticsSnapshotView, HistoryContinuityView, HistoryPageView,
+    HostConnectionView, HostSummary, MessageReferenceView, MessageView, PairingPromptView,
+    QuestionAnswerView, QuestionBatchView, QuestionCancelReceiptView, QuestionPageView,
+    RetainedOperationView, SendOperationView, SessionCapabilitiesView, SessionKeyView,
+    SessionSummaryView, WatchEventScope, WatchHistoryBaseline,
 };
 use crate::wait::{WaitAttempts, WaitResultView, MAX_WAIT_TIMEOUT_MS};
 
@@ -2237,21 +2237,35 @@ impl MobileCore {
     // Diagnostics and lifecycle
     // -----------------------------------------------------------------
 
+    /// One immutable redacted capture.
+    ///
+    /// The first call captures allowlisted local facts; later calls return the
+    /// same bytes. Nothing is written or uploaded. Use [`Self::refresh_diagnostics`]
+    /// for an explicit new capture.
+    pub fn diagnostics_snapshot(&self) -> Result<DiagnosticsSnapshotView, MobileError> {
+        let snapshot = self
+            .core
+            .diagnostics_snapshot()
+            .map_err(MobileError::from)?;
+        Ok(snapshot_view(snapshot, &self.app_version))
+    }
+
+    /// Take a new capture, replacing the previous one explicitly.
+    pub fn refresh_diagnostics(&self) -> Result<DiagnosticsSnapshotView, MobileError> {
+        let snapshot = self.core.refresh_diagnostics().map_err(MobileError::from)?;
+        Ok(snapshot_view(snapshot, &self.app_version))
+    }
+
     /// Redacted diagnostic preview. Reads local state only.
     pub fn diagnostics_preview(&self) -> Result<DiagnosticsReportView, MobileError> {
-        let json = self.core.diagnostics_preview().map_err(MobileError::from)?;
-        let value: serde_json::Value =
-            serde_json::from_str(&json).map_err(|_| MobileError::internal())?;
-        let redaction_fields = string_array(&value, "redactions");
-        let last_failure_code = value
-            .get("last_failure")
-            .and_then(|failure| failure.get("code"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
+        let snapshot = self
+            .core
+            .diagnostics_snapshot()
+            .map_err(MobileError::from)?;
         Ok(DiagnosticsReportView {
-            json,
-            redaction_fields,
-            last_failure_code,
+            json: snapshot.text,
+            redaction_fields: snapshot.redaction_fields,
+            last_failure_code: snapshot.last_failure_code,
             app_version: self.app_version.clone(),
             core_version: CORE_VERSION.to_owned(),
         })
@@ -2265,30 +2279,32 @@ impl MobileCore {
         self.core.clear_diagnostics().map_err(MobileError::from)
     }
 
-    /// Write a redacted diagnostic bundle to `path` after user confirmation.
+    /// Write the captured snapshot to one new local path.
+    ///
+    /// The file is created exclusively with private permissions; an existing
+    /// file is never replaced here. Unlike preview, this has an explicit local
+    /// side effect and never uploads. The returned document is read back from
+    /// the written file, so it is exactly the bytes the destination received.
     pub fn export_diagnostics(&self, path: String) -> Result<DiagnosticsReportView, MobileError> {
         if path.is_empty() || path.len() > MAX_PATH_BYTES {
             return Err(MobileError::invalid_input());
         }
-        let manifest = self
+        let snapshot = self
             .core
-            .export_diagnostics(Path::new(&path))
+            .diagnostics_snapshot()
+            .map_err(MobileError::from)?;
+        self.core
+            .write_diagnostics_snapshot(
+                &snapshot,
+                Path::new(&path),
+                DiagnosticExportMode::CreateNew,
+            )
             .map_err(MobileError::from)?;
         let json = std::fs::read_to_string(&path).map_err(|_| MobileError::internal())?;
-        let value: serde_json::Value =
-            serde_json::from_str(&json).map_err(|_| MobileError::internal())?;
-        let last_failure_code = value
-            .get("last_failure")
-            .and_then(|failure| failure.get("events"))
-            .and_then(|events| events.as_array())
-            .and_then(|events| events.last())
-            .and_then(|event| event.get("code"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
         Ok(DiagnosticsReportView {
             json,
-            redaction_fields: manifest.redactions,
-            last_failure_code,
+            redaction_fields: snapshot.redaction_fields,
+            last_failure_code: snapshot.last_failure_code,
             app_version: self.app_version.clone(),
             core_version: CORE_VERSION.to_owned(),
         })
@@ -2606,26 +2622,39 @@ fn validate_fingerprint(fingerprint: &str) -> Result<(), MobileError> {
     Ok(())
 }
 
+fn snapshot_view(
+    snapshot: whalerein_core::api::DiagnosticsSnapshot,
+    app_version: &str,
+) -> DiagnosticsSnapshotView {
+    DiagnosticsSnapshotView {
+        schema: snapshot.schema,
+        capture_id: snapshot.capture_id,
+        capture_time_unix_ms: snapshot.capture_time_unix_ms,
+        bytes: snapshot.bytes,
+        text: snapshot.text,
+        summary: snapshot.summary,
+        redaction_fields: snapshot.redaction_fields,
+        last_failure_code: snapshot.last_failure_code,
+        hosts: snapshot
+            .hosts
+            .into_iter()
+            .map(|host| DiagnosticsHostView {
+                label: host.label,
+                host_ref: host.host_ref,
+                connection_state: host.connection_state,
+            })
+            .collect(),
+        app_version: app_version.to_owned(),
+        core_version: CORE_VERSION.to_owned(),
+    }
+}
+
 fn decode_digest(digest_hex: &str) -> Result<Vec<u8>, MobileError> {
     let digest = hex::decode(digest_hex).map_err(|_| MobileError::invalid_input())?;
     if digest.len() != 32 {
         return Err(MobileError::invalid_input());
     }
     Ok(digest)
-}
-
-fn string_array(value: &serde_json::Value, field: &str) -> Vec<String> {
-    value
-        .get(field)
-        .and_then(serde_json::Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -3088,6 +3117,7 @@ mod tests {
             device_id: "device-1".into(),
             fingerprint: "ab".repeat(32),
             access_url: "https://host-1.access.example/secret-token".into(),
+            host_grant_id: Some("grant-fixture".into()),
         });
         assert_eq!(connect.operation_id.as_deref(), Some("op-1"));
         assert_eq!(connect.host_id, "host-1");

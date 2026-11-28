@@ -19,6 +19,10 @@ const (
 	// DeviceReadyFilter receives Device receive advertisements. Access is the
 	// only subscriber; a Device may publish only its own ready topic.
 	DeviceReadyFilter = "whalerein/v1/h/+/d/+/ready"
+	// SelfStatusReplyFilter receives Host replies for the bounded self-status
+	// bootstrap exchange. Access is the only subscriber and a Device can never
+	// publish or subscribe on this service subtree.
+	SelfStatusReplyFilter = "whalerein/v1/h/+/svc/self-status/reply"
 )
 
 // TopicKind is one of the complete-message wire topic shapes.
@@ -37,6 +41,12 @@ const (
 	KindDeviceReply  TopicKind = "device_reply"
 	KindDeviceLive   TopicKind = "device_live"
 	KindPresence     TopicKind = "presence"
+
+	// Service-only bootstrap lanes. These are not ordinary request topics: a
+	// Device is denied on both, and only Access publishes the request while only
+	// the addressed Host publishes the reply.
+	KindServiceSelfStatusRequest TopicKind = "service_self_status_request"
+	KindServiceSelfStatusReply   TopicKind = "service_self_status_reply"
 )
 
 // ErrInvalidTopic is returned for topics outside the wire templates.
@@ -98,6 +108,18 @@ func DeviceReplyTopic(hostID, deviceID string) string {
 // PresenceTopic is the Access -> host device-presence topic.
 func PresenceTopic(hostID string) string { return topicRoot + hostID + "/presence" }
 
+// SelfStatusRequestTopic is the Access -> Host bounded self-status topic. It is
+// the only topic on which Access forwards a status-only bootstrap frame.
+func SelfStatusRequestTopic(hostID string) string {
+	return topicRoot + hostID + "/svc/self-status/request"
+}
+
+// SelfStatusReplyTopic is the Host -> Access bounded self-status reply topic.
+// A Device is denied on it by broker policy; only the addressed Host publishes.
+func SelfStatusReplyTopic(hostID string) string {
+	return topicRoot + hostID + "/svc/self-status/reply"
+}
+
 // ParseTopic parses one concrete wire topic. Wildcards are rejected.
 func ParseTopic(topic string) (Topic, error) {
 	if !strings.HasPrefix(topic, topicRoot) {
@@ -116,7 +138,26 @@ func ParseTopic(topic string) (Topic, error) {
 			return Topic{}, ErrInvalidTopic
 		}
 	case 4:
-		if !validID(parts[0]) || parts[1] != "d" || !validID(parts[2]) {
+		if !validID(parts[0]) {
+			return Topic{}, ErrInvalidTopic
+		}
+		// Service-only bootstrap subtree: h/{host}/svc/self-status/{request|reply}.
+		// It is disjoint from the Device subtree so no Device identifier can
+		// address it and no ordinary parser branch admits it by accident.
+		if parts[1] == "svc" {
+			if parts[2] != "self-status" {
+				return Topic{}, ErrInvalidTopic
+			}
+			switch parts[3] {
+			case "request":
+				return Topic{HostID: parts[0], Kind: KindServiceSelfStatusRequest}, nil
+			case "reply":
+				return Topic{HostID: parts[0], Kind: KindServiceSelfStatusReply}, nil
+			default:
+				return Topic{}, ErrInvalidTopic
+			}
+		}
+		if parts[1] != "d" || !validID(parts[2]) {
 			return Topic{}, ErrInvalidTopic
 		}
 		var kind TopicKind

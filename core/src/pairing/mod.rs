@@ -59,6 +59,8 @@ pub enum PairingError {
     Noise,
     #[error("device key reported by Access does not match")]
     DeviceKeyMismatch,
+    #[error("pairing Host grant identity is invalid")]
+    InvalidGrantId,
 }
 
 impl From<SecurityError> for PairingError {
@@ -72,6 +74,23 @@ impl From<SecurityError> for PairingError {
 const MAX_PAIRING_URI_BYTES: usize = 8192;
 const MAX_PAIRING_HOST_ID_BYTES: usize = 128;
 const MAX_PAIRING_TOKEN_BYTES: usize = 512;
+
+/// Hard ceiling for the Host-assigned grant identity. Access enforces the same
+/// 128-byte bound for a claimed grant; Core keeps the value opaque and only
+/// checks that it is a bounded, topic-safe token.
+pub const MAX_HOST_GRANT_ID_BYTES: usize = 128;
+
+/// A Host-owned grant identity is opaque, but it must stay one token: ASCII
+/// alphanumerics plus `_`, `.`, `:` and `-`, at most 128 bytes. That matches the
+/// cross-component resource-id contract and rejects separators, control
+/// characters and wildcards. An empty value means a legacy Host did not report
+/// a grant and is always accepted; callers treat it as absent.
+pub fn is_valid_host_grant_id(value: &str) -> bool {
+    value.len() <= MAX_HOST_GRANT_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'))
+}
 
 /// Host ids are opaque labels but must stay one URL/topic token. Reject control
 /// characters, whitespace and the AAD separator instead of trimming them: a
@@ -244,6 +263,9 @@ pub struct PairingCompletion {
     pub device_id: String,
     pub host_fingerprint: String,
     pub device_token: String,
+    /// Host-assigned opaque grant identity committed by this pairing. Empty
+    /// for a Host that predates Host-owned grants; never derived from a label.
+    pub grant_id: String,
 }
 
 impl std::fmt::Debug for PairingCompletion {
@@ -253,6 +275,14 @@ impl std::fmt::Debug for PairingCompletion {
             .field("device_id", &self.device_id)
             .field("host_fingerprint", &self.host_fingerprint)
             .field("device_token", &"<redacted>")
+            .field(
+                "grant_id",
+                &if self.grant_id.is_empty() {
+                    "<absent>"
+                } else {
+                    "<opaque>"
+                },
+            )
             .finish()
     }
 }
@@ -576,6 +606,12 @@ impl PairingInitiator {
         if response.device_token != self.device_token {
             return Err(PairingError::ResponseMismatch);
         }
+        // An empty value is the legacy Host that predates Host-owned grants.
+        // Anything else must be one bounded, topic-safe opaque token; a Host
+        // label or fingerprint is never substituted for it.
+        if !is_valid_host_grant_id(&response.grant_id) {
+            return Err(PairingError::InvalidGrantId);
+        }
         let device_token = response.device_token.clone();
         self.state = PairingState::Complete;
         Ok(PairingCompletion {
@@ -583,6 +619,7 @@ impl PairingInitiator {
             device_id: self.device_id.clone(),
             host_fingerprint: self.fingerprint.clone().unwrap_or_default(),
             device_token,
+            grant_id: response.grant_id.clone(),
         })
     }
 
@@ -1001,6 +1038,68 @@ mod tests {
         client.confirm(&PairingDecision::approve()).unwrap();
         let finish = client.write_finish().unwrap();
         (client, host, finish)
+    }
+
+    #[test]
+    fn completion_carries_the_exact_host_owned_grant_identity() {
+        let uri = uri();
+        let (mut client, mut host, finish) = flow_until_finish(&uri);
+        let mut response = host.finish_response(&finish);
+        response.grant_id = "grant_01HZX:alpha-1".into();
+        let completion = client.complete(&response).unwrap();
+        assert_eq!(completion.grant_id, "grant_01HZX:alpha-1");
+        assert_eq!(client.state(), PairingState::Complete);
+        // The opaque identifier stays out of the Debug rendering.
+        let debug = format!("{completion:?}");
+        assert!(!debug.contains("grant_01HZX"));
+        assert!(debug.contains("<opaque>"));
+    }
+
+    #[test]
+    fn completion_treats_an_empty_legacy_grant_identity_as_absent() {
+        let uri = uri();
+        let (mut client, mut host, finish) = flow_until_finish(&uri);
+        let response = host.finish_response(&finish);
+        assert!(response.grant_id.is_empty());
+        let completion = client.complete(&response).unwrap();
+        assert!(completion.grant_id.is_empty());
+        assert!(format!("{completion:?}").contains("<absent>"));
+    }
+
+    #[test]
+    fn completion_rejects_an_invalid_host_grant_identity() {
+        for invalid in [
+            "a".repeat(MAX_HOST_GRANT_ID_BYTES + 1),
+            "has space".into(),
+            "has\nnewline".into(),
+            "has|separator".into(),
+            "has/slash".into(),
+            "has+wildcard".into(),
+            "has#wildcard".into(),
+            "鲸".into(),
+        ] {
+            let uri = uri();
+            let (mut client, mut host, finish) = flow_until_finish(&uri);
+            let mut response = host.finish_response(&finish);
+            response.grant_id = invalid.clone();
+            let error = client.complete(&response).unwrap_err();
+            assert!(
+                matches!(error, PairingError::InvalidGrantId),
+                "expected InvalidGrantId for {invalid:?}"
+            );
+            assert!(!format!("{error} {error:?}").contains(&invalid));
+        }
+    }
+
+    #[test]
+    fn valid_grant_identity_is_bounded_and_token_safe() {
+        assert!(is_valid_host_grant_id(""));
+        assert!(is_valid_host_grant_id("grant_01HZX:alpha-1.beta"));
+        assert!(is_valid_host_grant_id(&"a".repeat(MAX_HOST_GRANT_ID_BYTES)));
+        assert!(!is_valid_host_grant_id(
+            &"a".repeat(MAX_HOST_GRANT_ID_BYTES + 1)
+        ));
+        assert!(!is_valid_host_grant_id("grant id"));
     }
 
     #[test]

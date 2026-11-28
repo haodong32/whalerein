@@ -64,6 +64,8 @@ func fixturePrompt(hostId: String = "studio-mac") -> PairingPrompt {
         accessURL: URL(string: "https://\(hostId).access.whalerein.test")!,
         fingerprint: FixtureCatalog.fingerprint,
         fingerprintDisplay: FixtureCatalog.fingerprintDisplay,
+        displayName: "Studio Mac",
+        osFamily: "macOS",
         expiresAt: Date().addingTimeInterval(120)
     )
 }
@@ -74,7 +76,13 @@ func testApproval(
     state: ApprovalState = .pending,
     version: Int = 3,
     expiresAt: Date = Date().addingTimeInterval(900),
-    digest: String = "digest-1"
+    digest: String = "digest-1",
+    review: ApprovalReviewDetails? = ApprovalReviewDetails(
+        action: "Change one file",
+        target: "Sources/App.swift",
+        impact: "Replaces the selected file content.",
+        availability: .complete
+    )
 ) -> Approval {
     Approval(
         approvalId: id,
@@ -85,7 +93,8 @@ func testApproval(
         version: version,
         expiresAtUnixMs: Int64(expiresAt.timeIntervalSince1970 * 1000),
         digestHex: digest,
-        state: state
+        state: state,
+        review: review
     )
 }
 
@@ -215,8 +224,8 @@ class StubSessionService: SessionService {
     var cancelQuestionHandler: ((String, String, String) async throws -> Bool)?
     var requestQuestionCancelHandler: ((String, String, String) async throws -> QuestionCancelReceipt)?
     var approvalHandler: ((String, String) async throws -> Approval)?
-    var diagnosticsHandler: (() async throws -> DiagnosticsReport)?
-    var exportHandler: ((URL) async throws -> DiagnosticsReport)?
+    var diagnosticsHandler: ((Bool) async throws -> DiagnosticsCapture)?
+    var diagnosticsLocalHostsHandler: ((DiagnosticsCapture) async -> [DiagnosticsLocalHost])?
     var forgetHandler: (() async throws -> Void)?
     var revokeHandler: (() async throws -> Void)?
 
@@ -234,9 +243,10 @@ class StubSessionService: SessionService {
     private(set) var cancelWaitCalls: [String] = []
     private(set) var resolveCalls: [(approvalId: String, version: Int, digest: String, allow: Bool)] = []
     private(set) var savedDrafts: [String: String] = [:]
+    private(set) var saveDraftCount = 0
     private(set) var clearedDraftKeys: [String] = []
-    private(set) var diagnosticsPreviewCount = 0
-    private(set) var exportCount = 0
+    private(set) var diagnosticsCaptureCount = 0
+    private(set) var diagnosticsRefreshFlags: [Bool] = []
     private(set) var hostsFetchCount = 0
     private(set) var sessionsFetchCount = 0
     private(set) var eventStreamCount = 0
@@ -549,6 +559,7 @@ class StubSessionService: SessionService {
     }
 
     func saveDraft(hostId: String, sessionId: String, text: String) async throws {
+        saveDraftCount += 1
         let key = AppStorageLocations.sessionKey(hostId: hostId, sessionId: sessionId)
         if text.isEmpty {
             savedDrafts.removeValue(forKey: key)
@@ -567,18 +578,18 @@ class StubSessionService: SessionService {
         savedDrafts.removeValue(forKey: key)
     }
 
-    func diagnosticsPreview() async throws -> DiagnosticsReport {
-        diagnosticsPreviewCount += 1
+    func diagnosticsCapture(refresh: Bool) async throws -> DiagnosticsCapture {
+        diagnosticsCaptureCount += 1
+        diagnosticsRefreshFlags.append(refresh)
         guard let diagnosticsHandler else { return FixtureCatalog.diagnostics() }
-        return try await diagnosticsHandler()
+        return try await diagnosticsHandler(refresh)
     }
 
     func clearDiagnostics() async throws {}
 
-    func exportDiagnostics(to url: URL) async throws -> DiagnosticsReport {
-        exportCount += 1
-        guard let exportHandler else { return try await diagnosticsPreview() }
-        return try await exportHandler(url)
+    func diagnosticsLocalHosts(for capture: DiagnosticsCapture) async -> [DiagnosticsLocalHost] {
+        guard let diagnosticsLocalHostsHandler else { return [] }
+        return await diagnosticsLocalHostsHandler(capture)
     }
 
     func forgetDevice() async throws {

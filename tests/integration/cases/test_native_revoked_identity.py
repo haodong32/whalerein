@@ -223,8 +223,8 @@ def test_native_sigkill_after_repair_commit_keeps_new_grant(scenario, paired_dev
             process.communicate(timeout=5)
 
 
-def test_native_sigkill_after_observed_revoke_resumes_check(scenario, paired_device):
-    """A killed observer retains pending state and a later check completes global revoke cleanup."""
+def test_native_service_denial_sigkill_retains_local_trust(scenario, paired_device):
+    """A killed observer retains local trust; service denial never cleans up."""
     session=scenario.create()
     scenario.model.plan(hold=True)
     scenario.request("start",sessionId=session)
@@ -252,8 +252,20 @@ def test_native_sigkill_after_observed_revoke_resumes_check(scenario, paired_dev
         assert pending["pending_commands"][0]["request_id"] == identity
         code,result=paired_device.invoke("session", "list", "--host", scenario.host, success=False)
         assert code != 0 and result[-1]["error"]["code"] == "revoked"
+        # Service admission is lost, but no Host confirmed a revocation for
+        # this enrollment: every local artifact survives.
+        assert paired_device.call("status")["device_access"] == "revocation_pending"
+        assert (paired_device.data_dir / "regional.json").exists()
+        assert (paired_device.data_dir / "cache.sqlite3").is_file()
+        assert paired_device.has_secret("device-token")
+        assert paired_device.has_secret("cache-key")
         assert retained_request_ids(paired_device) == [identity]
+        # Only the explicit local forget retires the retained profile.
+        forgotten = paired_device.call("device", "forget", "--local-only", "--yes")
+        assert forgotten["identity_forgotten"] is True
+        assert not (paired_device.data_dir / "regional.json").exists()
         assert not (paired_device.data_dir / "cache.sqlite3").exists()
+        assert not paired_device.has_secret("device-token")
     finally:
         scenario.model.release.set()
         if process.poll() is None:
@@ -301,8 +313,8 @@ def test_native_concurrent_revokers_share_intent_if_second_is_killed(scenario, p
                 process.communicate(timeout=5)
 
 
-def test_native_observer_cannot_be_displaced_by_concurrent_revoker(scenario, paired_device):
-    """A revoker cannot replace an observer that already confirmed external authorization loss."""
+def test_native_explicit_revoke_supersedes_observed_service_denial(scenario, paired_device):
+    """An explicit revoke cleans even after service admission was already denied."""
     import urllib.request
     session=scenario.create()
     scenario.model.plan(hold=True)
@@ -324,15 +336,20 @@ def test_native_observer_cannot_be_displaced_by_concurrent_revoker(scenario, pai
     observer=subprocess.Popen(paired_device.args("session", "list", "--host", scenario.host),cwd=ROOT,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     try:
         wait(barrier.exists,timeout=20)
-        before=(path / "admission-revoked").read_text()
+        before=revocation_marker(paired_device)
+        assert before.startswith("pending:")
         code,result=paired_device.invoke("device", "revoke", "--yes", success=False)
-        assert code != 0 and result[-1]["error"]["code"] == "unavailable"
-        assert (path / "admission-revoked").read_text() == before
+        # The explicit revoke supersedes the observation and completes the local
+        # cleanup; the already-rejected token is reported as revoked.
+        assert code != 0 and result[-1]["error"]["code"] == "revoked"
+        assert revocation_marker(paired_device).startswith("confirmed:")
+        assert not (path / "cache.sqlite3").exists()
+        assert not (path / "regional.json").exists()
+        assert not paired_device.has_secret("device-token")
         barrier.unlink()
         observer.communicate(timeout=25)
         assert observer.returncode != 0
         assert retained_request_ids(paired_device) == [identity]
-        assert not (path / "cache.sqlite3").exists()
     finally:
         scenario.model.release.set()
         if observer.poll() is None:

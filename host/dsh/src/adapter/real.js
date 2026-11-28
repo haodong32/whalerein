@@ -14,6 +14,7 @@ import {
 } from './questions.js'
 import { AdapterError, DefinitiveExecutionError } from 'whalerein-host/errors.js'
 import { approvalDigest, bytesEqual, randomId } from 'whalerein-host/security/digest.js'
+import { describeApprovalRequest } from './review.js'
 import {
   APPROVAL_REASON_MAX,
   DshAdapter,
@@ -121,6 +122,9 @@ export class RealDshAdapter extends DshAdapter {
   #eventSubscribers = new Set()
   #approvalSubscribers = new Set()
   #approvals = new Map()
+  // Bounded callId -> { name, arguments } facts from live tool/call events.
+  // Only used to describe the matching native approval; never forwarded raw.
+  #callFacts = new Map()
   #approvalTimers = new Set()
   #approvalVersion = 0
   #usedAuditIds = new Set()
@@ -1285,9 +1289,31 @@ export class RealDshAdapter extends DshAdapter {
     })
   }
 
+  /**
+   * Keep a bounded, in-memory association from a native tool call to its
+   * arguments. The matching live approval has no argument map in DSH 0.2.x, so
+   * this is the only safe source for action/target/impact. Values are never
+   * logged, persisted or forwarded raw, and the map is capped.
+   */
+  #rememberCallFact(data) {
+    const callId = typeof data?.callId === 'string' ? data.callId : ''
+    if (callId === '') return
+    const name = typeof data?.name === 'string' ? data.name : ''
+    const args = typeof data?.arguments === 'string' || (data?.arguments && typeof data.arguments === 'object')
+      ? data.arguments
+      : undefined
+    this.#callFacts.delete(callId)
+    this.#callFacts.set(callId, { name, arguments: args })
+    while (this.#callFacts.size > 128) {
+      const oldest = this.#callFacts.keys().next().value
+      this.#callFacts.delete(oldest)
+    }
+  }
+
   #onSessionEvent(session, event) {
     const sessionId = String(session?.id ?? session?.sessionId ?? '')
     if (sessionId === '') return
+    if (event?.type === 'tool/call') this.#rememberCallFact(event.data)
     const boundaryAt = this.observationNow()
     let normalized
     try {
@@ -1428,12 +1454,23 @@ export class RealDshAdapter extends DshAdapter {
     this.#approvalVersion += 1
     const version = this.#approvalVersion
     const expiresAt = this.now() + this.approvalTtlMs
+    // Bounded review facts come from this live native request only. The helper
+    // reads an optional structured argument map once and returns only the four
+    // masked fields; the raw map is never retained, logged or forwarded.
+    const callFact = this.#callFacts.get(request?.callId)
+    const review = describeApprovalRequest({
+      toolName: request?.toolName ?? callFact?.name,
+      callId: request?.callId,
+      reason: request?.reason,
+      arguments: request?.arguments ?? callFact?.arguments,
+    })
     const record = {
       approvalId,
       sessionId,
       toolName: boundedApprovalText(request?.toolName),
       callId: boundedApprovalText(request?.callId),
       reason: boundedApprovalText(request?.reason, APPROVAL_REASON_MAX),
+      ...review,
       version,
       expiresAt,
       state: 'pending',
@@ -1559,6 +1596,13 @@ export class RealDshAdapter extends DshAdapter {
     if (decision !== 'approve' && decision !== 'reject') {
       throw new DefinitiveExecutionError('invalid_argument', 'approval decision invalid')
     }
+    // A remote Allow is not withheld when the review is incomplete or
+    // unavailable. DSH 0.2.2-rc.1 exposes only toolName/callId/reason before
+    // the approval waterfall, so requiring every projected fact would deny
+    // every real remote approve. The review remains advisory: `reviewAvailability`
+    // tells a client what it could display, while the v2 digest above still
+    // binds the projected facts and the version/state checks still gate one-shot
+    // settlement. Raw native arguments never reach this path or its errors.
     record.resolving = true
     try {
       if (!(await this.#sessionRunnable(record.sessionId))) {

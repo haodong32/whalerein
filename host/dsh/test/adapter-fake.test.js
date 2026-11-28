@@ -88,7 +88,10 @@ test('when a fake approval expires or is resolved, expiry and one-shot consumpti
   await adapter.open()
   const requested = []
   adapter.subscribeApprovals((event) => requested.push(event))
-  const approval = adapter.requestApproval({ sessionId: 's1', toolName: 'bash', callId: 'call-1', reason: 'because', ttlMs: 100 })
+  const approval = adapter.requestApproval({
+    sessionId: 's1', toolName: 'bash', callId: 'call-1', reason: 'because', ttlMs: 100,
+    arguments: { command: 'npm test' },
+  })
   assert.equal(requested[0].type, 'requested')
   assert.deepEqual([...approval.digest], [...approvalDigest(approval)])
   assert.equal((await adapter.getApproval(approval.approvalId)).state, 'pending')
@@ -126,7 +129,7 @@ test('when approval digest/version is wrong, session stopped, or resolution repe
   adapter.setRunning('s1', true)
   await adapter.simulateResolution(approval.approvalId, 'reject')
   assert.equal((await adapter.getApproval(approval.approvalId)).state, 'rejected')
-  const local = adapter.requestApproval({ sessionId: 's1' })
+  const local = adapter.requestApproval({ sessionId: 's1', arguments: { command: 'npm test' } })
   await Promise.all([
     adapter.resolveApproval(local.approvalId, 'approve', local.digest, local.version).then(() => 'won').catch((error) => error.code),
     adapter.resolveApproval(local.approvalId, 'reject', local.digest, local.version).then(() => 'won').catch((error) => error.code),
@@ -134,6 +137,99 @@ test('when approval digest/version is wrong, session stopped, or resolution repe
     assert.equal(results.filter((result) => result === 'won').length, 1)
     assert.equal(results.filter((result) => result === 'approval_already_resolved').length, 1)
   })
+})
+
+test('remote Allow is accepted for incomplete and unavailable reviews without leaking review facts', async () => {
+  const adapter = new FakeDshAdapter({ sessions: [{ sessionId: 's1', running: true }] })
+  await adapter.open()
+  // toolName alone establishes the action class but no call facts arrive, so
+  // the review is incomplete. This is the current real-DSH shape.
+  const incomplete = adapter.requestApproval({ sessionId: 's1', toolName: 'write', reason: 'no argument map' })
+  assert.equal(incomplete.reviewAvailability, 'incomplete')
+  const approved = await adapter.resolveApproval(
+    incomplete.approvalId, 'approve', incomplete.digest, incomplete.version,
+  )
+  assert.deepEqual(approved, { state: 'approved', decision: 'approve' })
+  // The decision result carries the outcome only; projected review facts stay
+  // on the approval surface instead of entering the resolution reply.
+  assert.deepEqual(Object.keys(approved), ['state', 'decision'])
+
+  const unavailable = adapter.requestApproval({ sessionId: 's1', toolName: 'acme_unknown_tool' })
+  assert.equal(unavailable.reviewAvailability, 'unavailable')
+  assert.equal(
+    (await adapter.resolveApproval(unavailable.approvalId, 'approve', unavailable.digest, unavailable.version)).state,
+    'approved',
+  )
+
+  // Reject stays available and settles the same incomplete review shape.
+  const rejectable = adapter.requestApproval({ sessionId: 's1', toolName: 'write' })
+  assert.equal(rejectable.reviewAvailability, 'incomplete')
+  assert.equal(
+    (await adapter.resolveApproval(rejectable.approvalId, 'reject', rejectable.digest, rejectable.version)).state,
+    'rejected',
+  )
+  await adapter.close()
+})
+
+test('a complete review approves once, and the availability flag stays digest-bound', async () => {
+  const adapter = new FakeDshAdapter({ sessions: [{ sessionId: 's1', running: true }] })
+  await adapter.open()
+  const complete = adapter.requestApproval({
+    sessionId: 's1',
+    toolName: 'write',
+    arguments: { path: '/repo/a.txt', content: 'one\ntwo' },
+  })
+  assert.equal(complete.reviewAvailability, 'complete')
+  assert.equal((await adapter.resolveApproval(complete.approvalId, 'approve', complete.digest, complete.version)).state, 'approved')
+  await assert.rejects(
+    adapter.resolveApproval(complete.approvalId, 'approve', complete.digest, complete.version),
+    (error) => error.code === 'approval_already_resolved',
+  )
+
+  // The review is advisory now, but the v2 digest still binds every projected
+  // fact, including the claimed availability.
+  const inconsistent = adapter.requestApproval({
+    sessionId: 's1',
+    toolName: 'write',
+    reviewAction: 'Write file',
+    reviewTarget: '',
+    reviewImpact: 'Whole file',
+    reviewAvailability: 'complete',
+  })
+  assert.equal(inconsistent.reviewAvailability, 'complete')
+  const changedAvailability = approvalDigest({ ...inconsistent, reviewAvailability: 'incomplete' })
+  await assert.rejects(
+    adapter.resolveApproval(inconsistent.approvalId, 'approve', changedAvailability, inconsistent.version),
+    (error) => error.code === 'approval_version_mismatch',
+  )
+  assert.equal((await adapter.getApproval(inconsistent.approvalId)).state, 'pending')
+  assert.equal(
+    (await adapter.resolveApproval(inconsistent.approvalId, 'approve', inconsistent.digest, inconsistent.version)).state,
+    'approved',
+  )
+  await adapter.close()
+})
+
+test('wrong digest and version still bind remote Allow', async () => {
+  const adapter = new FakeDshAdapter({ sessions: [{ sessionId: 's1', running: true }] })
+  await adapter.open()
+  const incomplete = adapter.requestApproval({ sessionId: 's1', toolName: 'write' })
+  assert.equal(incomplete.reviewAvailability, 'incomplete')
+  await assert.rejects(
+    adapter.resolveApproval(incomplete.approvalId, 'approve', new Uint8Array(32), incomplete.version),
+    (error) => error.code === 'approval_version_mismatch',
+  )
+  await assert.rejects(
+    adapter.resolveApproval(incomplete.approvalId, 'approve', incomplete.digest, incomplete.version + 1),
+    (error) => error.code === 'approval_version_mismatch',
+  )
+  assert.equal((await adapter.getApproval(incomplete.approvalId)).state, 'pending')
+  // The same incomplete review resolves once its exact guard is supplied.
+  assert.equal(
+    (await adapter.resolveApproval(incomplete.approvalId, 'approve', incomplete.digest, incomplete.version)).state,
+    'approved',
+  )
+  await adapter.close()
 })
 
 test('when crash, failure, or hang injection is configured, FakeDSH simulates that outcome', async () => {

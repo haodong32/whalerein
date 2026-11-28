@@ -28,5 +28,10 @@ export function topics(hostId) {
     deviceLive: (deviceId) => `whalerein/v1/h/${hostId}/d/${deviceId}/live`,
     deviceEvent: (deviceId) => `whalerein/v1/h/${hostId}/d/${deviceId}/event`,
     presence: `whalerein/v1/h/${hostId}/presence`,
+    // Private service-only self-status lane. Only Access publishes the request
+    // and only this Host subscribes to it; only this Host publishes the reply
+    // and only Access reads it. No Device ACL entry exists for either topic.
+    selfStatusRequest: `whalerein/v1/h/${hostId}/svc/self-status/request`,
+    selfStatusReply: `whalerein/v1/h/${hostId}/svc/self-status/reply`,
   }
 }

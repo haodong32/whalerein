@@ -52,7 +52,7 @@ func TestLegacyPairingConfirmationBindsStoredFinish(t *testing.T) {
 	if _, err := s.Pool().Exec(ctx, `UPDATE pairing_outcomes SET device_public_key=NULL,protocol_version=NULL,commit_binding_verified=false WHERE claim_id=$1`, op.ClaimID); err != nil {
 		t.Fatal(err)
 	}
-	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, now); err != nil || !confirmed {
+	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, "", now); err != nil || !confirmed {
 		t.Fatal("valid legacy Host confirmation could not bind original FINISH")
 	}
 	outcome, err := s.PairingOutcome(ctx, op.ClaimID, op.DeviceID)
@@ -150,7 +150,7 @@ func TestLegacyPairingConfirmationRejectsWrongDeviceKey(t *testing.T) {
 	if _, err := s.Pool().Exec(ctx, `UPDATE pairing_outcomes SET device_public_key=NULL,protocol_version=NULL,commit_binding_verified=false WHERE claim_id=$1`, op.ClaimID); err != nil {
 		t.Fatal(err)
 	}
-	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, now); err == nil || confirmed {
+	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, "", now); err == nil || confirmed {
 		t.Fatal("wrong legacy device key was confirmed")
 	}
 	outcome, err := s.PairingOutcome(ctx, op.ClaimID, op.DeviceID)
@@ -166,7 +166,7 @@ func TestPairingSynchronousExpiredAcknowledgementCannotConfirm(t *testing.T) {
 	if _, err := s.Pool().Exec(ctx, `UPDATE requests SET expires_at=$2 WHERE request_id=$1`, notice.RequestId, now.Add(-time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
-	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, now); err == nil || confirmed {
+	if confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, "", now); err == nil || confirmed {
 		t.Fatal("expired synchronous acknowledgement confirmed")
 	}
 	outcome, err := s.PairingOutcome(ctx, op.ClaimID, op.DeviceID)
@@ -188,7 +188,7 @@ func TestPairingAcknowledgementDeadlineBoundaries(t *testing.T) {
 				}
 				at := deadline.Add(delta)
 				if path == "direct" {
-					confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, at)
+					confirmed, err := s.ConfirmPairingHost(ctx, op.ClaimID, op.HostID, op.DeviceID, notice.RequestId, "", at)
 					if delta < 0 {
 						if err != nil || !confirmed {
 							t.Fatal("valid direct acknowledgement rejected")

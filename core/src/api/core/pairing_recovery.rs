@@ -310,10 +310,15 @@ impl Core {
             return Err(CoreError::Revoked);
         }
         if let Some(value) = marker.as_deref() {
-            if !matches!(
-                super::revoked_commands::confirmed_phase(value),
-                Some("saved" | "lost")
-            ) || self.config_store().load()?.is_some()
+            // A service denial retains trust and does not authorize cleanup;
+            // the user's explicit new pairing may proceed and clears the
+            // observation marker only after the new profile commits.
+            let service_denial = value.starts_with("pending:observe:");
+            if !service_denial
+                && (!matches!(
+                    super::revoked_commands::confirmed_phase(value),
+                    Some("saved" | "lost")
+                ) || self.config_store().load()?.is_some())
             {
                 return Err(CoreError::Revoked);
             }
@@ -513,20 +518,28 @@ impl Core {
                 "pairing recovery response mismatch".into(),
             ));
         }
+        if !crate::pairing::is_valid_host_grant_id(&reply.grant_id) {
+            return Err(crate::pairing::PairingError::InvalidGrantId.into());
+        }
+        self.record_pairing_confirmation_if_observed(&pending)?;
+        // An exact retry returns the same Host-owned grant identity; an empty
+        // answer from a legacy Host leaves the profile without one.
+        let mut persisted = pending.config;
+        let host_id = persisted.host_id.clone();
+        persisted.set_host_grant_id(&host_id, &reply.grant_id);
         let outcome = PairingOutcome {
             operation_id: Some(pending.finish.claim_id.clone()),
-            host_id: pending.config.host_id.clone(),
+            host_id: host_id.clone(),
             device_id: identity.device_id.clone(),
-            fingerprint: pending
-                .config
+            fingerprint: persisted
                 .host_fingerprint
                 .clone()
                 .ok_or_else(|| CoreError::Security("pending Host pin missing".into()))?,
-            access_url: pending.config.access_url.clone(),
+            access_url: persisted.access_url.clone(),
+            host_grant_id: persisted.host_grant_id_for(&host_id).map(str::to_owned),
         };
-        self.record_pairing_confirmation_if_observed(&pending)?;
         self.finish_pairing_config(
-            pending.config,
+            persisted,
             &pending.finish.device_token,
             pending.admission_marker.as_deref(),
             pending.admission_epoch.as_deref(),
@@ -553,41 +566,54 @@ impl Core {
         }
         let original_device_id = persisted.device_id.clone();
         let device_id = &original_device_id;
+        let mut pending_observation = None;
         if let Some(state) = super::revoked_commands::marker_in(_admission.directory())? {
             if super::revoked_commands::confirmed_phase(&state) == Some("conflict") {
                 return Err(CoreError::Unavailable(
                     "revocation cleanup requires manual inspection before pairing".into(),
                 ));
             }
-            if !state.starts_with("confirmed") || self.config_store().load()?.is_some() {
+            if state.starts_with("confirmed") {
+                if self.config_store().load()?.is_some() {
+                    return Err(CoreError::Unavailable(
+                        "authorization verification or cleanup must finish before pairing".into(),
+                    ));
+                }
+                // Finish any interrupted old cleanup before beginning a new grant.
+                self.clear_local_pairing_credentials(device_id, _admission.directory(), None)?;
+                if super::revoked_commands::confirmed_phase(&state) != Some("saved") {
+                    let warning = self.options.data_dir.join("revocation-retention-warning");
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.mode(0o600);
+                    }
+                    match options.open(warning) {
+                        Ok(file) => file.sync_all().map_err(|_| {
+                            CoreError::Internal("retention warning could not be saved".into())
+                        })?,
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(_) => {
+                            return Err(CoreError::Internal(
+                                "retention warning could not be saved".into(),
+                            ));
+                        }
+                    }
+                }
+                super::revoked_commands::remove_marker_in(_admission.directory())?;
+            } else if state.starts_with("pending:observe:") {
+                // A service denial retains local trust and authorizes no
+                // cleanup. The user's explicit new pairing supersedes the
+                // observation, which is cleared only after the new profile
+                // and credentials commit below.
+                pending_observation = Some(state);
+            } else {
                 return Err(CoreError::Unavailable(
                     "authorization verification or cleanup must finish before pairing".into(),
                 ));
             }
-            // Finish any interrupted old cleanup before beginning a new grant.
-            self.clear_local_pairing_credentials(device_id, _admission.directory(), None)?;
-            if super::revoked_commands::confirmed_phase(&state) != Some("saved") {
-                let warning = self.options.data_dir.join("revocation-retention-warning");
-                let mut options = std::fs::OpenOptions::new();
-                options.write(true).create_new(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.mode(0o600);
-                }
-                match options.open(warning) {
-                    Ok(file) => file.sync_all().map_err(|_| {
-                        CoreError::Internal("retention warning could not be saved".into())
-                    })?,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(_) => {
-                        return Err(CoreError::Internal(
-                            "retention warning could not be saved".into(),
-                        ));
-                    }
-                }
-            }
-            super::revoked_commands::remove_marker_in(_admission.directory())?;
         }
         let persisted = if let Some(mut current) = self.config_store().load()? {
             if current == persisted {
@@ -625,6 +651,12 @@ impl Core {
                         .host_fingerprints
                         .insert(persisted.host_id.clone(), pin);
                 }
+                // The Host-assigned grant identity is committed in the same
+                // atomic profile write as the pin. An empty answer from a
+                // legacy Host never clears a previously confirmed grant.
+                if let Some(grant) = persisted.host_grant_id.as_deref() {
+                    current.set_host_grant_id(&persisted.host_id, grant);
+                }
                 current
             }
         } else {
@@ -633,6 +665,11 @@ impl Core {
         load_or_create_cache_key(&self.options.secrets, device_id)?;
         crate::security::store_device_token(&self.options.secrets, device_id, token)?;
         self.config_store().save(&persisted)?;
+        // The new profile and credentials are durable; the superseded service
+        // observation no longer describes this enrollment.
+        if let Some(marker) = pending_observation.as_deref() {
+            super::revoked_commands::clear_owned_pending_in(_admission.directory(), marker)?;
+        }
         #[cfg(feature = "protocol-testing")]
         if let Some(path) = std::env::var_os("WHALEREIN_TEST_PAIR_COMMITTED_BARRIER") {
             let path = std::path::PathBuf::from(path);

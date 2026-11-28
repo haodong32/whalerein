@@ -5,7 +5,7 @@ pub mod mqtt;
 pub(crate) mod tls;
 pub(crate) mod transport;
 
-pub use http::{AccessClient, AccessError, AccessErrorKind};
+pub use http::{AccessClient, AccessError, AccessErrorKind, HostDirectoryPreview};
 pub use mqtt::{
     backoff_delay, DeliveryClass, DeviceMqttClient, MqttConnectionEvent, MqttSettings,
     PublisherSlot, QueryReply,

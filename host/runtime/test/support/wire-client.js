@@ -6,14 +6,11 @@ import { randomBytes } from 'node:crypto'
 import {
   NoiseXX,
   channelPrologue,
-  deriveChannelKeys,
   eventAad,
   fingerprint,
   generateKeypair,
-  open,
   pairingPrologue,
   requestAad,
-  seal,
 } from '../../src/security/noise.js'
 import { randomId, sha256Bytes } from '../../src/security/digest.js'
 
@@ -345,8 +342,12 @@ export class DeviceClient {
       channelId: this.channel.channelId,
       createdAt: envelope.created_at_unix_ms,
     })
-    const plaintext = open(this.channel.h2c, aad, envelope.nonce, envelope.ciphertext)
-    if (!plaintext) return
+    let plaintext
+    try {
+      plaintext = this.channel.cipher.open('h2c', aad, envelope.nonce, envelope.ciphertext)
+    } catch {
+      return
+    }
     const event = this.codec.decode('whalerein.v1.EventPayload', plaintext)
     this.#events.push(event)
     for (const waiter of this.#eventWaiters.splice(0)) waiter(event)
@@ -411,11 +412,14 @@ export class DeviceClient {
         devicePublicKey: this.identity.publicKey,
       })
       if (!authorized.authorized) throw new Error('pairing not authorized')
+      // The Host COMMIT acknowledgement names the exact grant. A Device binds
+      // its next channel to this value; an old Host leaves it empty.
+      this.grantId = authorized.grant_id ?? ''
     }
     return result
   }
 
-  async connectChannel({ channelId = randomBytes(8).toString('hex') } = {}) {
+  async connectChannel({ channelId = randomBytes(8).toString('hex'), grantId = this.grantId ?? '' } = {}) {
     const prologue = channelPrologue({ hostId: this.hostId, deviceId: this.deviceId, channelId })
     const noise = new NoiseXX({ initiator: true, staticKeypair: this.identity, prologue })
     const hello = this.codec.encode('whalerein.v1.ChannelHello', {
@@ -424,16 +428,18 @@ export class DeviceClient {
       protocol_version: PROTOCOL_VERSION,
       capabilities: { capabilities: ['sessions', 'events', 'messages', 'approvals', 'interrupt', 'sync', 'snapshot'], protocol_version: PROTOCOL_VERSION },
       client_nonce: randomId(8),
+      ...(grantId ? { grant_id: grantId } : {}),
     })
     const msg1 = noise.writeMessage(hello)
     const msg2 = await this.access.handshake({ channelId, deviceId: this.deviceId, message: msg1 })
     const readyPayload = noise.readMessage(msg2)
     const ready = this.codec.decode('whalerein.v1.ChannelReady', readyPayload)
     if (ready.device_id !== this.deviceId || ready.host_id !== this.hostId) throw new Error('channel identity mismatch')
+    if (grantId && ready.grant_id !== grantId) throw new Error('channel grant mismatch')
+    this.lastReady = ready
     const msg3 = noise.writeMessage(new Uint8Array(0))
     await this.access.handshake({ channelId, deviceId: this.deviceId, message: msg3 })
-    const derived = deriveChannelKeys(noise.handshakeHash, prologue)
-    this.channel = { channelId, c2h: derived.c2h, h2c: derived.h2c }
+    this.channel = { channelId, cipher: noise.takeChannelCipher() }
     this.#events = []
     return this.channel
   }
@@ -442,14 +448,19 @@ export class DeviceClient {
     return this.#encrypted('REQUEST_KIND_QUERY', payload, {})
   }
 
-  async command(payload, { commandId = randomId() } = {}) {
-    return this.#encrypted('REQUEST_KIND_COMMAND', payload, { commandId })
+  /**
+   * Send one command. `expiresAt` lets a retry preserve the original absolute
+   * deadline, so the Host treats it as the same immutable intent and replays
+   * its bound receipt instead of executing again.
+   */
+  async command(payload, { commandId = randomId(), expiresAt = null } = {}) {
+    return this.#encrypted('REQUEST_KIND_COMMAND', payload, { commandId, expiresAt })
   }
 
-  async #encrypted(kind, payload, { commandId = '' }) {
+  async #encrypted(kind, payload, { commandId = '', expiresAt = null } = {}) {
     if (!this.channel) throw new Error('channel not established')
     const requestId = randomId()
-    const expiresAt = this.now() + 60_000
+    const deadline = Number.isSafeInteger(expiresAt) ? expiresAt : this.now() + 60_000
     const plaintext = this.codec.encode('whalerein.v1.RequestPayload', payload)
     const aad = requestAad({
       requestId,
@@ -457,9 +468,9 @@ export class DeviceClient {
       deviceId: this.deviceId,
       kind,
       commandId,
-      expiresAt,
+      expiresAt: deadline,
     })
-    const sealed = seal(this.channel.c2h, aad, plaintext)
+    const sealed = this.channel.cipher.seal('c2h', aad, plaintext)
     const frame = this.codec.encode('whalerein.v1.EncryptedFrame', {
       channel_id: this.channel.channelId,
       nonce: sealed.nonce,
@@ -472,7 +483,7 @@ export class DeviceClient {
       kind,
       command_id: commandId,
       payload_digest: commandId ? sha256Bytes(frame) : new Uint8Array(0),
-      expires_at_unix_ms: expiresAt,
+      expires_at_unix_ms: deadline,
       trace_id: randomId(8),
       protocol_version: PROTOCOL_VERSION,
       channel_id: this.channel.channelId,
@@ -500,8 +511,12 @@ export class DeviceClient {
         expiresAt: request.expires_at_unix_ms,
       })
       const frame = this.codec.decode('whalerein.v1.EncryptedFrame', terminal.result_body)
-      const plaintext = open(this.channel.h2c, aad, frame.nonce, frame.ciphertext)
-      if (plaintext) response = this.codec.decode('whalerein.v1.ResponsePayload', plaintext)
+      try {
+        const plaintext = this.channel.cipher.open('h2c', aad, frame.nonce, frame.ciphertext)
+        response = this.codec.decode('whalerein.v1.ResponsePayload', plaintext)
+      } catch {
+        response = null
+      }
     }
     return {
       request,

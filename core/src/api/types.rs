@@ -174,6 +174,31 @@ pub struct ApprovalInfo {
     pub expires_at_unix_ms: i64,
     pub state: String,
     pub decision: String,
+    /// Bounded, credential-masked review fact projected by the Host.
+    ///
+    /// Empty means the Host supplied no such fact. Clients render the value
+    /// as-is and never reconstruct it from the tool name, reason or raw
+    /// arguments.
+    #[serde(default)]
+    pub review_action: String,
+    /// Bounded, credential-masked review fact projected by the Host.
+    #[serde(default)]
+    pub review_target: String,
+    /// Bounded, credential-masked review fact projected by the Host.
+    #[serde(default)]
+    pub review_impact: String,
+    /// Lowercase review availability token: `complete`, `incomplete` or
+    /// `unavailable`.
+    ///
+    /// An absent, unknown or unspecified wire value maps to `unavailable` so
+    /// a client fails closed instead of presenting the review as complete.
+    #[serde(default = "unavailable_review_availability")]
+    pub review_availability: String,
+}
+
+/// Safe default for a review availability this build cannot establish.
+pub(crate) fn unavailable_review_availability() -> String {
+    "unavailable".to_owned()
 }
 
 impl From<whalerein_proto::Approval> for ApprovalInfo {
@@ -193,6 +218,13 @@ impl From<whalerein_proto::Approval> for ApprovalInfo {
             decision: enum_label::<whalerein_proto::ApprovalDecision>(value.decision, |decision| {
                 decision.as_str_name()
             }),
+            review_action: value.review_action,
+            review_target: value.review_target,
+            review_impact: value.review_impact,
+            review_availability: crate::conversation::review_availability_token(
+                value.review_availability,
+            )
+            .to_owned(),
         }
     }
 }
@@ -606,6 +638,93 @@ pub struct DoctorReport {
     pub commands: CommandDiagnostics,
 }
 
+/// Local-only association between one report label and a profile-scoped Host.
+///
+/// `host_ref` is decoration metadata used by an authorized client to resolve a
+/// directory name and OS family for display. It is never serialized into the
+/// captured `bytes`, `text` or `summary` and must not be logged, exported or
+/// shared. The report itself keeps only the anonymous `label`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DiagnosticsHost {
+    /// Anonymous ordinal label, matching the report's `hosts` order.
+    pub label: String,
+    /// Local profile-scoped Host identity. Never leaves the client process in
+    /// a diagnostic document.
+    pub host_ref: String,
+    /// In-process connection state captured for this row.
+    pub connection_state: String,
+}
+
+impl std::fmt::Debug for DiagnosticsHost {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DiagnosticsHost")
+            .field("label", &self.label)
+            .field("host_ref", &"<local-only>")
+            .field("connection_state", &self.connection_state)
+            .finish()
+    }
+}
+
+/// One immutable redacted diagnostic capture.
+///
+/// Core builds the document once from allowlisted facts. The preview text, a
+/// saved file and a platform share action all consume the same UTF-8 `bytes`;
+/// `text` is that exact document decoded, never a separately rendered
+/// projection. Only an explicit refresh replaces the capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticsSnapshot {
+    /// Version of the captured document.
+    pub schema: String,
+    /// Safe opaque correlation ID for this capture.
+    pub capture_id: String,
+    /// Unix milliseconds at which the capture was taken.
+    pub capture_time_unix_ms: i64,
+    /// Exact UTF-8 report bytes shared by preview, save and share.
+    pub bytes: Vec<u8>,
+    /// The full report view, decoded from `bytes` without rewriting them.
+    pub text: String,
+    /// Bounded human summary rendered from `bytes`.
+    pub summary: String,
+    /// Fields the captured report promises to redact.
+    pub redaction_fields: Vec<String>,
+    /// Stable code of the most recent retained local failure, when available.
+    pub last_failure_code: Option<String>,
+    /// Local-only label-to-Host mapping. Excluded from the captured document
+    /// and from any serialization of this type so it cannot leak into a share.
+    #[serde(default, skip)]
+    pub hosts: Vec<DiagnosticsHost>,
+}
+
+impl DiagnosticsSnapshot {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn full_text(&self) -> &str {
+        &self.text
+    }
+}
+
+/// State of a diagnostic export destination at inspection time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticExportTarget {
+    /// Nothing exists at the path; exclusive creation is safe.
+    New,
+    /// A regular file exists; replacement requires affirmative consent.
+    ExistingRegularFile,
+}
+
+/// How a captured snapshot may be written to a destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticExportMode {
+    /// Exclusive, no-clobber creation. A concurrent file survives.
+    CreateNew,
+    /// Staged replacement of an explicitly authorized regular file.
+    ReplaceExisting,
+}
+
 /// Manifest returned before/after a diagnostic export.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportManifest {
@@ -614,15 +733,30 @@ pub struct ExportManifest {
     pub fields: Vec<String>,
     pub redactions: Vec<String>,
     pub bytes: u64,
+    /// Correlation ID of the capture whose bytes were written.
+    #[serde(default)]
+    pub capture_id: String,
+    /// Capture time of the bytes that were written.
+    #[serde(default)]
+    pub capture_time_unix_ms: i64,
 }
 
 impl ExportManifest {
     pub fn fields() -> Vec<String> {
         vec![
-            "address".into(),
-            "commands.non_terminal".into(),
-            "commands.unknown".into(),
-            "last_failure".into(),
+            "schema".into(),
+            "core_version".into(),
+            "protocol_version".into(),
+            "captured_at_unix_ms".into(),
+            "report.address".into(),
+            "report.commands.non_terminal".into(),
+            "report.commands.unknown".into(),
+            "cache_warning".into(),
+            "hosts.label".into(),
+            "hosts.connection_state".into(),
+            "metrics".into(),
+            "last_failure.code".into(),
+            "last_failure.events".into(),
         ]
     }
 
@@ -630,22 +764,32 @@ impl ExportManifest {
         vec![
             "message content".into(),
             "tool arguments".into(),
+            "draft text".into(),
             "private keys".into(),
             "device tokens".into(),
             "pairing tokens".into(),
             "full ciphertext".into(),
             "host and device ids".into(),
+            "directory names and local host identities".into(),
         ]
     }
 }
 
 /// Pairing prompt shown to the user before msg3 is sent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `display_name` and `os_family` are the advisory pre-pair directory preview.
+/// They are display-only: never authority, a pin, a prompt decision or stored
+/// state, and they default to empty when Access cannot provide them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingPrompt {
     pub host_id: String,
     pub access_url: String,
     pub fingerprint: String,
     pub fingerprint_display: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub os_family: String,
 }
 
 /// Whether unconfirmed command identities could be durably recorded.
@@ -681,6 +825,11 @@ pub struct PairingOutcome {
     pub device_id: String,
     pub fingerprint: String,
     pub access_url: String,
+    /// Host-assigned opaque grant identity committed by this pairing. Absent
+    /// for a legacy Host; it is never derived from a label or fingerprint and
+    /// is not rendered in human output or diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_grant_id: Option<String>,
 }
 
 mod hex_bytes {
@@ -699,6 +848,27 @@ mod hex_bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pairing_prompt_defaults_absent_preview_fields() {
+        let prompt: PairingPrompt = serde_json::from_str(
+            r#"{"host_id":"h","access_url":"https://access.test","fingerprint":"f","fingerprint_display":"F"}"#,
+        )
+        .unwrap();
+        assert_eq!(prompt.display_name, "");
+        assert_eq!(prompt.os_family, "");
+        let with_preview: PairingPrompt = serde_json::from_value(serde_json::json!({
+            "host_id": "h",
+            "access_url": "https://access.test",
+            "fingerprint": "f",
+            "fingerprint_display": "F",
+            "display_name": "Studio",
+            "os_family": "macos",
+        }))
+        .unwrap();
+        assert_eq!(with_preview.display_name, "Studio");
+        assert_eq!(with_preview.os_family, "macos");
+    }
 
     #[test]
     fn online_status_names_are_stable() {
@@ -741,15 +911,25 @@ mod tests {
         assert_eq!(
             fields,
             vec![
-                "address".to_owned(),
-                "commands.non_terminal".to_owned(),
-                "commands.unknown".to_owned(),
-                "last_failure".to_owned(),
+                "schema".to_owned(),
+                "core_version".to_owned(),
+                "protocol_version".to_owned(),
+                "captured_at_unix_ms".to_owned(),
+                "report.address".to_owned(),
+                "report.commands.non_terminal".to_owned(),
+                "report.commands.unknown".to_owned(),
+                "cache_warning".to_owned(),
+                "hosts.label".to_owned(),
+                "hosts.connection_state".to_owned(),
+                "metrics".to_owned(),
+                "last_failure.code".to_owned(),
+                "last_failure.events".to_owned(),
             ]
         );
         let redactions = ExportManifest::redactions();
         assert!(redactions.contains(&"private keys".into()));
         assert!(redactions.contains(&"full ciphertext".into()));
+        assert!(redactions.contains(&"directory names and local host identities".into()));
     }
 
     #[test]
@@ -806,6 +986,106 @@ mod tests {
         }
         .into();
         assert_eq!(catalog.failures[0].code, "UNKNOWN_ENUM_96");
+    }
+
+    fn reviewed_approval(
+        availability: whalerein_proto::ApprovalReviewAvailability,
+    ) -> ApprovalInfo {
+        whalerein_proto::Approval {
+            approval_id: "approval-1".into(),
+            session_id: "session-1".into(),
+            tool_name: "bash".into(),
+            call_id: "call-1".into(),
+            reason: "fixture".into(),
+            digest: vec![0xab; 32],
+            version: 3,
+            expires_at_unix_ms: 9,
+            state: whalerein_proto::ApprovalState::Pending as i32,
+            decision: whalerein_proto::ApprovalDecision::Unspecified as i32,
+            review_action: "Change [REDACTED] credential scope".into(),
+            review_target: "Sources/[REDACTED].swift".into(),
+            review_impact: "Replaces the selected file content.".into(),
+            review_availability: availability as i32,
+        }
+        .into()
+    }
+
+    #[test]
+    fn approval_review_projects_masked_facts_and_fails_closed() {
+        use whalerein_proto::ApprovalReviewAvailability as Availability;
+
+        let complete = reviewed_approval(Availability::ApprovalReviewComplete);
+        assert_eq!(complete.review_action, "Change [REDACTED] credential scope");
+        assert_eq!(complete.review_target, "Sources/[REDACTED].swift");
+        assert_eq!(
+            complete.review_impact,
+            "Replaces the selected file content."
+        );
+        assert_eq!(complete.review_availability, "complete");
+
+        assert_eq!(
+            reviewed_approval(Availability::ApprovalReviewIncomplete).review_availability,
+            "incomplete"
+        );
+        assert_eq!(
+            reviewed_approval(Availability::ApprovalReviewUnavailable).review_availability,
+            "unavailable"
+        );
+        // Unspecified and unknown values never claim completeness.
+        assert_eq!(
+            reviewed_approval(Availability::ApprovalReviewUnspecified).review_availability,
+            "unavailable"
+        );
+        let unknown: ApprovalInfo = whalerein_proto::Approval {
+            review_availability: 99,
+            review_action: "Change [REDACTED] credential scope".into(),
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(unknown.review_availability, "unavailable");
+        assert_eq!(unknown.review_action, "Change [REDACTED] credential scope");
+
+        // The default projection preserves empty facts instead of inventing
+        // them from the tool name or reason.
+        let absent: ApprovalInfo = whalerein_proto::Approval::default().into();
+        assert!(absent.review_action.is_empty());
+        assert!(absent.review_target.is_empty());
+        assert!(absent.review_impact.is_empty());
+        assert_eq!(absent.review_availability, "unavailable");
+    }
+
+    #[test]
+    fn approval_review_serde_defaults_keep_older_records_readable() {
+        // An ApprovalInfo serialized before the review fields existed still
+        // decodes, and a missing availability fails closed as `unavailable`.
+        let old = r#"{
+            "approval_id":"a",
+            "session_id":"s",
+            "tool_name":"bash",
+            "call_id":"c",
+            "reason":"why",
+            "digest":"abab",
+            "version":3,
+            "expires_at_unix_ms":9,
+            "state":"APPROVAL_STATE_PENDING",
+            "decision":"APPROVAL_DECISION_UNSPECIFIED"
+        }"#;
+        let info: ApprovalInfo = serde_json::from_str(old).unwrap();
+        assert!(info.review_action.is_empty());
+        assert!(info.review_target.is_empty());
+        assert!(info.review_impact.is_empty());
+        assert_eq!(info.review_availability, "unavailable");
+
+        let complete =
+            reviewed_approval(whalerein_proto::ApprovalReviewAvailability::ApprovalReviewComplete);
+        let value = serde_json::to_value(&complete).unwrap();
+        assert_eq!(value["review_action"], "Change [REDACTED] credential scope");
+        assert_eq!(value["review_target"], "Sources/[REDACTED].swift");
+        assert_eq!(
+            value["review_impact"],
+            "Replaces the selected file content."
+        );
+        assert_eq!(value["review_availability"], "complete");
     }
 
     #[test]

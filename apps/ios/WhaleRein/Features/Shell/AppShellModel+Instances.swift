@@ -17,8 +17,10 @@ extension AppShellModel {
         isSwitchingInstance = true
         defer { isSwitchingInstance = false }
 
-        // Persist the outgoing draft before leaving its instance.
-        await conversation?.suspendForBackground()
+        // Persist the outgoing draft before leaving its instance. The watch is
+        // not suspended here: a failed switch keeps this conversation live, and
+        // a successful one closes it below.
+        await conversation?.flushDraftForInstanceSwitch()
         let previousInstance = activeInstance
         let previousService = service
         let previousPreferences = preferences

@@ -558,6 +558,32 @@ pub struct Approval {
     pub expires_at_unix_ms: i64,
     pub state: ApprovalState,
     pub decision: ApprovalDecision,
+    /// Bounded, credential-masked review fact projected by the Host.
+    ///
+    /// Empty means the Host supplied no such fact; consumers render the value
+    /// as-is and never reconstruct it from the tool name, reason or raw
+    /// arguments.
+    pub review_action: String,
+    /// Bounded, credential-masked review fact projected by the Host.
+    pub review_target: String,
+    /// Bounded, credential-masked review fact projected by the Host.
+    pub review_impact: String,
+    /// Lowercase review availability token: `complete`, `incomplete` or
+    /// `unavailable`. Anything this build cannot establish is `unavailable`.
+    pub review_availability: String,
+}
+
+/// Map the wire review availability to its canonical lowercase client token.
+///
+/// An unspecified or unknown value never claims completeness. Both map to
+/// `unavailable` so a client hides review facts and withholds Allow.
+pub(crate) fn review_availability_token(value: i32) -> &'static str {
+    use whalerein_proto::ApprovalReviewAvailability as Proto;
+    match Proto::try_from(value) {
+        Ok(Proto::ApprovalReviewComplete) => "complete",
+        Ok(Proto::ApprovalReviewIncomplete) => "incomplete",
+        _ => "unavailable",
+    }
 }
 
 /// Normalized watch state for one session.
@@ -734,6 +760,10 @@ impl From<whalerein_proto::Approval> for Approval {
             expires_at_unix_ms: value.expires_at_unix_ms,
             state: ApprovalState::try_from(value.state).unwrap_or_default(),
             decision: ApprovalDecision::try_from(value.decision).unwrap_or_default(),
+            review_action: value.review_action,
+            review_target: value.review_target,
+            review_impact: value.review_impact,
+            review_availability: review_availability_token(value.review_availability).to_owned(),
         }
     }
 }
@@ -1386,6 +1416,41 @@ mod tests {
             }),
             origin: None,
         }
+    }
+
+    #[test]
+    fn wire_approval_review_facts_reach_the_conversation_projection() {
+        use whalerein_proto::ApprovalReviewAvailability as Availability;
+
+        let complete: Approval = whalerein_proto::Approval {
+            approval_id: "a".into(),
+            review_action: "Change [REDACTED] credential scope".into(),
+            review_target: "Sources/[REDACTED].swift".into(),
+            review_impact: "Replaces the selected file content.".into(),
+            review_availability: Availability::ApprovalReviewComplete as i32,
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(complete.review_action, "Change [REDACTED] credential scope");
+        assert_eq!(complete.review_target, "Sources/[REDACTED].swift");
+        assert_eq!(
+            complete.review_impact,
+            "Replaces the selected file content."
+        );
+        assert_eq!(complete.review_availability, "complete");
+
+        let absent: Approval = whalerein_proto::Approval::default().into();
+        assert!(absent.review_action.is_empty());
+        assert!(absent.review_target.is_empty());
+        assert!(absent.review_impact.is_empty());
+        assert_eq!(absent.review_availability, "unavailable");
+
+        let unknown: Approval = whalerein_proto::Approval {
+            review_availability: 99,
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(unknown.review_availability, "unavailable");
     }
 
     #[test]

@@ -8,7 +8,6 @@
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
-use hkdf::Hkdf;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use snow::params::NoiseParams;
@@ -30,12 +29,15 @@ fn bytes(fixture: &Value, name: &str) -> Result<Vec<u8>, String> {
 fn main() -> ExitCode {
     match run() {
         Ok(checks) => {
-            println!("{}", serde_json::json!({
-                "ok": true,
-                "checks": checks,
-                "peer": "rust-snow",
-                "description": "Rust Noise XX transcript matches the fixed fixture",
-            }));
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "checks": checks,
+                    "peer": "rust-snow",
+                    "description": "Rust Noise XX transcript matches the fixed fixture",
+                })
+            );
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -50,7 +52,8 @@ fn run() -> Result<Vec<String>, String> {
         .nth(1)
         .unwrap_or_else(|| "../../tests/fixtures/noise/xx-transcript.json".to_string());
     let raw = std::fs::read_to_string(&path).map_err(|err| format!("read {path}: {err}"))?;
-    let fixture: Value = serde_json::from_str(&raw).map_err(|err| format!("parse fixture: {err}"))?;
+    let fixture: Value =
+        serde_json::from_str(&raw).map_err(|err| format!("parse fixture: {err}"))?;
 
     let protocol = field(&fixture, "protocol")?;
     if protocol != PROTOCOL {
@@ -129,7 +132,10 @@ fn run() -> Result<Vec<String>, String> {
     }
     checks.push("initiator transcript".to_string());
 
-    let handshake_hash = initiator.get_handshake_hash();
+    let handshake_hash: [u8; 32] = initiator
+        .get_handshake_hash()
+        .try_into()
+        .map_err(|_| "handshake hash is not 32 bytes")?;
     let expected_hash = bytes(&fixture, "handshake_hash")?;
     if handshake_hash != expected_hash.as_slice() {
         return Err(format!(
@@ -163,22 +169,29 @@ fn run() -> Result<Vec<String>, String> {
     }
     checks.push("fingerprint".to_string());
 
-    let hk = Hkdf::<Sha256>::new(Some(prologue), handshake_hash);
-    let mut okm = [0u8; 64];
-    hk.expand(b"whalerein/v1/channel-keys", &mut okm)
-        .map_err(|err| format!("hkdf expand: {err}"))?;
-    let (c2h, h2c) = okm.split_at(32);
-    if hex::encode(c2h) != field(&fixture, "c2h")? {
+    // Application keys are the secret Noise Split outputs, never a function
+    // of the observable transcript hash.
+    let split = initiator.dangerously_get_raw_split();
+    if split != responder.dangerously_get_raw_split() {
+        return Err("initiator and responder Split keys differ".into());
+    }
+    if hex::encode(split.0) != field(&fixture, "c2h")? {
         return Err("c2h differs".into());
     }
-    if hex::encode(h2c) != field(&fixture, "h2c")? {
+    if hex::encode(split.1) != field(&fixture, "h2c")? {
         return Err("h2c differs".into());
     }
-    checks.push("channel keys".to_string());
+    let mut split_hasher = Sha256::new();
+    split_hasher.update(split.0);
+    split_hasher.update(split.1);
+    if hex::encode(split_hasher.finalize()) != field(&fixture, "split_fingerprint")? {
+        return Err("split fingerprint differs".into());
+    }
+    checks.push("split keys".to_string());
 
     let mut channel_hasher = Sha256::new();
     channel_hasher.update(handshake_hash);
-    channel_hasher.update(b"whalerein/v1/channel-id");
+    channel_hasher.update(b"whalerein/v2/channel-id-fixture");
     let channel_id = hex::encode(&channel_hasher.finalize()[..16]);
     if channel_id != field(&fixture, "channel_id")? {
         return Err(format!("channel id differs: {channel_id}"));
@@ -187,8 +200,19 @@ fn run() -> Result<Vec<String>, String> {
 
     let aad = bytes(&fixture, "aad")?;
     let nonce = bytes(&fixture, "nonce")?;
+    if nonce.len() != 12 {
+        return Err("nonce must be 12 bytes".into());
+    }
+    if nonce[..4] != [0u8; 4] {
+        return Err("record nonce must start with four zero bytes".into());
+    }
+    let counter = u64::from_be_bytes(nonce[4..].try_into().map_err(|_| "nonce counter")?);
+    if counter != 0 {
+        return Err(format!("first record counter must be 0, got {counter}"));
+    }
     let plaintext = field(&fixture, "plaintext")?.as_bytes();
-    let cipher = ChaCha20Poly1305::new_from_slice(c2h).map_err(|err| format!("cipher: {err}"))?;
+    let cipher =
+        ChaCha20Poly1305::new_from_slice(&split.0).map_err(|err| format!("cipher: {err}"))?;
     let sealed = cipher
         .encrypt(
             Nonce::from_slice(&nonce),

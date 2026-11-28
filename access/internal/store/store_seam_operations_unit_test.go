@@ -413,7 +413,7 @@ func TestTransactionWrappersFailClosedWhenDatabaseCannotBegin(t *testing.T) {
 	if outcome, err := s.PairingOutcome(context.Background(), "claim", "device"); outcome.Active || !errors.Is(err, errStoreUnit) {
 		t.Fatalf("outcome=%+v err=%v", outcome, err)
 	}
-	if confirmed, err := s.ConfirmPairingHost(context.Background(), "claim", "host", "device", "request", time.Time{}); confirmed || !errors.Is(err, errStoreUnit) {
+	if confirmed, err := s.ConfirmPairingHost(context.Background(), "claim", "host", "device", "request", "", time.Time{}); confirmed || !errors.Is(err, errStoreUnit) {
 		t.Fatalf("confirmed=%v err=%v", confirmed, err)
 	}
 	if err := s.CreatePairedDevice(context.Background(), "host", "device", "fingerprint", []byte{1}, time.Time{}); !errors.Is(err, errStoreUnit) {

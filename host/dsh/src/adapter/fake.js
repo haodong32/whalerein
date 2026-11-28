@@ -14,6 +14,12 @@ import {
   normalizeEvent,
   normalizeSummary,
 } from './base.js'
+import {
+  boundReviewValue,
+  describeApprovalRequest,
+  normalizeReviewAvailability,
+  reviewAvailabilityFor,
+} from './review.js'
 
 export class FakeDshAdapter extends DshAdapter {
   #sessions = new Map()
@@ -665,6 +671,10 @@ export class FakeDshAdapter extends DshAdapter {
           sessionId,
           toolName: 'bash',
           reason: 'deterministic FakeDSH approval',
+          // The fake models a native approval that carries call facts, so the
+          // remote approve path exercises a complete review. Tests that need
+          // the incomplete fixture omit arguments explicitly.
+          arguments: { command: 'npm test' },
           ttlMs: this.behavior.approvalTtlMs,
         })
       }
@@ -755,6 +765,11 @@ export class FakeDshAdapter extends DshAdapter {
     ttlMs = this.defaultApprovalTtlMs,
     version = null,
     approvalId = randomId(),
+    arguments: toolArguments = undefined,
+    reviewAction = undefined,
+    reviewTarget = undefined,
+    reviewImpact = undefined,
+    reviewAvailability = undefined,
   } = {}) {
     this.#check('requestApproval')
     this.#session(sessionId)
@@ -764,17 +779,39 @@ export class FakeDshAdapter extends DshAdapter {
     const toolNameValue = boundedApprovalText(toolName)
     const callIdValue = boundedApprovalText(callId)
     const reasonValue = boundedApprovalText(reason, APPROVAL_REASON_MAX)
+    // Fixtures can supply either a native-shaped argument map or explicit
+    // review facts. Both go through the same masking/bounding helper.
+    const derived = describeApprovalRequest({
+      toolName: toolNameValue,
+      callId: callIdValue,
+      reason: reasonValue,
+      arguments: toolArguments,
+    })
+    const action = typeof reviewAction === 'string' ? boundReviewValue(reviewAction) : derived.reviewAction
+    const target = typeof reviewTarget === 'string' ? boundReviewValue(reviewTarget) : derived.reviewTarget
+    const impact = typeof reviewImpact === 'string' ? boundReviewValue(reviewImpact) : derived.reviewImpact
+    const availability = reviewAvailability === undefined
+      ? reviewAvailabilityFor(action, target, impact)
+      : normalizeReviewAvailability(reviewAvailability)
     const approval = {
       approvalId,
       sessionId,
       toolName: toolNameValue,
       callId: callIdValue,
       reason: reasonValue,
+      reviewAction: action,
+      reviewTarget: target,
+      reviewImpact: impact,
+      reviewAvailability: availability,
       version: approvalVersion,
       expiresAt,
       state: 'pending',
       decision: 'unspecified',
-      digest: approvalDigest({ approvalId, sessionId, toolName: toolNameValue, callId: callIdValue, reason: reasonValue, version: approvalVersion, expiresAt }),
+      digest: approvalDigest({
+        approvalId, sessionId, toolName: toolNameValue, callId: callIdValue, reason: reasonValue,
+        reviewAction: action, reviewTarget: target, reviewImpact: impact, reviewAvailability: availability,
+        version: approvalVersion, expiresAt,
+      }),
       createdAt: this.now(),
     }
     this.#approvals.set(approvalId, approval)
@@ -826,6 +863,10 @@ export class FakeDshAdapter extends DshAdapter {
     if (decision !== 'approve' && decision !== 'reject') {
       throw new DefinitiveExecutionError('invalid_argument', 'approval decision invalid')
     }
+    // A remote Allow is not withheld when the review is incomplete or
+    // unavailable; the projected review is advisory and the v2 digest still
+    // binds it. `reject` is always allowed, and a denial leaves the approval
+    // pending. An accepted decision is applied atomically exactly once.
     return applyAction(() => {
       approval.state = decision === 'approve' ? 'approved' : 'rejected'
       approval.decision = decision

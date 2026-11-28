@@ -269,6 +269,9 @@ pub struct PairingPromptView {
     pub access_url: String,
     pub fingerprint: String,
     pub fingerprint_display: String,
+    /// Advisory pre-pair directory preview; empty when Access did not answer.
+    pub display_name: String,
+    pub os_family: String,
 }
 
 impl From<PairingPrompt> for PairingPromptView {
@@ -278,6 +281,8 @@ impl From<PairingPrompt> for PairingPromptView {
             access_url: value.access_url,
             fingerprint: value.fingerprint,
             fingerprint_display: value.fingerprint_display,
+            display_name: value.display_name,
+            os_family: value.os_family,
         }
     }
 }
@@ -298,6 +303,17 @@ pub struct ApprovalView {
     pub expires_at_unix_ms: i64,
     pub digest_hex: String,
     pub state: String,
+    /// Host-projected, bounded and credential-masked review action.
+    ///
+    /// Empty means the Host supplied no fact; the client must not infer one.
+    pub review_action: String,
+    /// Host-projected, bounded and credential-masked review target.
+    pub review_target: String,
+    /// Host-projected, bounded and credential-masked review impact.
+    pub review_impact: String,
+    /// Lowercase review availability: `complete`, `incomplete` or
+    /// `unavailable`. Unknown or absent values fail closed as `unavailable`.
+    pub review_availability: String,
 }
 
 impl From<ApprovalInfo> for ApprovalView {
@@ -312,7 +328,20 @@ impl From<ApprovalInfo> for ApprovalView {
             expires_at_unix_ms: value.expires_at_unix_ms,
             digest_hex: hex::encode(value.digest),
             state: normalize_approval_state(&value.state),
+            review_action: value.review_action,
+            review_target: value.review_target,
+            review_impact: value.review_impact,
+            review_availability: normalize_review_availability(&value.review_availability),
         }
+    }
+}
+
+/// Normalize one review availability token without inventing completeness.
+fn normalize_review_availability(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "complete" => "complete".into(),
+        "incomplete" => "incomplete".into(),
+        _ => "unavailable".into(),
     }
 }
 
@@ -998,13 +1027,70 @@ impl From<whalerein_core::api::ClientStatus> for ClientStatusView {
 /// Redacted diagnostics shown before/after an explicit share.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct DiagnosticsReportView {
-    /// Redacted JSON document. It never contains content, drafts, tool
-    /// arguments, credentials, tokens, private keys or full invitation URIs.
+    /// The captured document decoded without rewriting it. It never contains
+    /// content, drafts, tool arguments, credentials, tokens, private keys or
+    /// full invitation URIs.
     pub json: String,
     /// Fields the report promises to redact.
     pub redaction_fields: Vec<String>,
     /// Stable code of the most recent local failure, when one is retained.
     pub last_failure_code: Option<String>,
+    pub app_version: String,
+    pub core_version: String,
+}
+
+/// Local-only association between a diagnostic report label and a Host.
+///
+/// `hostRef` is decoration metadata for an authorized directory lookup. It is
+/// never part of `bytes`, `text` or `summary` and must not be logged, exported
+/// or shared. Persist it only in memory for the diagnostics screen.
+#[derive(Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DiagnosticsHostView {
+    /// Anonymous ordinal label, matching the report's `hosts` order.
+    pub label: String,
+    /// Local profile-scoped Host identity used only to resolve a display name.
+    pub host_ref: String,
+    /// In-process connection state captured for this row.
+    pub connection_state: String,
+}
+
+impl std::fmt::Debug for DiagnosticsHostView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DiagnosticsHostView")
+            .field("label", &self.label)
+            .field("host_ref", &"<local-only>")
+            .field("connection_state", &self.connection_state)
+            .finish()
+    }
+}
+
+/// One immutable redacted diagnostic capture.
+///
+/// `bytes` is authoritative. Every preview, saved file and share destination
+/// must consume `bytes` (or `text`, which is exactly those bytes decoded), never
+/// a separately rendered report. A new capture exists only after an explicit
+/// refresh.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DiagnosticsSnapshotView {
+    /// Version of the captured document.
+    pub schema: String,
+    /// Safe opaque correlation ID for this capture.
+    pub capture_id: String,
+    /// Unix milliseconds at which the capture was taken.
+    pub capture_time_unix_ms: i64,
+    /// Exact UTF-8 report bytes shared by preview, save and share.
+    pub bytes: Vec<u8>,
+    /// The full report view, decoded from `bytes`.
+    pub text: String,
+    /// Bounded human summary rendered from `bytes`.
+    pub summary: String,
+    /// Fields the captured report promises to redact.
+    pub redaction_fields: Vec<String>,
+    /// Stable code of the most recent retained local failure.
+    pub last_failure_code: Option<String>,
+    /// Local-only label-to-Host mapping, in report label order. Never shared.
+    pub hosts: Vec<DiagnosticsHostView>,
     pub app_version: String,
     pub core_version: String,
 }
@@ -1216,6 +1302,12 @@ pub(crate) fn convert_update(
                     expires_at_unix_ms: approval.expires_at_unix_ms,
                     digest_hex: hex::encode(&approval.digest),
                     state: approval_state_name(approval.state),
+                    review_action: approval.review_action.clone(),
+                    review_target: approval.review_target.clone(),
+                    review_impact: approval.review_impact.clone(),
+                    review_availability: normalize_review_availability(
+                        &approval.review_availability,
+                    ),
                 })
                 .collect();
             let mut events = vec![ConversationEvent::State {
@@ -1618,6 +1710,29 @@ mod tests {
             expires_at_unix_ms: 1,
             state,
             decision: ApprovalDecision::Unspecified,
+            review_action: "Change one file".into(),
+            review_target: "Sources/App.swift".into(),
+            review_impact: "Replaces the selected file content.".into(),
+            review_availability: "complete".into(),
+        }
+    }
+
+    fn approval_info() -> ApprovalInfo {
+        ApprovalInfo {
+            approval_id: "a".into(),
+            session_id: "s".into(),
+            tool_name: "shell".into(),
+            call_id: "c".into(),
+            reason: "why".into(),
+            digest: vec![0xcd; 32],
+            version: 9,
+            expires_at_unix_ms: 11,
+            state: "Pending".into(),
+            decision: "Unspecified".into(),
+            review_action: "Change one file".into(),
+            review_target: "Sources/App.swift".into(),
+            review_impact: "Replaces the selected file content.".into(),
+            review_availability: "complete".into(),
         }
     }
 
@@ -1827,6 +1942,13 @@ mod tests {
                 assert_eq!(approvals.len(), 1);
                 assert_eq!(approvals[0].state, "unknown");
                 assert_eq!(approvals[0].digest_hex, "ab".repeat(32));
+                assert_eq!(approvals[0].review_action, "Change one file");
+                assert_eq!(approvals[0].review_target, "Sources/App.swift");
+                assert_eq!(
+                    approvals[0].review_impact,
+                    "Replaces the selected file content."
+                );
+                assert_eq!(approvals[0].review_availability, "complete");
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -2074,23 +2196,56 @@ mod tests {
     }
 
     #[test]
-    fn approval_info_digest_and_state_are_projected() {
-        let info = ApprovalInfo {
-            approval_id: "a".into(),
-            session_id: "s".into(),
-            tool_name: "shell".into(),
-            call_id: "c".into(),
-            reason: "why".into(),
-            digest: vec![0xcd; 32],
-            version: 9,
-            expires_at_unix_ms: 11,
-            state: "Pending".into(),
-            decision: "Unspecified".into(),
-        };
-        let view = ApprovalView::from(info);
+    fn approval_info_digest_state_and_review_are_projected() {
+        let view = ApprovalView::from(approval_info());
         assert_eq!(view.digest_hex, "cd".repeat(32));
         assert_eq!(view.state, "pending");
         assert_eq!(view.version, 9);
+        assert_eq!(view.review_action, "Change one file");
+        assert_eq!(view.review_target, "Sources/App.swift");
+        assert_eq!(view.review_impact, "Replaces the selected file content.");
+        assert_eq!(view.review_availability, "complete");
+    }
+
+    #[test]
+    fn approval_review_availability_never_invents_completeness() {
+        let view = ApprovalView::from(ApprovalInfo {
+            review_action: String::new(),
+            review_target: String::new(),
+            review_impact: String::new(),
+            review_availability: "COMPLETE".into(),
+            ..approval_info()
+        });
+        assert_eq!(view.review_availability, "complete");
+        assert!(view.review_action.is_empty());
+        assert!(view.review_target.is_empty());
+        assert!(view.review_impact.is_empty());
+
+        for token in ["", "unavailable", "authored", "UNKNOWN"] {
+            let view = ApprovalView::from(ApprovalInfo {
+                review_action: String::new(),
+                review_target: String::new(),
+                review_impact: String::new(),
+                review_availability: token.into(),
+                ..approval_info()
+            });
+            assert_eq!(view.review_availability, "unavailable", "{token:?}");
+            assert!(view.review_action.is_empty());
+            assert!(view.review_target.is_empty());
+            assert!(view.review_impact.is_empty());
+        }
+
+        let incomplete = ApprovalView::from(ApprovalInfo {
+            review_action: "Change [REDACTED] scope".into(),
+            review_target: "Sources/[REDACTED].swift".into(),
+            review_impact: String::new(),
+            review_availability: "incomplete".into(),
+            ..approval_info()
+        });
+        assert_eq!(incomplete.review_availability, "incomplete");
+        assert_eq!(incomplete.review_action, "Change [REDACTED] scope");
+        assert_eq!(incomplete.review_target, "Sources/[REDACTED].swift");
+        assert!(incomplete.review_impact.is_empty());
     }
 
     #[test]

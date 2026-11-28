@@ -416,6 +416,9 @@ impl From<PairingError> for CoreError {
             }
             PairingError::ProtocolIncompatible => Self::ProtocolIncompatible,
             PairingError::ResponseMismatch | PairingError::DeviceKeyMismatch => Self::Unauthorized,
+            PairingError::InvalidGrantId => {
+                Self::Security("pairing Host grant identity is invalid".into())
+            }
             PairingError::InvalidUri | PairingError::UnsupportedVersion => {
                 Self::InvalidInput("invalid pairing URI".into())
             }

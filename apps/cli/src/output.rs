@@ -2,9 +2,9 @@
 
 use serde_json::{json, Value};
 use whalerein_core::api::{
-    CommandHandle, DoctorReport, DownloadOutcome, DownloadProgress, ExportManifest, HostInfo,
-    ModelCatalog, PairingHistoryRecord, PendingQueue, QuestionPageInfo, SessionKey, SessionList,
-    SessionModel,
+    CommandHandle, DiagnosticsSnapshot, DownloadOutcome, DownloadProgress, ExportManifest,
+    HostInfo, ModelCatalog, PairingHistoryRecord, PendingQueue, QuestionPageInfo, SessionKey,
+    SessionList, SessionModel,
 };
 
 use std::cell::Cell;
@@ -1545,17 +1545,33 @@ pub fn command_data(handle: &CommandHandle) -> Value {
     value
 }
 
-pub fn render_doctor(report: &DoctorReport) -> String {
-    format!(
-        "Address: {}\nCommands: {} unfinished, {} unknown\n",
-        sanitize_field(report.address.as_deref().unwrap_or("(not paired)")),
-        report.commands.non_terminal,
-        report.commands.unknown
-    )
+/// Human preview of the one captured diagnostic document.
+///
+/// The bounded summary is rendered by Core from the captured bytes; the CLI
+/// never builds a second report.
+pub fn render_snapshot(snapshot: &DiagnosticsSnapshot) -> String {
+    let mut out = snapshot.summary.clone();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
-pub fn doctor_data(report: &DoctorReport) -> Value {
-    serde_json::to_value(report).unwrap_or_else(|_| json!({}))
+/// Stable JSON data for `doctor`: the captured report facts plus the capture
+/// identity. It is derived from the captured text, not live state.
+pub fn snapshot_data(snapshot: &DiagnosticsSnapshot) -> Value {
+    let document: Value = serde_json::from_str(&snapshot.text).unwrap_or_else(|_| json!({}));
+    let mut data = document
+        .get("report")
+        .cloned()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    data["capture_id"] = json!(snapshot.capture_id);
+    data["captured_at_unix_ms"] = json!(snapshot.capture_time_unix_ms);
+    if let Some(warning) = document.get("cache_warning").and_then(Value::as_str) {
+        data["cache_warning"] = json!(warning);
+    }
+    data
 }
 
 pub fn render_manifest(manifest: &ExportManifest) -> String {
@@ -1848,7 +1864,7 @@ pub fn tail_event_json(update: &ViewUpdate, show_reasoning: bool) -> Option<Valu
             json!({"type":"attempt_ended","attempt_id":attempt.attempt_id,"live_epoch":attempt.live_epoch,"outcome":outcome.as_str_name()})
         }
         ViewUpdate::State(state) => {
-            let approvals: Vec<Value> = state.approvals.iter().map(|approval| json!({"approval_id":approval.approval_id,"session_id":approval.session_id,"tool_name":approval.tool_name,"call_id":approval.call_id,"reason":approval.reason,"digest":hex::encode(&approval.digest),"version":approval.version,"expires_at_unix_ms":approval.expires_at_unix_ms,"state":approval.state.as_str_name()})).collect();
+            let approvals: Vec<Value> = state.approvals.iter().map(|approval| json!({"approval_id":approval.approval_id,"session_id":approval.session_id,"tool_name":approval.tool_name,"call_id":approval.call_id,"reason":approval.reason,"digest":hex::encode(&approval.digest),"version":approval.version,"expires_at_unix_ms":approval.expires_at_unix_ms,"state":approval.state.as_str_name(),"review_action":approval.review_action,"review_target":approval.review_target,"review_impact":approval.review_impact,"review_availability":review_token(&approval.review_availability)})).collect();
             json!({"type":"state","run_phase":state.run_phase.as_str_name(),"projection_id":state.projection_id,"approvals":approvals})
         }
         ViewUpdate::Reset => json!({"type":"reset"}),
@@ -2066,6 +2082,74 @@ pub fn approval_data(approval: &whalerein_core::api::ApprovalInfo) -> Value {
     json!({ "approval": approval })
 }
 
+/// Canonical lowercase review availability for display.
+///
+/// An absent or unrecognized token fails closed as `unavailable`; the CLI must
+/// never present an approval as fully reviewed without Host-supplied facts.
+fn review_availability_label(approval: &whalerein_core::api::ApprovalInfo) -> &'static str {
+    review_token(&approval.review_availability)
+}
+
+/// Normalize one review availability string for display.
+fn review_token(value: &str) -> &'static str {
+    match value {
+        "complete" => "complete",
+        "incomplete" => "incomplete",
+        _ => "unavailable",
+    }
+}
+
+/// Whether the approval carries complete, non-empty review facts.
+///
+/// The availability token alone is not enough: a `complete` token with an
+/// empty essential fact would otherwise let the CLI imply a full review.
+/// This predicate only decides whether the human rendering states a
+/// limitation; it never blocks a resolution.
+pub(crate) fn review_is_complete(approval: &whalerein_core::api::ApprovalInfo) -> bool {
+    review_availability_label(approval) == "complete"
+        && !approval.review_action.trim().is_empty()
+        && !approval.review_target.trim().is_empty()
+        && !approval.review_impact.trim().is_empty()
+}
+
+/// Explicit limitation for a review the Host did not establish completely.
+fn review_limitation(approval: &whalerein_core::api::ApprovalInfo) -> Option<&'static str> {
+    if review_is_complete(approval) {
+        return None;
+    }
+    Some(match review_availability_label(approval) {
+        "complete" | "incomplete" => {
+            "review limitation: essential review facts are incomplete; this approval is not fully reviewed."
+        }
+        _ => {
+            "review limitation: review details are unavailable for this device or call; this approval is not fully reviewed."
+        }
+    })
+}
+
+/// Render the Host-supplied review facts without inventing a value.
+///
+/// Values arrive already bounded and credential-masked; the CLI only escapes
+/// terminal control characters. Empty facts stay empty and are omitted.
+fn push_review_facts(out: &mut String, approval: &whalerein_core::api::ApprovalInfo, indent: &str) {
+    out.push_str(&format!(
+        "{indent}review: {}\n",
+        review_availability_label(approval)
+    ));
+    for (label, value) in [
+        ("action", &approval.review_action),
+        ("target", &approval.review_target),
+        ("impact", &approval.review_impact),
+    ] {
+        if !value.is_empty() {
+            out.push_str(&format!("{indent}{label}: {}\n", sanitize_field(value)));
+        }
+    }
+    if let Some(limitation) = review_limitation(approval) {
+        out.push_str(&format!("{indent}{limitation}\n"));
+    }
+}
+
 /// Human detail for one approval read. State and decision use the same wire
 /// names as the JSON paths.
 pub fn render_approval(approval: &whalerein_core::api::ApprovalInfo) -> String {
@@ -2084,6 +2168,7 @@ pub fn render_approval(approval: &whalerein_core::api::ApprovalInfo) -> String {
     if !approval.call_id.is_empty() {
         out.push_str(&format!("call: {}\n", sanitize_field(&approval.call_id)));
     }
+    push_review_facts(&mut out, approval, "");
     out
 }
 
@@ -2094,14 +2179,16 @@ pub fn render_approvals(approvals: &[whalerein_core::api::ApprovalInfo]) -> Stri
     approvals
         .iter()
         .map(|a| {
-            format!(
+            let mut out = format!(
                 "{} {} version={} digest={} {}\n",
                 sanitize_field(&a.approval_id),
                 sanitize_field(&a.tool_name),
                 a.version,
                 hex::encode(&a.digest),
                 sanitize_field(&a.reason)
-            )
+            );
+            push_review_facts(&mut out, a, "  ");
+            out
         })
         .collect()
 }
@@ -2109,7 +2196,7 @@ pub fn render_approvals(approvals: &[whalerein_core::api::ApprovalInfo]) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use whalerein_core::api::{CommandDiagnostics, LifecycleReceipt, OnlineStatus};
+    use whalerein_core::api::{LifecycleReceipt, OnlineStatus};
 
     fn command() -> Command {
         Command::Hosts
@@ -2170,14 +2257,29 @@ mod tests {
         }
     }
 
-    fn report() -> DoctorReport {
-        DoctorReport {
-            schema: "whalerein/client/v1".into(),
-            address: Some("https://access.test".into()),
-            commands: CommandDiagnostics {
-                non_terminal: 1,
-                unknown: 2,
+    fn snapshot() -> DiagnosticsSnapshot {
+        let text = serde_json::to_string_pretty(&json!({
+            "schema": "whalerein/v1",
+            "capture_id": "capture-1",
+            "captured_at_unix_ms": 7,
+            "report": {
+                "schema": "whalerein/v1",
+                "address": "https://access.test",
+                "commands": {"non_terminal": 1, "unknown": 2},
             },
+            "cache_warning": null,
+        }))
+        .unwrap();
+        DiagnosticsSnapshot {
+            schema: "whalerein/v1".into(),
+            capture_id: "capture-1".into(),
+            capture_time_unix_ms: 7,
+            bytes: text.clone().into_bytes(),
+            text,
+            summary: "Diagnostic snapshot capture-1\nAddress: https://access.test\nCommands: 1 unfinished, 2 unknown\n".into(),
+            redaction_fields: vec![],
+            last_failure_code: None,
+            hosts: vec![],
         }
     }
 
@@ -2418,14 +2520,16 @@ mod tests {
     }
 
     #[test]
-    fn renders_doctor_report_without_host_or_device_ids() {
-        let text = render_doctor(&report());
+    fn renders_the_captured_snapshot_without_host_or_device_ids() {
+        let text = render_snapshot(&snapshot());
         assert!(text.contains("Address: https://access.test"));
         assert!(text.contains("Commands: 1 unfinished, 2 unknown"));
         assert!(!text.contains("h-1"));
         assert!(!text.contains("Connection"));
-        let data = doctor_data(&report());
+        let data = snapshot_data(&snapshot());
         assert_eq!(data["commands"]["non_terminal"], 1);
+        assert_eq!(data["capture_id"], "capture-1");
+        assert_eq!(data["captured_at_unix_ms"], 7);
         assert!(data.get("connection").is_none());
     }
 
@@ -2437,6 +2541,8 @@ mod tests {
             fields: vec!["address".into()],
             redactions: vec!["private keys".into()],
             bytes: 10,
+            capture_id: "capture-1".into(),
+            capture_time_unix_ms: 7,
         };
         let text = render_manifest(&manifest);
         assert!(text.contains("address"));
@@ -2977,12 +3083,14 @@ mod typed_output_tests {
             device_id: "d".into(),
             fingerprint: "fixture".into(),
             access_url: "https://example.test".into(),
+            host_grant_id: Some("grant-fixture".into()),
         };
         assert_eq!(
             render_pair(&pair),
             "Paired host h as device d\nFingerprint: fixture\n"
         );
         assert!(!render_pair(&pair).contains(&pair.access_url));
+        assert!(!render_pair(&pair).contains("grant-fixture"));
         assert_eq!(render_approvals(&[]), "No pending approvals.\n");
     }
 }
@@ -3094,10 +3202,17 @@ mod typed_content_tests {
             expires_at_unix_ms: 9,
             state: "Pending".into(),
             decision: "Unspecified".into(),
+            review_action: "Change one file".into(),
+            review_target: "Sources/App.swift".into(),
+            review_impact: "Replaces the selected file content.".into(),
+            review_availability: "complete".into(),
         };
         assert_eq!(
             render_approvals(&[approval]),
-            format!("a fixture version=3 digest={} review\n", "01".repeat(32))
+            format!(
+                "a fixture version=3 digest={} review\n  review: complete\n  action: Change one file\n  target: Sources/App.swift\n  impact: Replaces the selected file content.\n",
+                "01".repeat(32)
+            )
         );
     }
 }
@@ -3457,6 +3572,10 @@ mod cli_contract_tests {
             expires_at_unix_ms: 9,
             state: state.into(),
             decision: decision.into(),
+            review_action: "Change one file".into(),
+            review_target: "Sources/App.swift".into(),
+            review_impact: "Replaces the selected file content.".into(),
+            review_availability: "complete".into(),
         }
     }
 
@@ -3499,14 +3618,75 @@ mod cli_contract_tests {
             "APPROVAL_DECISION_APPROVE"
         );
         assert!(render_approval(&decided).contains("decision: APPROVAL_DECISION_APPROVE"));
-        // The pending-list renderer keeps its one-line shape.
+        // The pending list keeps its digest line and appends the supplied
+        // review facts without inventing any.
         assert_eq!(
             render_approvals(&[approval("APPROVAL_STATE_PENDING", "x")]),
             format!(
-                "approval-1 bash version=3 digest={} review\\tthe command\n",
+                "approval-1 bash version=3 digest={} review\\tthe command\n  review: complete\n  action: Change one file\n  target: Sources/App.swift\n  impact: Replaces the selected file content.\n",
                 "01".repeat(32)
             )
         );
+    }
+
+    #[test]
+    fn approval_review_states_the_limitation_instead_of_claiming_a_full_review() {
+        let mut incomplete = approval("APPROVAL_STATE_PENDING", "APPROVAL_DECISION_UNSPECIFIED");
+        incomplete.review_availability = "incomplete".into();
+        incomplete.review_impact = String::new();
+        let text = render_approval(&incomplete);
+        assert!(text.contains("review: incomplete"), "{text}");
+        assert!(text.contains("action: Change one file"), "{text}");
+        assert!(text.contains("target: Sources/App.swift"), "{text}");
+        assert!(!text.contains("impact:"), "{text}");
+        assert!(text.contains("review limitation:"), "{text}");
+        assert!(text.contains("not fully reviewed"), "{text}");
+
+        // An absent projection is unavailable, not complete, and no fact is
+        // reconstructed from the tool name or reason.
+        let mut absent = approval("APPROVAL_STATE_PENDING", "APPROVAL_DECISION_UNSPECIFIED");
+        absent.review_action = String::new();
+        absent.review_target = String::new();
+        absent.review_impact = String::new();
+        absent.review_availability = String::new();
+        let text = render_approval(&absent);
+        assert!(text.contains("review: unavailable"), "{text}");
+        assert!(text.contains("review limitation:"), "{text}");
+        assert!(!text.contains("action:"), "{text}");
+        assert!(!text.contains("target:"), "{text}");
+        assert!(!text.contains("impact:"), "{text}");
+
+        // A complete token with an empty essential fact still states the
+        // limitation rather than implying a full review.
+        let mut empty_fact = approval("APPROVAL_STATE_PENDING", "APPROVAL_DECISION_UNSPECIFIED");
+        empty_fact.review_target = String::new();
+        let text = render_approval(&empty_fact);
+        assert!(text.contains("review: complete"), "{text}");
+        assert!(text.contains("review limitation:"), "{text}");
+        assert!(!text.contains("target:"), "{text}");
+    }
+
+    #[test]
+    fn approval_review_renders_already_masked_facts_verbatim() {
+        let mut info = approval("APPROVAL_STATE_PENDING", "APPROVAL_DECISION_UNSPECIFIED");
+        info.review_action = "Change [REDACTED] credential scope".into();
+        info.review_target = "Sources/[REDACTED].swift".into();
+        info.review_impact = "Rotates [REDACTED]; secrets stay masked.".into();
+        let text = render_approval(&info);
+        assert!(
+            text.contains("action: Change [REDACTED] credential scope"),
+            "{text}"
+        );
+        assert!(text.contains("target: Sources/[REDACTED].swift"), "{text}");
+        assert!(
+            text.contains("impact: Rotates [REDACTED]; secrets stay masked."),
+            "{text}"
+        );
+        assert!(!text.contains("synthetic-raw-argument"), "{text}");
+        // The detail and list paths carry the same supplied facts.
+        let list = render_approvals(&[info]);
+        assert!(list.contains("action: Change [REDACTED] credential scope"));
+        assert!(list.contains("target: Sources/[REDACTED].swift"));
     }
 
     #[test]

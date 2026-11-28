@@ -812,7 +812,7 @@ func applyHostResult(ctx context.Context, begin func(context.Context) (pgx.Tx, e
 			if err := applyDeviceSessionAuthority(ctx, tx); err != nil {
 				return false, err
 			}
-			if _, err = confirmPairingHostTx(ctx, tx, claimID, update.HostID, update.DeviceID, update.RequestID, update.At, true); err != nil {
+			if _, err = confirmPairingHostTx(ctx, tx, claimID, update.HostID, update.DeviceID, update.RequestID, acknowledgement.GetGrantId(), update.At, true); err != nil {
 				return false, err
 			}
 		} else if !errors.Is(err, pgx.ErrNoRows) {

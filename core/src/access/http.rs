@@ -13,10 +13,10 @@ use ring::signature::Ed25519KeyPair;
 use serde::de::DeserializeOwned;
 use url::Url;
 use whalerein_proto::{
-    ErrorCode, ErrorResponse, HostInfo, HostList, HostRequest, OnlineStatus, PairingClaimRequest,
-    PairingClaimResponse, PayloadReference, RelayObject, RelayObjectDeleteResult,
-    RelayObjectFinishRequest, RelayObjectReservation, RelayObjectReserveRequest, RequestKind,
-    RequestReceipt, RequestState,
+    ErrorCode, ErrorResponse, HostDirectory, HostInfo, HostList, HostRequest, OnlineStatus,
+    PairingClaimRequest, PairingClaimResponse, PayloadReference, RelayObject,
+    RelayObjectDeleteResult, RelayObjectFinishRequest, RelayObjectReservation,
+    RelayObjectReserveRequest, RequestKind, RequestReceipt, RequestState,
 };
 
 use crate::access::transport::{TransportBudget, RELAY_EPOCH_V5};
@@ -151,12 +151,57 @@ pub(crate) enum CloudPairingState {
     Terminal,
 }
 
+/// Host-owned display metadata a client may preview before pairing.
+///
+/// The values are advisory decoration only: they never authorize a pairing,
+/// pin a key, decide the prompt or reach persisted configuration. Access has
+/// already bounded them, and Core drops any field that is empty, oversized or
+/// contains control characters instead of failing the whole preview.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostDirectoryPreview {
+    pub display_name: String,
+    pub os_family: String,
+}
+
+impl HostDirectoryPreview {
+    fn bounded(directory: HostDirectory) -> Self {
+        Self {
+            display_name: bounded_directory_field(
+                &directory.display_name,
+                MAX_DIRECTORY_DISPLAY_NAME_CHARS,
+            ),
+            os_family: bounded_directory_field(&directory.os_family, MAX_DIRECTORY_OS_FAMILY_CHARS),
+        }
+    }
+}
+
+const MAX_DIRECTORY_BODY_BYTES: usize = 16 * 1024;
+const MAX_DIRECTORY_DISPLAY_NAME_CHARS: usize = 120;
+const MAX_DIRECTORY_OS_FAMILY_CHARS: usize = 32;
+const MAX_INVITATION_TOKEN_BYTES: usize = 8 * 1024;
+
+/// Drop a field rather than fail the preview when Access sends something the
+/// prompt cannot show safely. Trimming is not a truncation: an oversized value
+/// is dropped exactly like an empty one.
+fn bounded_directory_field(value: &str, max_chars: usize) -> String {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > max_chars || value.chars().any(char::is_control)
+    {
+        String::new()
+    } else {
+        value.to_owned()
+    }
+}
+
 #[derive(Clone)]
 pub struct AccessClient {
     http: Client,
     base: Url,
     token: Option<String>,
     request_timeout: Duration,
+    /// Bound for the advisory pre-pair directory read. The production value
+    /// matches normal pairing calls; tests shorten it.
+    directory_timeout: Duration,
     #[allow(dead_code)]
     poll_interval: Duration,
     transport: TransportBudget,
@@ -213,6 +258,7 @@ impl AccessClient {
             base,
             token,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            directory_timeout: DEFAULT_TIMEOUT,
             poll_interval: DEFAULT_POLL_INTERVAL,
             transport,
             response_limit: https_body_limit(transport.envelope_bytes),
@@ -312,6 +358,11 @@ impl AccessClient {
     pub fn set_poll_timing(&mut self, request_timeout: Duration, poll_interval: Duration) {
         self.request_timeout = request_timeout;
         self.poll_interval = poll_interval;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_directory_timeout(&mut self, timeout: Duration) {
+        self.directory_timeout = timeout;
     }
 
     fn endpoint(&self, segments: &[&str]) -> Result<Url, AccessError> {
@@ -757,6 +808,59 @@ impl AccessClient {
             return Ok(());
         }
         Err(parse_error_response(response, MAX_ERROR_BODY_BYTES).await)
+    }
+
+    /// Fetch Host-owned display metadata with the one-time invitation token.
+    ///
+    /// The token is sent only to the Access origin this client was built for,
+    /// is never persisted or logged, and does not consume the invitation. Any
+    /// failure is reported to the caller so pairing can treat the preview as
+    /// advisory and continue with empty fields. Response fields are bounded and
+    /// sanitized individually; one bad field never fails the preview.
+    pub async fn host_directory(
+        &self,
+        access_url: &str,
+        host_id: &str,
+        token: &str,
+    ) -> Result<HostDirectoryPreview, AccessError> {
+        if host_id.is_empty() || token.is_empty() || token.len() > MAX_INVITATION_TOKEN_BYTES {
+            return Err(AccessError::protocol("invalid directory request"));
+        }
+        let url = self.directory_endpoint(access_url, host_id)?;
+        for attempt in 0..3 {
+            let builder = self
+                .request_with_auth(reqwest::Method::GET, url.clone(), None, false)
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .timeout(self.directory_timeout);
+            match self
+                .send_observing_limit(builder, true, |_| {}, MAX_DIRECTORY_BODY_BYTES)
+                .await
+            {
+                Err(error) if error.is_retryable_transport() && attempt < 2 => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Ok(directory) => return Ok(HostDirectoryPreview::bounded(directory)),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(AccessError::timeout())
+    }
+
+    /// Refuse to send the invitation token to any origin or prefix other than
+    /// the one this client was opened for.
+    fn directory_endpoint(&self, access_url: &str, host_id: &str) -> Result<Url, AccessError> {
+        let requested =
+            Url::parse(access_url).map_err(|_| AccessError::protocol("invalid Access URL"))?;
+        if requested.scheme() != self.base.scheme()
+            || requested.host_str() != self.base.host_str()
+            || requested.port_or_known_default() != self.base.port_or_known_default()
+            || requested.path().trim_end_matches('/') != self.base.path().trim_end_matches('/')
+        {
+            return Err(AccessError::protocol(
+                "Access URL does not match the client",
+            ));
+        }
+        self.endpoint(&["v1", "hosts", host_id, "directory"])
     }
 
     pub async fn pair_claim(
@@ -1873,5 +1977,153 @@ mod session_proof_tests {
             URL_SAFE_NO_PAD.encode(pair.sign(input.as_bytes()).as_ref()),
             "3OjP2K7k06XZdOnaCjcz9aXeHNw9Dqea41uUOiei_5U5JNvDIf_Biii4leS6l8sef92yEXlam0IOuGMAFzXeBw"
         );
+    }
+}
+
+#[cfg(test)]
+mod directory_tests {
+    use super::*;
+    use crate::api::test_support::{MockResponse, MockServer};
+    use std::sync::{Arc, Mutex};
+    use whalerein_proto::HostDirectory;
+
+    #[tokio::test]
+    async fn host_directory_uses_only_the_invitation_bearer() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let server = MockServer::start(Arc::new(move |request| {
+            captured.lock().unwrap().push(request);
+            MockResponse::json(
+                200,
+                &HostDirectory {
+                    host_id: "host-1".into(),
+                    display_name: "Studio Mac".into(),
+                    os_family: "macos".into(),
+                },
+            )
+        }))
+        .await;
+        let sink = Arc::new(crate::diagnostics::journal::CapturingSink::default());
+        let mut client = AccessClient::with_trust(
+            server.url(),
+            Some("device-token".into()),
+            None,
+            None,
+            Arc::new(Diagnostics::new(Some(sink.clone()))),
+        )
+        .unwrap();
+        client.set_directory_timeout(Duration::from_millis(500));
+        let preview = client
+            .host_directory(server.url().as_str(), "host-1", "invitation-token")
+            .await
+            .unwrap();
+        assert_eq!(preview.display_name, "Studio Mac");
+        assert_eq!(preview.os_family, "macos");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, "GET");
+        assert_eq!(seen[0].path, "/v1/hosts/host-1/directory");
+        assert_eq!(
+            seen[0].headers.get("authorization").unwrap(),
+            "Bearer invitation-token"
+        );
+        let events = sink.0.lock().unwrap();
+        let logged = serde_json::to_string(&*events).unwrap();
+        assert!(!logged.contains("invitation-token"));
+        assert!(!logged.contains("device-token"));
+        assert!(!logged.contains("Studio Mac"));
+        assert!(!logged.contains("macos"));
+    }
+
+    #[tokio::test]
+    async fn host_directory_drops_invalid_fields_without_failing() {
+        let server = MockServer::start(Arc::new(|_| {
+            MockResponse::json(
+                200,
+                &HostDirectory {
+                    host_id: "host-1".into(),
+                    display_name: "x".repeat(MAX_DIRECTORY_DISPLAY_NAME_CHARS + 1),
+                    os_family: "mac\u{0}os".into(),
+                },
+            )
+        }))
+        .await;
+        let client = AccessClient::new(server.url(), None).unwrap();
+        let preview = client
+            .host_directory(server.url().as_str(), "host-1", "invitation-token")
+            .await
+            .unwrap();
+        assert_eq!(preview.display_name, "");
+        assert_eq!(preview.os_family, "");
+    }
+
+    #[tokio::test]
+    async fn host_directory_failures_are_errors_not_panics() {
+        let unavailable = MockServer::start(Arc::new(|_| {
+            MockResponse::json(
+                404,
+                &ErrorResponse {
+                    code: ErrorCode::NotFound as i32,
+                    message: "not found".into(),
+                    ..Default::default()
+                },
+            )
+        }))
+        .await;
+        let client = AccessClient::new(unavailable.url(), None).unwrap();
+        let error = client
+            .host_directory(unavailable.url().as_str(), "host-1", "invitation-token")
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, Some(404));
+
+        let malformed = MockServer::start(Arc::new(|_| MockResponse {
+            status: 200,
+            body: b"{not-protojson".to_vec(),
+            delay_ms: 0,
+        }))
+        .await;
+        let client = AccessClient::new(malformed.url(), None).unwrap();
+        let error = client
+            .host_directory(malformed.url().as_str(), "host-1", "invitation-token")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, AccessErrorKind::Protocol);
+    }
+
+    #[tokio::test]
+    async fn host_directory_timeout_is_bounded() {
+        let server = MockServer::start(Arc::new(|_| MockResponse {
+            status: 200,
+            body: serde_json::to_vec(&HostDirectory {
+                host_id: "host-1".into(),
+                display_name: "late".into(),
+                os_family: "macos".into(),
+            })
+            .unwrap(),
+            delay_ms: 2_000,
+        }))
+        .await;
+        let mut client = AccessClient::new(server.url(), None).unwrap();
+        client.set_directory_timeout(Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        let error = client
+            .host_directory(server.url().as_str(), "host-1", "invitation-token")
+            .await
+            .unwrap_err();
+        assert!(error.is_retryable_transport());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn host_directory_refuses_a_foreign_origin() {
+        let server = MockServer::start(Arc::new(|_| MockResponse::empty(200))).await;
+        let client = AccessClient::new(server.url(), None).unwrap();
+        let error = client
+            .host_directory("http://127.0.0.1:1", "host-1", "invitation-token")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, AccessErrorKind::Protocol);
     }
 }

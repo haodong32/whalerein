@@ -68,6 +68,12 @@ func Build(kind, hostID, deviceID string, grants []store.AdmissionGrant) Connect
 			{Access: "read", Filter: topicRoot + hostID + "/request"},
 			{Access: "subscribe", Filter: topicRoot + hostID + "/presence"},
 			{Access: "read", Filter: topicRoot + hostID + "/presence"},
+			// The bounded self-status lane is a service-only subtree. Only this
+			// Host subscribes to its request and publishes its reply; a Device
+			// never receives either entry.
+			{Access: "subscribe", Filter: topicRoot + hostID + "/svc/self-status/request"},
+			{Access: "read", Filter: topicRoot + hostID + "/svc/self-status/request"},
+			{Access: "write", Filter: topicRoot + hostID + "/svc/self-status/reply"},
 			{Access: "write", Filter: topicRoot + hostID + "/result"},
 			{Access: "write", Filter: topicRoot + hostID + "/event"},
 			// Direct previews target a granted device. The publisher filter is

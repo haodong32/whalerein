@@ -173,7 +173,7 @@ func TestConfirmPairingHostRequiresRetainedCommitProof(t *testing.T) {
 				bindingErr: tc.bindingErr, cleaned: tc.cleaned, cleanedErr: tc.cleanedErr,
 				fingerprint: fingerprint, updateRows: tc.updateRows,
 			}
-			confirmed, err := confirmPairingHostTx(context.Background(), tx, tc.identity, "host", "device", "request", at, true)
+			confirmed, err := confirmPairingHostTx(context.Background(), tx, tc.identity, "host", "device", "request", "", at, true)
 			if tc.wantErr != nil {
 				if confirmed || !errors.Is(err, tc.wantErr) {
 					t.Fatalf("confirmed=%v err=%v", confirmed, err)

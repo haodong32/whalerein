@@ -68,12 +68,24 @@ keys, and a normal configuration open never reads them.
 ## Pairing and revocation
 
 Core confirms the Noise host fingerprint before FINISH. Invitations are
-host-bound, short-lived, single-use and failure-limited. Access creates the grant
-after FINISH and completes only after Host activation. Core generates the
-transport credential before FINISH and binds its hash into the encrypted payload.
-Access stores only hashes and a token-free operation receipt. A confirmed pending
-FINISH is retained in SecretStore and can be resumed after restart within its
-validity window; changed keys, changed requests and revoked generations fail.
+host-bound, short-lived, single-use and failure-limited. The Host writes the
+grant at COMMIT and acknowledges its exact opaque grant ID; Access admits the
+Device only after that acknowledgement and keeps the ID on the durable outcome.
+Core generates the transport credential before FINISH and binds its hash into
+the encrypted payload. Access stores only hashes and a token-free operation
+receipt. A confirmed pending FINISH is retained in SecretStore and can be
+resumed after restart within its validity window; changed keys, changed requests
+and revoked generations fail.
+
+The grant identity is bound into the secure channel. The Device names the grant
+it expects in `ChannelHello`; the Host snapshots the one active grant for the
+pinned device key at message 1 and installs the channel only for that same grant
+at message 3, echoing it in `ChannelReady`. A non-empty `ChannelHello.grant_id`
+that differs from the snapshot fails the handshake closed: no channel, no data
+and no action. An empty value is accepted only as a legacy-Client compatibility
+path and never relaxes the Host snapshot or the finish re-check. A retried
+FINISH replays the durable Host grant ID without a new Host round trip, and an
+old Host that reports no grant leaves the response field empty.
 
 Core persists the confirmed Host fingerprint and checks it on each fresh channel
 before sending Noise message 3. A mismatched key preserves local authorization
@@ -108,9 +120,27 @@ access. Automatic host-key rotation has no documented procedure.
 
 ## Diagnostics
 
-Logs/exports exclude message bodies, tool parameters, private keys, invitation
-URIs/tokens and full ciphertext. Operator-facing session output is separate.
-Export requires preview and confirmation.
+Logs/exports exclude message bodies, tool parameters, drafts, private keys,
+invitation URIs/tokens, device tokens, full ciphertext, Host/device identities
+and directory names. Operator-facing session output is separate.
+
+Core captures one allowlisted, redacted report per explicit capture. Preview,
+the saved file and a platform share action consume those same UTF-8 bytes; the
+preview only reads local state and never writes a file or uploads. A failed
+capture returns an error and exposes no file or stale share action. Only an
+explicit refresh creates a new capture.
+
+A new local CLI export path is created exclusively with owner-only (0600)
+permissions in one action, including noninteractive use without `--yes`.
+Replacing an existing regular file needs affirmative overwrite consent (`--yes`
+or an explicit interactive answer); refusal, missing noninteractive consent, a
+symbolic link, a directory or another unsafe target leaves the existing content
+untouched. A file that appears after the new-target check is preserved unless
+replacement was explicitly authorized, and a confirmed replacement is staged so
+a failed write keeps the prior contents. The CLI never follows a link. On
+mobile, the explicit Share action opens one system destination picker for the
+inspected bytes and cleans up its private temporary copy afterwards. Neither
+local save nor preview sends a network report.
 
 Security changes need failure tests for affected keys, pairing/grants, AEAD,
 approvals, ACLs and replay rules. Transport hashes do not replace AEAD. Exact

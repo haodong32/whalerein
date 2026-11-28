@@ -8,13 +8,20 @@ import { x25519 } from '@noble/curves/ed25519.js'
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { hkdf } from '@noble/hashes/hkdf.js'
-import { randomBytes } from 'node:crypto'
 
 export const PROTOCOL_NAME = 'Noise_XX_25519_ChaChaPoly_SHA256'
 export const HASHLEN = 32
 export const TAGLEN = 16
 export const MAX_MESSAGE = 65535
-export const PROLOGUE_PREFIX = 'whalerein/v1'
+// Pairing is unchanged; the secure-channel suite epoch moved to v2 so Split
+// keys, record counters and AADs cannot interoperate with the retired suite.
+const PAIRING_PREFIX = 'whalerein/v1'
+export const CHANNEL_PREFIX = 'whalerein/v2'
+// Record nonce layout and replay window for application channel frames.
+export const NONCE_LEN = 12
+export const NONCE_COUNTER_OFFSET = 4
+export const REPLAY_WINDOW = 128n
+const MAX_COUNTER = 0xffffffffffffffffn
 
 const EMPTY = new Uint8Array(0)
 
@@ -63,12 +70,169 @@ export class NoiseError extends Error {
   }
 }
 
+/** Four zero bytes followed by the big-endian u64 record counter. */
+function channelNonce(counter) {
+  const nonce = new Uint8Array(NONCE_LEN)
+  let value = counter
+  for (let index = NONCE_LEN - 1; index >= NONCE_COUNTER_OFFSET; index--) {
+    nonce[index] = Number(value & 0xffn)
+    value >>= 8n
+  }
+  return nonce
+}
+
+function nonceCounter(nonce) {
+  if (!(nonce instanceof Uint8Array) || nonce.length !== NONCE_LEN) {
+    throw new NoiseError('invalid_nonce')
+  }
+  for (let index = 0; index < NONCE_COUNTER_OFFSET; index++) {
+    if (nonce[index] !== 0) throw new NoiseError('invalid_nonce')
+  }
+  let counter = 0n
+  for (let index = NONCE_COUNTER_OFFSET; index < NONCE_LEN; index++) {
+    counter = (counter << 8n) | BigInt(nonce[index])
+  }
+  return counter
+}
+
+/** Authenticated replay window for one direction (128 records). */
+class ReceiveWindow {
+  #highest = null
+  #seen = 0n
+
+  classify(counter) {
+    if (this.#highest === null || counter > this.#highest) return 'accept'
+    const delta = this.#highest - counter
+    if (delta >= REPLAY_WINDOW) return 'stale'
+    if (((this.#seen >> delta) & 1n) !== 0n) return 'replay'
+    return 'accept'
+  }
+
+  record(counter) {
+    if (this.#highest === null) {
+      this.#highest = counter
+      this.#seen = 1n
+      return
+    }
+    if (counter > this.#highest) {
+      const shift = counter - this.#highest
+      this.#seen = shift >= REPLAY_WINDOW ? 1n : (this.#seen << shift) | 1n
+      this.#highest = counter
+      return
+    }
+    const delta = this.#highest - counter
+    if (delta < REPLAY_WINDOW) this.#seen |= 1n << delta
+  }
+}
+
+/**
+ * Directional application ciphers for one channel.
+ *
+ * Keys are private and the object never serializes or inspects them. The Host
+ * seals `h2c` results/events and opens `c2h` requests; a Device does the
+ * reverse. Send counters and replay windows are independent per direction.
+ */
+class ChannelCipher {
+  #c2h
+  #h2c
+  #allowKeyExport
+  #send = { c2h: 0n, h2c: 0n }
+  #recv = { c2h: new ReceiveWindow(), h2c: new ReceiveWindow() }
+
+  constructor({ c2h, h2c, allowKeyExport = false }) {
+    if (!(c2h instanceof Uint8Array) || c2h.length !== 32) throw new NoiseError('invalid_key')
+    if (!(h2c instanceof Uint8Array) || h2c.length !== 32) throw new NoiseError('invalid_key')
+    this.#c2h = c2h
+    this.#h2c = h2c
+    this.#allowKeyExport = allowKeyExport
+  }
+
+  #key(direction) {
+    if (direction === 'c2h') return this.#c2h
+    if (direction === 'h2c') return this.#h2c
+    throw new NoiseError('invalid_direction')
+  }
+
+  #nextCounter(direction) {
+    const counter = this.#send[direction]
+    if (counter >= MAX_COUNTER) throw new NoiseError('nonce_exhausted')
+    this.#send[direction] = counter + 1n
+    return counter
+  }
+
+  /** Seal one record with the next counter for `direction` ('c2h' | 'h2c'). */
+  seal(direction, aad, plaintext) {
+    const key = this.#key(direction)
+    const counter = this.#nextCounter(direction)
+    const nonce = channelNonce(counter)
+    const ciphertext = chacha20poly1305(key, nonce, aad).encrypt(plaintext)
+    return { nonce, ciphertext }
+  }
+
+  /**
+   * Open and authenticate one record. Throws a distinct NoiseError code for
+   * invalid encoding, replay, stale counters, failed authentication and
+   * counter exhaustion. The window advances only after authentication.
+   */
+  open(direction, aad, nonce, ciphertext) {
+    const key = this.#key(direction)
+    const counter = nonceCounter(nonce)
+    const window = this.#recv[direction]
+    const verdict = window.classify(counter)
+    if (verdict === 'replay') throw new NoiseError('replay_detected')
+    if (verdict === 'stale') throw new NoiseError('stale_counter')
+    let plaintext
+    try {
+      plaintext = chacha20poly1305(key, nonce, aad).decrypt(ciphertext)
+    } catch {
+      throw new NoiseError('authentication_failed')
+    }
+    window.record(counter)
+    return plaintext
+  }
+
+  /** Non-reversible diagnostic fingerprint; never reveals key material. */
+  keyFingerprint() {
+    return hex(sha256(concat(this.#c2h, this.#h2c)))
+  }
+
+  /** Test-vector-only raw key view; unavailable on a production handshake. */
+  keysHexForTest() {
+    if (!this.#allowKeyExport) throw new NoiseError('key_material_unavailable')
+    return { c2h: hex(this.#c2h), h2c: hex(this.#h2c) }
+  }
+
+  /** Test-only counter positioning, available only on a test handshake. */
+  forceSendCounterForTest(direction, counter) {
+    if (!this.#allowKeyExport) throw new NoiseError('key_material_unavailable')
+    this.#key(direction)
+    this.#send[direction] = BigInt(counter)
+  }
+
+  /** Fresh replay state with the same keys, for test transcript scans only. */
+  readerForTest() {
+    if (!this.#allowKeyExport) throw new NoiseError('key_material_unavailable')
+    return new ChannelCipher({ c2h: this.#c2h, h2c: this.#h2c, allowKeyExport: true })
+  }
+
+  toJSON() {
+    return '[redacted]'
+  }
+
+  [Symbol.for('nodejs.util.inspect.custom')]() {
+    return 'ChannelCipher(..)'
+  }
+}
+
 /** Exact protocol name bytes, used for both h and ck initialization. */
 function protocolBytes() {
   return new TextEncoder().encode(PROTOCOL_NAME)
 }
 
 export class NoiseXX {
+  #channelCipher = null
+  #testVector = false
+
   /**
    * @param {object} options
    * @param {boolean} options.initiator
@@ -93,6 +257,8 @@ export class NoiseXX {
     this.handshakeHash = null
     this.sentMessages = 0
     this.receivedMessages = 0
+    // Fixed ephemerals are test-vector only and gate test affordances below.
+    this.#testVector = Boolean(ephemeralKeypair)
 
     const protocol = protocolBytes()
     this.h = protocol.length <= HASHLEN
@@ -239,7 +405,27 @@ export class NoiseXX {
   finalize() {
     this.complete = true
     this.handshakeHash = this.h.slice()
+    // Noise Split: the secret chaining key, not the observable transcript
+    // hash, produces the two directional application keys.
+    const split = hkdf(sha256, EMPTY, this.ck, EMPTY, 64)
+    this.#channelCipher = new ChannelCipher({
+      c2h: split.slice(0, 32),
+      h2c: split.slice(32, 64),
+      allowKeyExport: this.#testVector,
+    })
+    this.ck = null
     this.k = null
+  }
+
+  /**
+   * Take the application channel ciphers after a completed handshake.
+   * The caller owns them from now on; a second call fails closed.
+   */
+  takeChannelCipher() {
+    if (!this.#channelCipher) throw new NoiseError('handshake_incomplete')
+    const cipher = this.#channelCipher
+    this.#channelCipher = null
+    return cipher
   }
 
   /** Remote static public key learned during the handshake. */
@@ -275,62 +461,24 @@ export function formatFingerprint(publicKey) {
   return fingerprint(publicKey).match(/.{1,4}/g).join(' ')
 }
 
-/** Derive the application keys after a completed XX handshake. */
-export function deriveChannelKeys(handshakeHash, prologue) {
-  if (handshakeHash.length !== 32) throw new NoiseError('invalid_handshake_hash')
-  const prologueBytes = typeof prologue === 'string'
-    ? new TextEncoder().encode(prologue)
-    : prologue
-  const root = hkdf(
-    sha256,
-    handshakeHash,
-    prologueBytes,
-    new TextEncoder().encode(`${PROLOGUE_PREFIX}/channel-keys`),
-    64,
-  )
-  // WIRE.md: channel_id is the client-chosen random id bound through the
-  // Noise prologue, not a second value derived from the handshake hash.
-  return {
-    c2h: root.slice(0, 32),
-    h2c: root.slice(32, 64),
-  }
-}
-
-/** Seal one application message with ChaCha20-Poly1305 and a random nonce. */
-export function seal(key, aad, plaintext) {
-  const nonce = randomBytes(12)
-  const ciphertext = chacha20poly1305(key, nonce, aad).encrypt(plaintext)
-  return { nonce, ciphertext }
-}
-
-/** Open one application message. Returns null for any authentication failure. */
-export function open(key, aad, nonce, ciphertext) {
-  if (nonce.length !== 12) return null
-  try {
-    return chacha20poly1305(key, nonce, aad).decrypt(ciphertext)
-  } catch {
-    return null
-  }
-}
-
 export function requestAad({ requestId, hostId, deviceId, kind, commandId = '', expiresAt }) {
   return new TextEncoder().encode(
-    `${PROLOGUE_PREFIX}/request|${requestId}|${hostId}|${deviceId}|${kind}|${commandId}|${expiresAt}`,
+    `${CHANNEL_PREFIX}/request|${requestId}|${hostId}|${deviceId}|${kind}|${commandId}|${expiresAt}`,
   )
 }
 
 export function eventAad({ hostId, deviceId, channelId, createdAt }) {
   return new TextEncoder().encode(
-    `${PROLOGUE_PREFIX}/event|${hostId}|${deviceId}|${channelId}|${createdAt}`,
+    `${CHANNEL_PREFIX}/event|${hostId}|${deviceId}|${channelId}|${createdAt}`,
   )
 }
 
 export function pairingPrologue({ hostId, tokenHash, claimId }) {
-  return `${PROLOGUE_PREFIX}/pairing|${hostId}|${tokenHash}|${claimId}`
+  return `${PAIRING_PREFIX}/pairing|${hostId}|${tokenHash}|${claimId}`
 }
 
 export function channelPrologue({ hostId, deviceId, channelId }) {
-  return `${PROLOGUE_PREFIX}/channel|${hostId}|${deviceId}|${channelId}`
+  return `${CHANNEL_PREFIX}/channel|${hostId}|${deviceId}|${channelId}`
 }
 
 export function parseKeypair(privateKey) {

@@ -439,13 +439,22 @@ feeds the sink and, for operation stages, the bounded failure history. The
 sink receives an immutable event on the producing thread and may be called
 concurrently. The caller controls delivery and formatting.
 
-`diagnostics_preview()` renders the same local, redacted evidence as
-`export_diagnostics` without writing a file or opening a channel. It keeps the
-existing policy of redacting Host identities to ordinal labels and exposes only
-the last failure code, while including schema/version, the Access address class
-already present in doctor output, command counts, connection state and metrics.
-Message content, tool parameters, drafts, credentials, invitation tokens and
-private keys are excluded.
+`diagnostics_snapshot()` owns one immutable redacted capture. Core serializes
+the document once from allowlisted facts: schema/version, capture time and a
+safe capture ID, the Access address already exposed by doctor, command counts,
+ordinal Host labels with in-process connection state, aggregate metrics, the
+retained failure's trace ID and bounded stages, and the field/redaction
+manifest. `text` is exactly those bytes decoded and `summary` is a bounded
+view rendered from the same bytes. `refresh_diagnostics()` is the only way to
+replace the capture; a failed refresh drops the previous snapshot so no stale
+preview or save action remains. `diagnostics_preview()` reads local state only
+and never writes a file or opens a channel. `export_diagnostics()` writes the
+same bytes through a staged, private local write. Message content, tool
+parameters, drafts, credentials, invitation and device tokens, private keys,
+directory names and Host/device identities are excluded. The snapshot also
+carries a local-only label-to-Host mapping for authorized directory
+decoration; those Host references are never serialized into `bytes`, `text` or
+`summary` and must not be logged or shared.
 
 
 Use a fresh instance for the cutover. Its identity, pins and operation history

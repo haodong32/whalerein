@@ -131,7 +131,9 @@ struct ConversationTranscriptView: View {
                 .onChange(of: model.scrollRequest) { _, request in
                     guard let request else { return }
                     clearTrailingSpace()
-                    if request.animated {
+                    // Visible rendering is paused while the scene is inactive or
+                    // covered; move to the anchor without animating then.
+                    if request.animated, !model.isRenderingPaused {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo(ConversationRowsView.bottomAnchor, anchor: .bottom)
                         }

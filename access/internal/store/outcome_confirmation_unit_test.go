@@ -134,7 +134,7 @@ func (tx *confirmTestTx) Exec(_ context.Context, sql string, args ...any) (pgcon
 		return pgconn.NewCommandTag("SELECT 1"), nil
 	}
 	tx.steps = append(tx.steps, "update")
-	if !strings.Contains(sql, "UPDATE pairing_outcomes") || len(args) != 7 || args[0] != "claim" || args[1] != "host" || args[2] != "device" || args[3] != "request" {
+	if !strings.Contains(sql, "UPDATE pairing_outcomes") || len(args) != 8 || args[0] != "claim" || args[1] != "host" || args[2] != "device" || args[3] != "request" || args[7] != "" {
 		tx.t.Fatal("confirmation write scope changed")
 	}
 	if tx.mode == "update-error" {
@@ -157,7 +157,7 @@ func TestConfirmPairingHostRejectsExpiredInactiveAndMismatchedEvidence(t *testin
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &confirmTestTx{t: t, mode: tc.name, at: at, key: key}
-			got, err := confirmPairingHostTx(context.Background(), tx, "claim", "host", "device", "request", at, true)
+			got, err := confirmPairingHostTx(context.Background(), tx, "claim", "host", "device", "request", "", at, true)
 			if got != tc.want || !errors.Is(err, tc.wantErr) {
 				t.Fatalf("confirmed=%v err=%v steps=%v", got, err, tx.steps)
 			}
@@ -197,6 +197,7 @@ func (r outcomeObservationRow) Scan(d ...any) error {
 		*d[9].(*bool) = !tx.unverified
 		*d[10].(*bool) = !tx.confirmationUnverified
 		*d[11].(*bool) = tx.active
+		*d[12].(*string) = tx.grantID
 	case "ack":
 		*d[0].(*[]byte) = tx.ack
 		*d[1].(*time.Time) = tx.at
@@ -229,6 +230,7 @@ type outcomeObservationTx struct {
 	active, confirmed                  bool
 	unverified, confirmationUnverified bool
 	key, ack                           []byte
+	grantID                            string
 	at                                 time.Time
 	fail                               string
 	steps                              []string
@@ -262,7 +264,7 @@ func (tx *outcomeObservationTx) Exec(_ context.Context, sql string, args ...any)
 		tx.confirmationUnverified = false
 	} else if strings.Contains(sql, "UPDATE pairing_outcomes") {
 		step = "confirm"
-		if len(args) != 7 || args[0] != "claim" || args[1] != "host" || args[2] != "device" || args[3] != "request" {
+		if len(args) != 8 || args[0] != "claim" || args[1] != "host" || args[2] != "device" || args[3] != "request" || args[7] != tx.grantID {
 			tx.t.Fatal("wrong confirmation scope")
 		}
 		tx.confirmed = true
@@ -397,7 +399,7 @@ func TestConfirmPairingHostClosesTransactionAndCommitsOnlyValidEvidence(t *testi
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &confirmTestTx{t: t, mode: tc.name, at: at, key: make([]byte, 32)}
-			got, err := confirmPairingHost(context.Background(), func(context.Context) (pgx.Tx, error) { return tx, nil }, "claim", "host", "device", "request", at)
+			got, err := confirmPairingHost(context.Background(), func(context.Context) (pgx.Tx, error) { return tx, nil }, "claim", "host", "device", "request", "", at)
 			if got != tc.want || !errors.Is(err, tc.wantErr) {
 				t.Fatalf("confirmed=%v err=%v steps=%v", got, err, tx.steps)
 			}

@@ -2,15 +2,28 @@
 
 import Foundation
 import Testing
+import WhaleReinMobile
 @testable import WhaleRein
 
 @Suite("Approval review")
 @MainActor
 struct ApprovalReviewTests {
+    private func review(
+        availability: ApprovalReviewAvailability = .complete
+    ) -> ApprovalReviewDetails {
+        ApprovalReviewDetails(
+            action: "Change one file",
+            target: "Sources/App.swift",
+            impact: "Replaces the selected file content.",
+            availability: availability
+        )
+    }
+
     private func approval(
         state: ApprovalState = .pending,
         version: Int = 3,
-        expiresAt: Date = Date().addingTimeInterval(900)
+        expiresAt: Date = Date().addingTimeInterval(900),
+        review: ApprovalReviewDetails? = nil
     ) -> Approval {
         Approval(
             approvalId: "approval-1",
@@ -21,7 +34,8 @@ struct ApprovalReviewTests {
             version: version,
             expiresAtUnixMs: Int64(expiresAt.timeIntervalSince1970 * 1000),
             digestHex: "abc123",
-            state: state
+            state: state,
+            review: review ?? self.review()
         )
     }
 
@@ -95,7 +109,8 @@ struct ApprovalReviewTests {
             version: 4,
             expiresAtUnixMs: current.expiresAtUnixMs,
             digestHex: "def456",
-            state: .changed
+            state: .changed,
+            review: review()
         )
         service.resolveHandler = { _, _, _, _, _, _ in
             throw SessionServiceError(.staleApproval)
@@ -160,7 +175,13 @@ struct ApprovalReviewTests {
             version: 5,
             expiresAtUnixMs: current.expiresAtUnixMs,
             digestHex: "updated",
-            state: .pending
+            state: .pending,
+            review: ApprovalReviewDetails(
+                action: "Change two files",
+                target: "Sources/App.swift",
+                impact: "Adds a second file to the change.",
+                availability: .complete
+            )
         )
         model.handle(
             SessionEventEnvelope(
@@ -203,6 +224,108 @@ struct ApprovalReviewTests {
         )
         #expect(model.approvals.count == 1)
         #expect(model.approvals.first?.approvalId == current.approvalId)
+    }
+
+    private func binding(
+        availability: String = "complete",
+        action: String = "Change one file",
+        target: String = "Sources/App.swift",
+        impact: String = "Replaces the selected file content."
+    ) -> ApprovalView {
+        ApprovalView(
+            approvalId: "approval-1",
+            sessionId: "s-001",
+            toolName: "bash",
+            callId: "call-42",
+            reason: "Run verification",
+            version: 3,
+            expiresAtUnixMs: Int64(Date().addingTimeInterval(900).timeIntervalSince1970 * 1000),
+            digestHex: "abc123",
+            state: "pending",
+            reviewAction: action,
+            reviewTarget: target,
+            reviewImpact: impact,
+            reviewAvailability: availability
+        )
+    }
+
+    @Test("binding review facts map verbatim and incomplete facts stay allow-able")
+    func bindingReviewMapping() async {
+        let complete = LiveSessionService.map(approval: binding())
+        #expect(complete.review?.action == "Change one file")
+        #expect(complete.review?.target == "Sources/App.swift")
+        #expect(complete.review?.impact == "Replaces the selected file content.")
+        #expect(complete.review?.availability == .complete)
+        #expect(complete.review?.isComplete == true)
+
+        let completeService = StubSessionService()
+        let completeModel = await modelWithApproval(service: completeService, approval: complete)
+        #expect(completeModel.canAllowApproval(complete))
+        #expect(completeModel.approvalReviewLimitationKey(complete) == nil)
+
+        // The Host labels the review incomplete and omits one essential fact.
+        // The supplied facts stay visible with the limitation, and the user can
+        // still allow this exact variant once.
+        let incomplete = LiveSessionService.map(
+            approval: binding(availability: "incomplete", target: "")
+        )
+        #expect(incomplete.review?.action == "Change one file")
+        #expect(incomplete.review?.target == nil)
+        #expect(incomplete.review?.impact == "Replaces the selected file content.")
+        #expect(incomplete.review?.availability == .incomplete)
+        #expect(incomplete.review?.isComplete == false)
+        let incompleteService = StubSessionService()
+        incompleteService.resolveHandler = { _, _, _, _, _, _ in
+            var updated = incomplete
+            updated.state = .allowed
+            return updated
+        }
+        let incompleteModel = await modelWithApproval(
+            service: incompleteService,
+            approval: incomplete
+        )
+        #expect(incompleteModel.approvalReview(incomplete)?.target == nil)
+        #expect(incompleteModel.canAllowApproval(incomplete))
+        #expect(
+            incompleteModel.approvalReviewLimitationKey(incomplete)
+                == .approvalReviewIncomplete
+        )
+        await incompleteModel.resolveApproval(incomplete, allow: true)
+        #expect(incompleteService.resolveCalls.count == 1)
+        #expect(incompleteService.resolveCalls.first?.version == 3)
+        #expect(incompleteService.resolveCalls.first?.digest == "abc123")
+        #expect(incompleteModel.approvals.first?.state == .allowed)
+
+        // An absent projection is unavailable: the card exposes no invented
+        // fact or completeness claim, states the limitation, and still allows
+        // this exact variant once.
+        let absent = LiveSessionService.map(
+            approval: binding(
+                availability: "unavailable",
+                action: "",
+                target: "",
+                impact: ""
+            )
+        )
+        #expect(absent.review?.availability == .unavailable)
+        #expect(absent.review?.action == nil)
+        #expect(absent.review?.target == nil)
+        #expect(absent.review?.impact == nil)
+        let absentService = StubSessionService()
+        absentService.resolveHandler = { _, _, _, _, _, _ in
+            var updated = absent
+            updated.state = .allowed
+            return updated
+        }
+        let absentModel = await modelWithApproval(service: absentService, approval: absent)
+        #expect(absentModel.approvalReview(absent) == nil)
+        #expect(absentModel.canAllowApproval(absent))
+        #expect(absentModel.approvalReviewLimitationKey(absent) == .approvalDetailsHidden)
+        await absentModel.resolveApproval(absent, allow: true)
+        #expect(absentService.resolveCalls.count == 1)
+        #expect(absentService.resolveCalls.first?.version == 3)
+        #expect(absentService.resolveCalls.first?.digest == "abc123")
+        #expect(absentModel.approvals.first?.state == .allowed)
     }
 
     @Test("every approval state maps to a localized label")

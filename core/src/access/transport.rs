@@ -210,6 +210,7 @@ impl TransportBudget {
             capabilities: Some(crate::pairing::default_capabilities()),
             client_nonce: "nonce".into(),
             receive: Some(self.advertisement(1)?),
+            grant_id: String::new(),
         };
         let ready = ChannelReady {
             host_id: "host".into(),
@@ -218,6 +219,7 @@ impl TransportBudget {
             capabilities: Some(crate::pairing::default_capabilities()),
             host_nonce: "nonce".into(),
             receive: Some(self.advertisement(1)?),
+            grant_id: String::new(),
         };
         for (name, encoded) in [
             ("channel hello", hello.encoded_len()),

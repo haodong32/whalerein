@@ -388,6 +388,7 @@ test('when an approval is requested, the real adapter builds its digest, resolve
     toolName: 'bash',
     callId: 'call-1',
     reason: 'r',
+    arguments: { command: 'npm test' },
   }, async () => 'unavailable')[0]
   const approval = await adapter.getApproval('audit-1')
   assert.equal(approval.sessionId, 's1')
@@ -425,7 +426,7 @@ test('when approval digest/version, expiry, session state, or decision is invali
   adapter.subscribeApprovals((event) => {
     if (event.type === 'requested') requested.push(event.approval)
   })
-  const open = () => ctx.emit('approval/request', { agent: { session }, toolName: 'bash' }, async () => 'unavailable')[0]
+  const open = () => ctx.emit('approval/request', { agent: { session }, toolName: 'bash', arguments: { command: 'npm test' } }, async () => 'unavailable')[0]
 
   let outcome = open()
   const first = requested[0]
@@ -477,7 +478,7 @@ test('when an approval signal is already aborted it returns cancelled, and a tra
   assert.equal(await outcome, 'cancelled')
   assert.equal(requested.length, 0)
 
-  const pendingOutcome = ctx.emit('approval/request', { agent: { session }, toolName: 'bash' }, async () => 'unavailable')[0]
+  const pendingOutcome = ctx.emit('approval/request', { agent: { session }, toolName: 'bash', arguments: { command: 'npm test' } }, async () => 'unavailable')[0]
   const approval = requested[0]
   failState = true
   await assert.rejects(adapter.resolveApproval(approval.approvalId, 'approve', approval.digest, approval.version), (error) => error.code === 'approval_unavailable')
@@ -699,7 +700,7 @@ test('when diagnostics throw after an approval settles, a nested definitive erro
   const requested = []
   adapter.subscribeApprovals(event => { if (event.type === 'requested') requested.push(event.approval) })
   try {
-    const outcome = ctx.emit('approval/request', { agent: { session }, toolName: 'bash' }, async () => 'unavailable')[0]
+    const outcome = ctx.emit('approval/request', { agent: { session }, toolName: 'bash', arguments: { command: 'npm test' } }, async () => 'unavailable')[0]
     const approval = requested[0]
     await assert.rejects(adapter.resolveApproval(approval.approvalId, 'approve', approval.digest, approval.version), error =>
       error instanceof AdapterError && !(error instanceof DefinitiveExecutionError))
@@ -1276,7 +1277,7 @@ test('a pending approval expiring during native state lookup remains unsettled',
   await adapter.open()
   let approval
   adapter.subscribeApprovals(event => {if(event.type === 'requested')approval=event.approval})
-  const outcome = ctx.emit('approval/request',{agent:{session},toolName:'fixture'},async () => 'unavailable')[0]
+  const outcome = ctx.emit('approval/request',{agent:{session},toolName:'bash',arguments:{command:'npm test'}},async () => 'unavailable')[0]
   const command = {resolve_approval:{approval_id:approval.approvalId,decision:'APPROVAL_DECISION_APPROVE',expected_digest:approval.digest,expected_version:approval.version}}
   await assert.rejects(adapter.execute('s1',command,{expiresAt:2000}), error => error instanceof DefinitiveExecutionError && error.code === 'expired')
   assert.equal((await adapter.getApproval(approval.approvalId)).state,'pending')
@@ -1342,7 +1343,7 @@ test('channel lifecycle prevents approval settlement after native state precheck
   await adapter.open()
   const requests=[]
   adapter.subscribeApprovals(event=>{if(event.type==='requested')requests.push(event.approval)})
-  const outcome=ctx.emit('approval/request',{agent:{session},toolName:'fixture'},async()=> 'unavailable')[0]
+  const outcome=ctx.emit('approval/request',{agent:{session},toolName:'bash',arguments:{command:'npm test'}},async()=> 'unavailable')[0]
   const approval=requests[0]
   const abort=new AbortController()
   const pending=adapter.resolveApproval(approval.approvalId,'approve',approval.digest,approval.version,{signal:abort.signal})

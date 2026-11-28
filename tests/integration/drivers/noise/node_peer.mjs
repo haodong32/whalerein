@@ -20,9 +20,6 @@ const pluginRoot = resolve(root, 'host/runtime')
 const noise = await import(
   pathToFileURL(resolve(pluginRoot, 'src/security/noise.js')).href
 )
-const { chacha20poly1305 } = await import(
-  pathToFileURL(resolve(pluginRoot, 'node_modules/@noble/ciphers/chacha.js')).href
-)
 const { sha256 } = await import(
   pathToFileURL(resolve(pluginRoot, 'node_modules/@noble/hashes/sha2.js')).href
 )
@@ -31,11 +28,10 @@ const STATIC_DEVICE = '01'.repeat(32)
 const STATIC_HOST = '02'.repeat(32)
 const EPHEMERAL_DEVICE = '03'.repeat(32)
 const EPHEMERAL_HOST = '04'.repeat(32)
-const PROLOGUE = 'whalerein/v1/channel|host-fixture-1|device-fixture-1|channel-fixture-1'
+const PROLOGUE = 'whalerein/v2/channel|host-fixture-1|device-fixture-1|channel-fixture-1'
 const PAYLOAD_1 = Buffer.from('pairing-hello', 'utf8')
 const PAYLOAD_2 = Buffer.from('pairing-ready', 'utf8')
 const PAYLOAD_3 = Buffer.from('pairing-done', 'utf8')
-const NONCE = '00112233445566778899aabb'
 const PLAINTEXT = Buffer.from('whalerein test payload', 'utf8')
 
 function aad() {
@@ -84,19 +80,22 @@ function transcript() {
   if (!noise.equal(responder.remoteStaticKey, device.publicKey)) {
     throw new Error('responder learned the wrong remote static key')
   }
-  const keys = noise.deriveChannelKeys(initiator.handshakeHash, PROLOGUE)
-  // WIRE.md: channel_id = hex(SHA256(handshake_hash || "whalerein/v1/channel-id")[:16])
+  // Application keys are the secret Split outputs; `keyExport` is available
+  // only because this handshake injects fixed test ephemerals.
+  const cipher = initiator.takeChannelCipher()
+  const keys = cipher.keysHexForTest()
+  // This fixture channel id is a fixed label; a real channel id is chosen at
+  // random by the client and bound through the prologue.
   const channelId = noise.hex(
     sha256(
       Buffer.concat([
         Buffer.from(initiator.handshakeHash),
-        Buffer.from('whalerein/v1/channel-id', 'utf8'),
+        Buffer.from('whalerein/v2/channel-id-fixture', 'utf8'),
       ]),
     ).slice(0, 16),
   )
   const aadBytes = aad()
-  const nonce = noise.unhex(NONCE)
-  const ciphertext = chacha20poly1305(keys.c2h, nonce, aadBytes).encrypt(PLAINTEXT)
+  const sealed = cipher.seal('c2h', aadBytes, PLAINTEXT)
 
   return {
     comment: 'Test-only Noise XX transcript. Never use these keys.',
@@ -120,12 +119,13 @@ function transcript() {
     read3: Buffer.from(read3).toString('utf8'),
     handshake_hash: noise.hex(initiator.handshakeHash),
     channel_id: channelId,
-    c2h: noise.hex(keys.c2h),
-    h2c: noise.hex(keys.h2c),
+    split_fingerprint: cipher.keyFingerprint(),
+    c2h: keys.c2h,
+    h2c: keys.h2c,
     aad: noise.hex(aadBytes),
-    nonce: NONCE,
+    nonce: noise.hex(sealed.nonce),
     plaintext: PLAINTEXT.toString('utf8'),
-    ciphertext: noise.hex(ciphertext),
+    ciphertext: noise.hex(sealed.ciphertext),
   }
 }
 

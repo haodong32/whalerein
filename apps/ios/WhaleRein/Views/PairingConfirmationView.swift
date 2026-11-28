@@ -16,7 +16,7 @@ struct PairingConfirmationView: View {
                     .foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 12) {
-                    labeledValue(L10n.pairingHostLabel, value: promptHost)
+                    labeledValue(L10n.pairingHostLabel, value: promptHostLabel)
                         .accessibilityIdentifier("pairing.host")
                     VStack(alignment: .leading, spacing: 4) {
                         Text(L10n.pairingFingerprintLabel.key)
@@ -96,6 +96,15 @@ struct PairingConfirmationView: View {
 
     private var promptHost: String {
         pairing.prompt?.hostId ?? ""
+    }
+
+    /// Directory display metadata is advisory decoration. When Access did not
+    /// answer, the opaque Host id remains the only identity shown.
+    private var promptHostLabel: String {
+        guard let prompt = pairing.prompt else { return "" }
+        let name = prompt.displayName.isEmpty ? prompt.hostId : prompt.displayName
+        guard !prompt.osFamily.isEmpty else { return name }
+        return "\(name) (\(prompt.osFamily))"
     }
 
     private var promptFingerprint: String {

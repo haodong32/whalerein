@@ -10,9 +10,9 @@ use whalerein_core::api::bench::{
 };
 use whalerein_core::api::{
     AttachmentLimits, AttachmentReference, Cancellation, ClientService, CreateSessionInput,
-    DiagnosticContext, DownloadRequest, InputKind, ObservationInterests, PairingDecision,
-    PendingQueueAction, SecretStore, SendFollowUp, SendReply, SessionEventPayload, SessionKey,
-    SessionModel, WaitReason,
+    DiagnosticContext, DiagnosticExportMode, DiagnosticExportTarget, DownloadRequest, InputKind,
+    ObservationInterests, PairingDecision, PairingPrompt, PendingQueueAction, SecretStore,
+    SendFollowUp, SendReply, SessionEventPayload, SessionKey, SessionModel, WaitReason,
 };
 use whalerein_core::conversation::ViewUpdate;
 use whalerein_core::history::{HistoryPageRequest, MessageReference};
@@ -21,13 +21,13 @@ use whalerein_core::{Core, CoreError};
 use crate::cli::{Cli, Command, ModelAction, QueueCommand};
 use crate::diagnostics::CliDiagnosticSink;
 use crate::output::{
-    approval_data, command_data, core_error_outcome, doctor_data, download_data,
-    history_message_data, history_page_data, hosts_data, is_tail_output, lifecycle_error_code,
-    lifecycle_exit_code, manifest_data, message_json, render_approval, render_approvals,
-    render_command, render_doctor, render_download, render_history_message, render_history_page,
-    render_host_status, render_hosts, render_lifecycle_outcome, render_manifest, render_models,
-    render_pair, render_pairing_history, render_questions, render_queue, render_session_model,
-    render_sessions, retain_visible_sessions, sanitize_field, sessions_data, shell_quote,
+    approval_data, command_data, core_error_outcome, download_data, history_message_data,
+    history_page_data, hosts_data, is_tail_output, lifecycle_error_code, lifecycle_exit_code,
+    manifest_data, message_json, render_approval, render_approvals, render_command,
+    render_download, render_history_message, render_history_page, render_host_status, render_hosts,
+    render_lifecycle_outcome, render_manifest, render_models, render_pair, render_pairing_history,
+    render_questions, render_queue, render_session_model, render_sessions, render_snapshot,
+    retain_visible_sessions, sanitize_field, sessions_data, shell_quote, snapshot_data,
     tail_event_json, CliError, CliOutcome, DownloadProgressRenderer, TailRenderer,
 };
 
@@ -504,17 +504,6 @@ fn may_submit(command: &Command) -> bool {
                     | QueueCommand::Remove { .. }
                     | QueueCommand::Steer { .. },
             }
-    )
-}
-
-/// Human warning for a doctor report whose local cache could not be opened.
-///
-/// The report itself stays usable (exit 0); commands that need the real cache
-/// keep failing with `cache_error`.
-fn render_cache_warning(warning: &str) -> String {
-    format!(
-        "Warning: the local cache is unavailable ({}). Unfinished-command counts may be incomplete; cache-backed commands still fail until the cache is rebuilt.\n",
-        crate::output::sanitize_field(warning)
     )
 }
 
@@ -1321,6 +1310,10 @@ async fn dispatch(
                 }
             };
             let host = core.resolve_operation_host(cli.host.as_deref()).await?;
+            // Submit the resolution directly. The pinned DSH cannot describe
+            // the native arguments, so a local completeness gate would block
+            // every real remote Allow. Review facts remain a display aid and
+            // the Host stays authoritative for digest/version/state guards.
             match core.approve(&host, request, &digest, *version).await {
                 Ok(handle) => Ok(CliOutcome::success(
                     command,
@@ -1779,6 +1772,47 @@ fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
+/// Longest preview fragment the interactive prompt will show. Core already
+/// bounds these fields; the CLI repeats the bound so a future caller cannot
+/// turn the terminal prompt into an unbounded stream.
+const MAX_PAIRING_PREVIEW_CHARS: usize = 120;
+
+fn pairing_preview_field(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_PAIRING_PREVIEW_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// Human label for the advisory pre-pair directory preview.
+///
+/// The preview is decoration only: it is printed, never used for trust or a
+/// prompt decision. Both fields empty means no extra line at all.
+fn pairing_host_preview(prompt: &PairingPrompt) -> Option<String> {
+    let display_name = pairing_preview_field(&prompt.display_name);
+    let os_family = pairing_preview_field(&prompt.os_family);
+    match (display_name.is_empty(), os_family.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(format!("Host: {display_name}")),
+        (true, false) => Some(format!("Host: {os_family}")),
+        (false, false) => Some(format!("Host: {display_name} ({os_family})")),
+    }
+}
+
+fn pairing_prompt_lines(prompt: &PairingPrompt) -> Vec<String> {
+    let mut lines = Vec::with_capacity(4);
+    if let Some(preview) = pairing_host_preview(prompt) {
+        lines.push(preview);
+    }
+    lines.push(format!("Host ID: {}", prompt.host_id));
+    lines.push(format!("Access: {}", prompt.access_url));
+    lines.push(format!("Fingerprint: {}", prompt.fingerprint_display));
+    lines
+}
+
 async fn pair(
     core: &Core,
     command: &Command,
@@ -1851,9 +1885,9 @@ async fn pair(
         if yes {
             return PairingDecision::approve();
         }
-        eprintln!("Host: {}", prompt.host_id);
-        eprintln!("Access: {}", prompt.access_url);
-        eprintln!("Fingerprint: {}", prompt.fingerprint_display);
+        for line in pairing_prompt_lines(prompt) {
+            eprintln!("{line}");
+        }
         if prompt_yes_no("Pair with this host?") {
             PairingDecision::approve()
         } else {
@@ -2072,26 +2106,32 @@ fn doctor(
     cli: &Execution,
     export: Option<&std::path::Path>,
 ) -> Result<CliOutcome, CoreError> {
+    // Capture once before inspecting the destination. A failed capture returns
+    // an error and leaves no file to share.
+    let snapshot = core.diagnostics_snapshot()?;
     match export {
         Some(path) => {
-            // A directory is a usage error, not an internal write failure.
-            if path.exists() && path.is_dir() {
-                return Ok(CliOutcome::local_failure(
-                    command,
-                    "invalid_argument",
-                    "diagnostic export target must be a file, not a directory",
-                    2,
-                ));
-            }
-            if let Err(outcome) =
-                require_destructive_confirmation(command, cli, "Write the diagnostic bundle?")
-            {
-                return Ok(outcome);
-            }
+            let target = match core.diagnostic_export_target(path) {
+                Ok(target) => target,
+                Err(error) => return Ok(export_failure(command, error)),
+            };
+            let mode = match export_consent(
+                command,
+                cli.yes,
+                std::io::stdin().is_terminal(),
+                target,
+                prompt_yes_no,
+            ) {
+                Ok(mode) => mode,
+                Err(outcome) => return Ok(outcome),
+            };
             // The manifest fields and redactions are the only explanation; they
             // belong to the envelope, never to stderr, so `--json` keeps the
             // stream separation scripts rely on.
-            let manifest = core.export_diagnostics(path)?;
+            let manifest = match core.write_diagnostics_snapshot(&snapshot, path, mode) {
+                Ok(manifest) => manifest,
+                Err(error) => return Ok(export_failure(command, error)),
+            };
             Ok(CliOutcome::success(
                 command,
                 manifest_data(&manifest),
@@ -2099,18 +2139,76 @@ fn doctor(
             ))
         }
         None => {
-            // A corrupt cache must not make diagnostics unavailable: Core
-            // returns the degraded report plus an explicit warning.
-            let (report, cache_warning) = core.doctor_with_cache_status()?;
-            let mut data = doctor_data(&report);
-            let mut human = render_doctor(&report);
-            if let Some(warning) = cache_warning {
-                data["cache_warning"] = json!(warning);
-                human.push_str(&render_cache_warning(warning));
-            }
-            Ok(CliOutcome::success(command, data, human))
+            // The preview is the captured document's bounded summary; it has no
+            // file or upload side effect and is not a second report builder.
+            Ok(CliOutcome::success(
+                command,
+                snapshot_data(&snapshot),
+                render_snapshot(&snapshot),
+            ))
         }
     }
+}
+
+/// Decide whether a diagnostic destination may be created or replaced.
+///
+/// A new path needs no confirmation in terminal or noninteractive use. An
+/// existing regular file needs affirmative consent: `--yes`, or an explicit
+/// prompt answer on a terminal. A noninteractive invocation without `--yes`
+/// refuses before any write, and a negative answer preserves the file.
+#[allow(clippy::result_large_err)]
+fn export_consent(
+    command: &Command,
+    yes: bool,
+    interactive: bool,
+    target: DiagnosticExportTarget,
+    mut prompt: impl FnMut(&str) -> bool,
+) -> Result<DiagnosticExportMode, CliOutcome> {
+    match target {
+        DiagnosticExportTarget::New => Ok(DiagnosticExportMode::CreateNew),
+        DiagnosticExportTarget::ExistingRegularFile => {
+            match destructive_decision(yes, interactive) {
+                DestructiveDecision::Proceed => Ok(DiagnosticExportMode::ReplaceExisting),
+                DestructiveDecision::RefuseNonInteractive => Err(CliOutcome::local_failure(
+                    command,
+                    "invalid_argument",
+                    "Overwriting an existing diagnostic file requires affirmative consent. Re-run with --yes in non-interactive mode; nothing was overwritten.",
+                    2,
+                )),
+                DestructiveDecision::Ask => {
+                    if prompt("Overwrite the existing diagnostic file?") {
+                        Ok(DiagnosticExportMode::ReplaceExisting)
+                    } else {
+                        Err(CliOutcome::local_failure(
+                            command,
+                            "cancelled",
+                            "cancelled by the user; the existing diagnostic file was preserved",
+                            2,
+                        ))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Local write failures state whether anything was replaced.
+fn export_failure(command: &Command, error: CoreError) -> CliOutcome {
+    let code = error.code();
+    let exit = error.exit_code();
+    let message = match &error {
+        CoreError::InvalidInput(message) => {
+            format!("{message}; nothing was written")
+        }
+        CoreError::Conflict(message) => {
+            format!("{message}; choose a new path or confirm replacement")
+        }
+        CoreError::Internal(_) => {
+            "the diagnostic file could not be written; any existing file was preserved".into()
+        }
+        _ => error.to_string(),
+    };
+    CliOutcome::local_failure(command, code, message, exit)
 }
 
 /// Decision for a destructive command, factored out so a unit test never needs
@@ -3392,6 +3490,278 @@ mod instance_command_tests {
             json!({"host_id": "host-1", "session_id": "session-1"})
         );
     }
+
+    fn write_standalone_config(dir: &std::path::Path) -> std::path::PathBuf {
+        let config = dir.join("client.toml");
+        Core::write_config(
+            &config,
+            &ClientConfig::new(ClientService::Standalone, "instance"),
+        )
+        .unwrap();
+        config
+    }
+
+    fn doctor_command(export: Option<std::path::PathBuf>) -> Command {
+        Command::Doctor {
+            clear_diagnostics: false,
+            export,
+        }
+    }
+
+    fn execution(yes: bool) -> Execution {
+        Execution {
+            host: None,
+            json: true,
+            yes,
+            show_reasoning: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn doctor_export_creates_a_new_private_file_without_consent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_standalone_config(dir.path());
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let path = dir.path().join("new-report.json");
+
+        // Noninteractive without --yes: a fresh path is one explicit action.
+        let outcome = execute(
+            &config,
+            secrets,
+            &["doctor", "--export", path.to_str().unwrap()],
+        )
+        .await;
+        assert_eq!(outcome.exit, 0, "{outcome:?}");
+        assert!(path.exists());
+        let written = std::fs::read(&path).unwrap();
+        assert!(written.starts_with(b"{"));
+        assert_eq!(
+            outcome.to_json()["data"]["capture_id"]
+                .as_str()
+                .unwrap()
+                .len(),
+            32
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn doctor_export_requires_consent_before_replacing_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_standalone_config(dir.path());
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let path = dir.path().join("existing-report.json");
+        std::fs::write(&path, b"prior contents").unwrap();
+
+        // Noninteractive without --yes refuses and preserves the file.
+        let refused = execute(
+            &config,
+            secrets.clone(),
+            &["doctor", "--export", path.to_str().unwrap()],
+        )
+        .await;
+        assert_eq!(refused.exit, 2, "{refused:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"prior contents");
+
+        // Explicit noninteractive consent replaces it atomically.
+        let replaced = execute(
+            &config,
+            secrets,
+            &["doctor", "--export", path.to_str().unwrap(), "--yes"],
+        )
+        .await;
+        assert_eq!(replaced.exit, 0, "{replaced:?}");
+        let written = std::fs::read(&path).unwrap();
+        assert_ne!(written, b"prior contents");
+        assert!(written.starts_with(b"{"));
+    }
+
+    #[test]
+    fn export_consent_covers_new_tty_noninteractive_and_prompt_answers() {
+        let command = doctor_command(None);
+        assert_eq!(
+            export_consent(&command, false, false, DiagnosticExportTarget::New, |_| {
+                panic!("a new path never prompts")
+            })
+            .unwrap(),
+            DiagnosticExportMode::CreateNew
+        );
+        assert_eq!(
+            export_consent(&command, false, true, DiagnosticExportTarget::New, |_| {
+                panic!("a new path never prompts")
+            })
+            .unwrap(),
+            DiagnosticExportMode::CreateNew
+        );
+        assert!(export_consent(
+            &command,
+            false,
+            false,
+            DiagnosticExportTarget::ExistingRegularFile,
+            |_| panic!("noninteractive does not read stdin"),
+        )
+        .is_err());
+        assert_eq!(
+            export_consent(
+                &command,
+                false,
+                true,
+                DiagnosticExportTarget::ExistingRegularFile,
+                |_| true,
+            )
+            .unwrap(),
+            DiagnosticExportMode::ReplaceExisting
+        );
+        let refused = export_consent(
+            &command,
+            false,
+            true,
+            DiagnosticExportTarget::ExistingRegularFile,
+            |_| false,
+        )
+        .unwrap_err();
+        assert_eq!(refused.error.unwrap().code, "cancelled");
+        assert_eq!(
+            export_consent(
+                &command,
+                true,
+                false,
+                DiagnosticExportTarget::ExistingRegularFile,
+                |_| panic!("--yes does not prompt"),
+            )
+            .unwrap(),
+            DiagnosticExportMode::ReplaceExisting
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_and_export_consume_the_same_captured_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_standalone_config(dir.path());
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let core = Core::open(&config, secrets).unwrap();
+        let snapshot = core.diagnostics_snapshot().unwrap();
+
+        let preview = doctor(&core, &doctor_command(None), &execution(false), None).unwrap();
+        assert_eq!(preview.exit, 0);
+        assert_eq!(
+            preview.data.as_ref().unwrap()["capture_id"],
+            json!(snapshot.capture_id)
+        );
+
+        let path = dir.path().join("shared.json");
+        let exported = doctor(
+            &core,
+            &doctor_command(Some(path.clone())),
+            &execution(false),
+            Some(&path),
+        )
+        .unwrap();
+        assert_eq!(exported.exit, 0, "{exported:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), snapshot.bytes);
+        assert_eq!(
+            exported.data.as_ref().unwrap()["capture_id"],
+            json!(snapshot.capture_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_capture_returns_an_error_and_writes_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_standalone_config(dir.path());
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let core = Core::open(&config, secrets).unwrap();
+        core.force_diagnostic_capture_failure_for_tests(true);
+        let path = dir.path().join("must-not-exist.json");
+
+        let error = doctor(
+            &core,
+            &doctor_command(Some(path.clone())),
+            &execution(true),
+            Some(&path),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "internal");
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn doctor_export_refuses_symlinks_and_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_standalone_config(dir.path());
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"keep me").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let linked = execute(
+            &config,
+            secrets.clone(),
+            &["doctor", "--export", link.to_str().unwrap(), "--yes"],
+        )
+        .await;
+        assert_eq!(linked.exit, 2, "{linked:?}");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        let directory = dir.path().join("reports");
+        std::fs::create_dir(&directory).unwrap();
+        let refused = execute(
+            &config,
+            secrets,
+            &["doctor", "--export", directory.to_str().unwrap(), "--yes"],
+        )
+        .await;
+        assert_eq!(refused.exit, 2, "{refused:?}");
+        assert!(directory.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_export_preserves_the_existing_diagnostic_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_standalone_config(dir.path());
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let path = dir.path().join("existing.json");
+        std::fs::write(&path, b"prior contents").unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let failed = execute(
+            &config,
+            secrets.clone(),
+            &["doctor", "--export", path.to_str().unwrap(), "--yes"],
+        )
+        .await;
+        assert_ne!(failed.exit, 0, "{failed:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"prior contents");
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let succeeded = execute(
+            &config,
+            secrets,
+            &["doctor", "--export", path.to_str().unwrap(), "--yes"],
+        )
+        .await;
+        assert_eq!(succeeded.exit, 0, "{succeeded:?}");
+        assert_ne!(std::fs::read(&path).unwrap(), b"prior contents");
+    }
 }
 
 #[cfg(test)]
@@ -4328,5 +4698,59 @@ mod download_cli_tests {
             "staging data must be removed"
         );
         assert_eq!(f.access.host.lock().unwrap().attachment_close_calls, 0);
+    }
+}
+
+#[cfg(test)]
+mod pairing_prompt_cli_tests {
+    use super::*;
+
+    fn prompt(display_name: &str, os_family: &str) -> PairingPrompt {
+        PairingPrompt {
+            host_id: "host-1".into(),
+            access_url: "https://access.example.test".into(),
+            fingerprint: "ab".repeat(32),
+            fingerprint_display: "AB:CD".into(),
+            display_name: display_name.into(),
+            os_family: os_family.into(),
+        }
+    }
+
+    #[test]
+    fn preview_line_is_shown_only_when_a_field_is_present() {
+        let both = pairing_prompt_lines(&prompt("Studio Mac", "macos"));
+        assert_eq!(both[0], "Host: Studio Mac (macos)");
+        assert_eq!(both.len(), 4);
+        assert!(both.iter().any(|line| line == "Host ID: host-1"));
+        assert!(both
+            .iter()
+            .any(|line| line == "Access: https://access.example.test"));
+        assert!(both.iter().any(|line| line == "Fingerprint: AB:CD"));
+
+        let display_only = pairing_prompt_lines(&prompt("Studio Mac", ""));
+        assert_eq!(display_only[0], "Host: Studio Mac");
+
+        let os_only = pairing_prompt_lines(&prompt("", "macos"));
+        assert_eq!(os_only[0], "Host: macos");
+
+        let absent = pairing_prompt_lines(&prompt("", ""));
+        assert_eq!(absent.len(), 3);
+        assert!(absent.iter().all(|line| !line.starts_with("Host: ")));
+        assert_eq!(absent[0], "Host ID: host-1");
+    }
+
+    #[test]
+    fn preview_line_strips_controls_and_is_bounded() {
+        let hostile = prompt(&format!("Stu\ndio\u{1b}[31m{}", "x".repeat(500)), "mac\tos");
+        let lines = pairing_prompt_lines(&hostile);
+        let line = &lines[0];
+        assert!(line.starts_with("Host: Studio[31m"), "{line}");
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+        assert!(
+            line.len() <= "Host: ".len() + (MAX_PAIRING_PREVIEW_CHARS * 2) + 2,
+            "unbounded preview: {} bytes",
+            line.len()
+        );
     }
 }

@@ -256,6 +256,18 @@ user table. The invitation token is random (32 bytes, base64url), stored only
 as `SHA-256(token)`, bound to one `host_id`, expires after a few minutes, and
 is rejected after a bounded number of failed claims.
 
+`HostReady.display_name` (at most 64 characters, controls stripped) and
+`os_family` (at most 16, `[A-Za-z0-9 ._-]`) are advisory directory metadata.
+They never derive the Host id, route, fingerprint or any grant. Access persists
+them for the ready Host and exposes them before pairing through
+`GET /v1/hosts/{host_id}/directory` with `Authorization: Bearer <invitation
+token>`. The route accepts only the exact unused, unexpired invitation for that
+Host, returns `HostDirectory{host_id, display_name, os_family}` as protojson with
+`Cache-Control: no-store`, creates no account or grant, does not consume the
+invitation, and answers every invalid/unknown/expired/used/wrong-host token as
+the same 404. The returned values are display decoration; a client must not use
+them for pinning, authority or a pairing decision.
+
 A host revokes one of its own grants with
 `POST /v1/hosts/{host_id}/devices/{device_id}/revocation` and
 `HostGrantRevocation`. The signed message is
@@ -354,8 +366,15 @@ Access, Core/CLI and Host together. Missing or mismatched hashes fail pairing.
 After pairing, both sides run Noise XX with prologue:
 
 ```text
-whalerein/v1/channel|{host_id}|{device_id}|{channel_id}
+whalerein/v2/channel|{host_id}|{device_id}|{channel_id}
 ```
+
+`whalerein/v2` is the application-channel suite epoch. It marks the Split-key
+key schedule, the monotonic record counters and the v2 AAD domains below. A
+retired `whalerein/v1` peer mixes a different prologue into the transcript and
+fails the handshake itself; a v1 frame cannot authenticate under a v2 key or
+AAD. Both sides must upgrade together. Pairing keeps its
+`whalerein/v1/pairing|...` prologue.
 
 A channel handshake is two `HostRequest{kind=HANDSHAKE}` calls on the MQTT query
 lane, after the authorized subscription and readiness exist on the admitted
@@ -375,14 +394,39 @@ splitting; `ChannelReady.receive` is the Host budget the Device uses. A
 version or relay-epoch mismatch rejects the handshake with
 `protocol_version_incompatible` before any command executes.
 
+`ChannelHello.grant_id` names the exact Host-owned grant the Device expects.
+The Host snapshots the one active `(host public key, device public key)` grant
+at msg1 and installs the channel only if that same grant is still active and
+matches the Noise static key at msg3. A non-empty `grant_id` that differs from
+the snapshot fails the handshake at msg1 with `forbidden` and leaves no pending
+handshake, channel or execution. `ChannelReady.grant_id` echoes the snapshot
+grant inside the encrypted msg2. An empty value is accepted only from a legacy
+Device; it never relaxes the Host's snapshot or msg3 re-check. An old Host that
+has no Host-owned grant returns an empty `PairingClaimResponse.grant_id`, and a
+Device with an empty local value sends an empty hello.
+
 Key schedule:
 
 ```text
-handshake_hash = Noise XX handshake hash after msg3
-root           = HKDF-SHA256(ikm=handshake_hash, salt=prologue, info="whalerein/v1/channel-keys", L=64)
-c2h            = root[0..32]   device -> host
-h2c            = root[32..64]  host -> device
+(k1, k2) = Noise XX Split(ck)         # secret chaining key after msg3
+c2h      = k1   device -> host
+h2c      = k2   host -> device
+handshake_hash = Noise XX handshake hash after msg3   # public; proof only
 ```
+
+Application traffic keys are the secret Split outputs. `k1` protects
+initiator-to-responder records and `k2` protects responder-to-initiator
+records; the Device is always the Noise initiator, so it seals requests with
+`c2h` and opens responses/events with `h2c`, and the Host does the reverse.
+The Split computation is the Noise-defined
+`HKDF-SHA256(salt=ck, ikm=empty, info=empty, L=64)` producing `k1 || k2`.
+Nothing in this schedule hashes the observable transcript into a key.
+
+`handshake_hash` stays public and is retained only as the App-session proof and
+channel binding (`submit_session_proof` and its Host verification). It is never
+an application-key input and must not be logged as key material. No diagnostic
+surface emits `c2h`, `h2c` or `ck`; a non-reversible split fingerprint is the
+only key-derived value an interop diagnostic may compare.
 
 `channel_id` is the client-chosen random secure-channel id from the handshake
 request. Both sides bind it through the Noise prologue, so a successful
@@ -390,21 +434,46 @@ handshake authenticates it; no second derived id is used. Every frame and event
 for this channel carries that same `channel_id`.
 
 Application messages use `EncryptedFrame{channel_id, nonce, ciphertext}` where
-`nonce` is 12 random bytes and `ciphertext` is ChaCha20-Poly1305. AAD is:
+`ciphertext` is ChaCha20-Poly1305 and `nonce` is a per-channel, per-direction
+monotonic 64-bit record counter:
 
 ```text
-request: whalerein/v1/request|{request_id}|{host_id}|{device_id}|{kind}|{command_id}|{expires_at_unix_ms}
-event:   whalerein/v1/event|{host_id}|{device_id}|{channel_id}|{created_at_unix_ms}
+nonce = 00 00 00 00 || uint64_be(counter)
 ```
 
+Each direction starts at counter 0 and increments once per record. The four
+leading zero bytes are the suite epoch check: a retired random nonce is
+rejected as `invalid nonce` instead of being read as a counter. A sender that
+reaches `2^64 - 1` fails closed with `nonce counter exhausted`; reuse requires
+a fresh handshake with fresh ephemeral keys. AAD is:
+
+```text
+request: whalerein/v2/request|{request_id}|{host_id}|{device_id}|{kind}|{command_id}|{expires_at_unix_ms}
+event:   whalerein/v2/event|{host_id}|{device_id}|{channel_id}|{created_at_unix_ms}
+```
+
+The receiver keeps an authenticated 128-record window per direction. A record
+whose counter is above the highest accepted one is accepted and slides the
+window; a counter already inside the window is a duplicate and is rejected as a
+replay; a counter older than the window is rejected as stale. Authentication
+runs before the window advances, so a wrong AAD or MAC never moves it: the
+intact record with the same counter may still be accepted. Out-of-order
+completion within the window is supported, so concurrent in-flight requests and
+responses may finish in any order. The window is not a second message
+identity: `request_id`/`command_id` dedupe, typed history intervals and live
+Attempt sequences still suppress business-level repeats, but an exact
+retransmitted frame is rejected at the channel layer and recovery uses a fresh
+authenticated lookup.
+
 A Host can keep multiple channels for the same Device. Each channel has its
-own keys and observation state. A new handshake leaves other channels active.
-The Host bounds live channels per Device and globally and reclaims channels
-after an idle interval. An authenticated in-flight request retains its channel
-through the response. Revoking a grant closes all channels for that grant.
-A wrong or closed channel, failed MAC or failed AAD rejects the message without
-side effects. Replays are handled by `request_id`/`command_id` dedupe, typed
-history intervals and live Attempt sequences. None is a nonce.
+own keys, counters, replay windows and observation state. A new handshake leaves
+other channels active. The Host bounds live channels per Device and globally
+and reclaims channels after an idle interval. An authenticated in-flight
+request retains its channel through the response. Revoking a grant closes all
+channels for that grant. A wrong or closed channel, a bad nonce encoding, a
+failed MAC or a failed AAD rejects the message without side effects. The
+retired `whalerein/v1` transcript-derived suite and its random nonces are not
+accepted on this epoch.
 
 ## Requests and results
 
@@ -639,6 +708,15 @@ readiness signal. The host sets `revocations_pending=true` when it connects and
 rejects every new channel handshake until it has received a
 `RevocationNotice{final=true}` (an empty final batch when nothing is pending).
 
+The Host also owns an opaque `grant_id` for each grant. A COMMIT
+acknowledgement carries it in `PairingClaimResult.grant_id`; Access persists it
+in `pairing_outcomes.grant_id` and returns it to the Device as
+`PairingClaimResponse.grant_id` on success and on an exact FINISH retry after a
+lost response or restart, without a second Host round trip. It is not derived
+from a name, account or route. An empty value means an old Host that predates
+Host-owned grants; Access preserves a previously stored value when a later
+confirmation arrives empty.
+
 Each `(host_id, device_id)` grant has an Access-owned monotonic generation.
 Pairing COMMIT carries `PairingClaim.grant_generation`; the direct notice and
 its durable outbox record use the same committed value. Revocation notices carry
@@ -753,6 +831,7 @@ POST   /v1/pairing/claims              token in body
 GET    /v1/hosts                       device bearer token
 POST   /v1/hosts/{host_id}/requests     device bearer token
 GET    /v1/hosts/{host_id}/authority    device bearer token
+GET    /v1/hosts/{host_id}/directory    invitation token (pre-pair display metadata)
 GET    /v1/requests/{request_id}        device bearer token
 POST   /v1/requests/{request_id}/heartbeat  device bearer token
 DELETE /v1/devices/{device_id}          device bearer token (self) or admin
@@ -1211,24 +1290,38 @@ silently start distinguishing an absent field from its default.
 ```text
 escape(field) = field with "\" -> "\\" and "|" -> "\|"
 digest = SHA-256(
-  "whalerein/v1/approval|{escape(approval_id)}|{escape(session_id)}|" +
+  "whalerein/v2/approval|{escape(approval_id)}|{escape(session_id)}|" +
   "{escape(tool_name)}|{escape(call_id)}|{escape(reason)}|" +
-  "{version}|{expires_at_unix_ms}"
+  "{escape(review_action)}|{escape(review_target)}|{escape(review_impact)}|" +
+  "{availability}|{version}|{expires_at_unix_ms}"
 )
+availability = complete | incomplete | unavailable
 ```
 
-Every string field is escaped before joining, so a reason or tool name that
-contains `|` or `\` cannot shift a field boundary. Values without either byte
-keep their historical digest. Both Core (`core::security::approval_digest`) and
-the Host connector (`approvalDigest`) must match the vectors in
+Every string field is escaped before joining, so content that contains `|` or
+`\` cannot shift a field boundary. `value` changes when a bounded review fact
+changes, so a caller that reviewed one target cannot resolve a call whose target
+now differs. Both Core (`core::security::approval_digest`) and the Host
+connector (`approvalDigest`) must match the vectors in
 `proto/v1/approval_digest_vectors.json`; the Rust and Node unit tests read the
 same file.
 
+The Host projects `review_action`, `review_target`, `review_impact` and
+`review_availability` from the live native approval only. The values are
+bounded, credential-masked and never contain the raw argument map. The review
+fields are advisory display data, not an authorization gate. The Host admits an
+explicit remote `approve` even when the review is `incomplete`/`unavailable`,
+because the pinned DSH exposes no argument map before the approval waterfall;
+clients show the limitation, keep the version/digest guard, and never infer
+unavailable context from a tool name, reason or free text. `reject` and local
+review remain available.
+
 The digest and version live only inside encrypted commands and events. The
 client sends them back with `ResolveApproval`; the plugin checks pending state,
-expiry, digest, version and task state, then resolves exactly once. Any mismatch
-or late resolve returns `approval_expired`, `approval_version_mismatch` or
-`approval_already_resolved` and never reaches DSH.
+expiry, digest, version and task state, then resolves
+exactly once. Any mismatch or late resolve returns `approval_expired`,
+`approval_version_mismatch`, `approval_already_resolved` or
+`approval_unavailable` and never reaches DSH.
 
 ## Logical MQTT transport
 

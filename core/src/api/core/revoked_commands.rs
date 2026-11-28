@@ -1,4 +1,6 @@
-//! Minimal, payload-free identities retained after a pairing is revoked.
+//! Minimal, payload-free identities retained after a pairing is revoked, plus
+//! the durable profile marker for a service-denial observation or revocation
+//! intent awaiting confirmation.
 use crate::api::{CoreError, CoreResult, PendingCommand};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};

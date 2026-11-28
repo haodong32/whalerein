@@ -150,6 +150,12 @@ final class ConversationModel {
         get { state.watch.suspended }
         set { state.watch.suspended = newValue }
     }
+    /// True while visible rendering is paused for an inactive or shielded
+    /// scene. The watch and its cursor are untouched.
+    var isRenderingPaused: Bool {
+        get { state.watch.paused }
+        set { state.watch.paused = newValue }
+    }
     var isReconnecting: Bool {
         get { state.watch.reconnecting }
         set { state.watch.reconnecting = newValue }

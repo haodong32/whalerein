@@ -249,6 +249,14 @@ fn pairing_enables_hosts_drafts_and_redacted_export() {
     // Explicit clear is idempotent.
     core.clear_draft(host_id.clone(), session_id).unwrap();
 
+    let snapshot = core.diagnostics_snapshot().unwrap();
+    assert_eq!(snapshot.hosts.len(), 1);
+    assert_eq!(snapshot.hosts[0].label, "host-1");
+    assert_eq!(snapshot.hosts[0].host_ref, host_id);
+    assert!(!snapshot.text.contains(&host_id));
+    assert!(!snapshot.summary.contains(&host_id));
+    assert!(!String::from_utf8_lossy(&snapshot.bytes).contains(&host_id));
+
     let preview = core.diagnostics_preview().unwrap();
     assert!(!preview.json.contains("unsent draft"));
     assert!(!preview.json.contains(&host_id));
@@ -1303,6 +1311,11 @@ fn exact_approval_read_is_host_scoped_and_carries_the_guard() {
             expires_at_unix_ms: 1_900_000_000_000,
             digest: vec![7; 32],
             state: whalerein_proto::ApprovalState::Pending as i32,
+            review_action: "Change [REDACTED] credential scope".into(),
+            review_target: "Sources/[REDACTED].swift".into(),
+            review_impact: "Replaces the selected file content.".into(),
+            review_availability: whalerein_proto::ApprovalReviewAvailability::ApprovalReviewComplete
+                as i32,
             ..Default::default()
         });
     }
@@ -1316,6 +1329,28 @@ fn exact_approval_read_is_host_scoped_and_carries_the_guard() {
     assert_eq!(exact.version, 3);
     assert_eq!(exact.digest_hex, "07".repeat(32));
     assert_eq!(exact.expires_at_unix_ms, 1_900_000_000_000);
+    assert_eq!(exact.review_action, "Change [REDACTED] credential scope");
+    assert_eq!(exact.review_target, "Sources/[REDACTED].swift");
+    assert_eq!(exact.review_impact, "Replaces the selected file content.");
+    assert_eq!(exact.review_availability, "complete");
+
+    // An absent projection is unavailable, not complete. The binding never
+    // reconstructs a fact from the tool name or reason.
+    {
+        let mut host = access.host.lock().unwrap();
+        host.approvals[0].review_action = String::new();
+        host.approvals[0].review_target = String::new();
+        host.approvals[0].review_impact = String::new();
+        host.approvals[0].review_availability =
+            whalerein_proto::ApprovalReviewAvailability::ApprovalReviewUnspecified as i32;
+    }
+    let absent = core
+        .get_approval(host_id.clone(), "approval-1".into())
+        .unwrap();
+    assert_eq!(absent.review_availability, "unavailable");
+    assert!(absent.review_action.is_empty());
+    assert!(absent.review_target.is_empty());
+    assert!(absent.review_impact.is_empty());
 
     // Missing identities and Hosts outside the original scope never guess.
     assert_eq!(
@@ -2376,6 +2411,43 @@ fn redacted_diagnostics_never_carry_synthetic_private_markers() {
     }
     // The report is written only after the caller asks for it.
     assert!(path.exists());
+}
+
+#[test]
+fn diagnostic_snapshot_is_one_capture_and_matches_the_saved_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = new_core(dir.path());
+
+    let snapshot = core.diagnostics_snapshot().unwrap();
+    assert_eq!(snapshot.bytes, snapshot.text.as_bytes());
+    assert!(!snapshot.capture_id.is_empty());
+    assert!(snapshot.capture_time_unix_ms > 0);
+    assert!(!snapshot.summary.is_empty());
+    assert!(snapshot.summary.contains(&snapshot.capture_id));
+
+    // Preview decodes the captured bytes; it writes nothing.
+    let preview = core.diagnostics_preview().unwrap();
+    assert_eq!(preview.json, snapshot.text);
+    let path = dir.path().join("snapshot.json");
+    assert!(!path.exists());
+
+    // Save returns exactly the bytes the file received.
+    let export = core
+        .export_diagnostics(path.to_string_lossy().into_owned())
+        .unwrap();
+    assert_eq!(export.json, snapshot.text);
+    assert_eq!(export.last_failure_code, snapshot.last_failure_code);
+    assert_eq!(std::fs::read(&path).unwrap(), snapshot.bytes);
+
+    // Process state changes and repeated reads do not replace the capture.
+    let again = core.diagnostics_snapshot().unwrap();
+    assert_eq!(again.capture_id, snapshot.capture_id);
+    assert_eq!(again.bytes, snapshot.bytes);
+
+    // Only an explicit refresh creates a new capture.
+    let refreshed = core.refresh_diagnostics().unwrap();
+    assert_ne!(refreshed.capture_id, snapshot.capture_id);
+    assert_eq!(core.diagnostics_snapshot().unwrap().bytes, refreshed.bytes);
 }
 
 /// HOST-5: a `pairing_start` that times out waiting for Core's prompt must not
