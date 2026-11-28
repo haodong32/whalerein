@@ -73,7 +73,10 @@ export function assertRequestRepresentation(request) {
   }
   if (INLINE_ONLY_REQUESTS.has(request?.kind)) {
     if (referenced) throw new PluginError('invalid_argument', 'bootstrap request must stay inline')
-    if (!inline) throw new PluginError('invalid_argument', 'bootstrap request body missing')
+    // HOST_CLIENTS is a status-only probe: Access publishes it with no body.
+    if (!inline && request?.kind !== 'REQUEST_KIND_HOST_CLIENTS') {
+      throw new PluginError('invalid_argument', 'bootstrap request body missing')
+    }
     return request
   }
   if (request?.kind === 'REQUEST_KIND_QUERY' || request?.kind === 'REQUEST_KIND_COMMAND') {
