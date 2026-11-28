@@ -183,6 +183,11 @@ test('representation validation rejects both, neither and the wrong epoch', () =
     (error) => error.code === 'invalid_argument',
   )
   assert.doesNotThrow(() => assertRequestRepresentation({ kind: 'REQUEST_KIND_HANDSHAKE', body: new Uint8Array([1]) }))
+  assert.doesNotThrow(() => assertRequestRepresentation({ kind: 'REQUEST_KIND_HOST_CLIENTS' }))
+  assert.throws(
+    () => assertRequestRepresentation({ kind: 'REQUEST_KIND_HOST_CLIENTS', body_reference: { object_id: 'a'.repeat(32) } }),
+    (error) => error.code === 'invalid_argument',
+  )
   assert.throws(
     () => assertRequestRepresentation({ kind: 'REQUEST_KIND_HANDSHAKE', body_reference: { object_id: 'a'.repeat(32) } }),
     (error) => error.code === 'invalid_argument',
